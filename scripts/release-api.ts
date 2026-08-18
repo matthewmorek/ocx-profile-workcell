@@ -3,7 +3,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fail, parseArguments, parseTag, readJsonc, requiredArgument, resolvedInside, sha256, sha256File, writeJsonAtomic } from "./common";
 import { classifyFailedFirstPublicationRecovery, classifyProductionState, parseReleaseManifest, parseRemoteRelease, type FailedFirstPublicationRecoveryPhase, type RemoteRelease } from "./release-state";
 
-type ReleaseAsset = Readonly<{ name: string; browser_download_url: string }>;
+type ReleaseAsset = Readonly<{ id: number; name: string; url: string; browser_download_url?: string }>;
 type Release = RemoteRelease & Readonly<{ upload_url: string; assets: readonly ReleaseAsset[] }>;
 type FetchLike = typeof fetch;
 type BundleAsset = Readonly<{ path: string; name: string; sha256: string }>;
@@ -27,6 +27,12 @@ const apiHeaders = (token: string): HeadersInit => ({
   "X-GitHub-Api-Version": "2022-11-28",
 });
 
+const assetDownloadHeaders = (token: string): HeadersInit => ({ ...apiHeaders(token), Accept: "application/octet-stream" });
+const trustedReleaseAssetHosts = new Set([
+  "release-assets.githubusercontent.com",
+  "github-production-release-asset-2e65be.s3.amazonaws.com",
+]);
+
 function requiredToken(values: Map<string, string>): string {
   const value = process.env[requiredArgument(values, "--token-env")];
   if (!value) fail("Release API token environment variable is unset.");
@@ -42,6 +48,10 @@ function parseReleaseId(value: string): number {
   const releaseId = Number(value);
   if (!Number.isSafeInteger(releaseId)) fail("Expected release ID must be a safe integer.");
   return releaseId;
+}
+
+function parseAssetId(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 export function parseReleaseBundle(value: unknown, tag: string, bundlePath: string): ReleaseBundle {
@@ -73,7 +83,9 @@ function parseRelease(value: unknown): Release | undefined {
   const assets = candidate.assets.map((asset): ReleaseAsset | undefined => {
     if (!asset || typeof asset !== "object") return undefined;
     const item = asset as Record<string, unknown>;
-    return typeof item.name === "string" && typeof item.browser_download_url === "string" ? { name: item.name, browser_download_url: item.browser_download_url } : undefined;
+    const id = parseAssetId(item.id);
+    if (!id || typeof item.name !== "string" || !item.name || typeof item.url !== "string") return undefined;
+    return typeof item.browser_download_url === "string" ? { id, name: item.name, url: item.url, browser_download_url: item.browser_download_url } : { id, name: item.name, url: item.url };
   });
   if (assets.some((asset) => !asset)) return undefined;
   return { ...base, upload_url: candidate.upload_url, assets: assets as ReleaseAsset[] };
@@ -113,14 +125,49 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
 
   async function getRelease(repository: string, tag: string): Promise<Release | undefined> { return selectRelease(await listReleases(repository), tag); }
 
-  async function downloadAsset(asset: ReleaseAsset): Promise<Uint8Array> {
-    const response = await request(asset.browser_download_url, { headers: apiHeaders(token) });
-    if (!response.ok) fail(`Unable to download release asset ${asset.name}: ${response.status}.`);
-    return new Uint8Array(await response.arrayBuffer());
+  function validatedAssetApiUrl(repository: string, asset: ReleaseAsset): string {
+    let url: URL;
+    try { url = new URL(asset.url); }
+    catch { fail(`Release asset ${asset.name} has a malformed API URL.`); }
+    const expectedPath = `/repos/${repository}/releases/assets/${asset.id}`;
+    if (url.origin !== "https://api.github.com" || url.username || url.password || url.search || url.hash || url.pathname !== expectedPath) fail(`Release asset ${asset.name} API URL does not match its repository and ID.`);
+    return url.toString();
   }
 
-  async function assertReleaseAssets(current: Release, assets: readonly BundleAsset[], requireAll: boolean): Promise<void> {
+  function trustedReleaseAssetRedirect(asset: ReleaseAsset, location: string | null): URL {
+    if (!location) fail(`Release asset ${asset.name} redirect is missing Location.`);
+    let url: URL;
+    try { url = new URL(location); }
+    catch { fail(`Release asset ${asset.name} redirect Location is malformed.`); }
+    if (url.protocol !== "https:" || url.username || url.password || url.port || !trustedReleaseAssetHosts.has(url.hostname)) fail(`Release asset ${asset.name} redirect Location is not a trusted HTTPS release asset URL.`);
+    return url;
+  }
+
+  async function downloadAsset(repository: string, asset: ReleaseAsset): Promise<Uint8Array> {
+    const apiUrl = validatedAssetApiUrl(repository, asset);
+    const response = await request(apiUrl, { headers: assetDownloadHeaders(token), redirect: "manual" });
+    if (response.redirected || (response.url && response.url !== apiUrl)) {
+      fail(`Release asset ${asset.name} returned an unexpected response URL.`);
+    }
+    if (response.status === 200) return new Uint8Array(await response.arrayBuffer());
+    if (response.status !== 302) fail(`Unable to download release asset ${asset.name}: ${response.status}.`);
+    const signedAssetUrl = trustedReleaseAssetRedirect(asset, response.headers.get("location"));
+    const signedResponse = await request(signedAssetUrl, { redirect: "manual", credentials: "omit" });
+    if (signedResponse.redirected || signedResponse.status !== 200) fail(`Release asset ${asset.name} signed URL returned an unexpected redirect or response: ${signedResponse.status}.`);
+    return new Uint8Array(await signedResponse.arrayBuffer());
+  }
+
+  function assertDistinctAssetIds(assets: readonly ReleaseAsset[]): void {
+    const ids = new Set<number>();
+    for (const asset of assets) {
+      if (ids.has(asset.id)) fail(`Release contains duplicate asset ID ${asset.id}.`);
+      ids.add(asset.id);
+    }
+  }
+
+  async function assertReleaseAssets(repository: string, current: Release, assets: readonly BundleAsset[], requireAll: boolean): Promise<void> {
     const existingByName = new Map<string, ReleaseAsset>();
+    assertDistinctAssetIds(current.assets);
     for (const asset of current.assets) {
       if (existingByName.has(asset.name)) fail(`Release contains duplicate asset ${asset.name}.`);
       existingByName.set(asset.name, asset);
@@ -135,7 +182,7 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
         if (requireAll) fail(`Published release is missing required asset ${expected.name}.`);
         continue;
       }
-      if (sha256(await downloadAsset(existing)) !== expected.sha256) fail(`Existing release asset ${expected.name} diverges; refusing overwrite.`);
+      if (sha256(await downloadAsset(repository, existing)) !== expected.sha256) fail(`Existing release asset ${expected.name} diverges; refusing overwrite.`);
     }
   }
 
@@ -153,7 +200,7 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
         if (!current) fail("Created GitHub Release has an unexpected shape.");
       }
     }
-    await assertReleaseAssets(current, assets, !current.draft);
+    await assertReleaseAssets(repository, current, assets, !current.draft);
     if (!current.draft) return;
     const existingNames = new Set(current.assets.map(({ name }) => name));
     for (const asset of assets) {
@@ -167,13 +214,13 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
     }
     const complete = await getRelease(repository, tag);
     if (!complete) fail("GitHub Release disappeared after asset upload.");
-    await assertReleaseAssets(complete, assets, true);
+    await assertReleaseAssets(repository, complete, assets, true);
   }
 
   async function assertDraft(repository: string, tag: string, bundle: ReleaseBundle): Promise<void> {
     const current = await getRelease(repository, tag);
     if (!current || !current.draft) fail("Exact recovery draft does not exist.");
-    await assertReleaseAssets(current, await immutableBundleAssets(bundle), true);
+    await assertReleaseAssets(repository, current, await immutableBundleAssets(bundle), true);
   }
 
   async function downloadRelease(repository: string, tag: string, destination: string): Promise<void> {
@@ -181,8 +228,9 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
     if (!current || current.draft) fail(`Requested published release ${tag} does not exist.`);
     const expectedNames = bundleAssetNames(tag);
     if (current.assets.length !== expectedNames.length || new Set(current.assets.map(({ name }) => name)).size !== expectedNames.length || current.assets.some(({ name }) => !expectedNames.includes(name))) fail(`Release ${tag} does not have the immutable asset set.`);
+    assertDistinctAssetIds(current.assets);
     await mkdir(destination, { recursive: true });
-    for (const asset of current.assets) await Bun.write(join(destination, asset.name), await downloadAsset(asset));
+    for (const asset of current.assets) await Bun.write(join(destination, asset.name), await downloadAsset(repository, asset));
     const downloadedAssets = current.assets.map((asset) => ({ path: join(destination, asset.name), name: asset.name, sha256: "" }));
     for (const asset of downloadedAssets) {
       if (!await Bun.file(asset.path).exists()) fail(`Downloaded release asset is missing: ${asset.name}.`);
@@ -204,13 +252,13 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
     if (draft.id !== expectedReleaseId) fail("Exact recovery draft ID changed before publication.");
     if (!draft.draft) fail("Exact recovery release is already published; refusing a generic no-op.");
     if (releasesBeforePublish.length !== 1) fail("Exact recovery requires the sole repository release to be the target draft.");
-    await assertReleaseAssets(draft, assets, true);
+    await assertReleaseAssets(repository, draft, assets, true);
     await requestApi(`/repos/${repository}/releases/${draft.id}`, { method: "PATCH", body: JSON.stringify({ draft: false }) });
     const releasesAfterPublish = await listReleases(repository);
     const published = selectRelease(releasesAfterPublish, tag);
     if (!published || published.id !== expectedReleaseId || published.draft) fail("Exact recovery publication postcondition failed.");
     if (releasesAfterPublish.length !== 1) fail("Exact recovery publication changed the repository release inventory.");
-    await assertReleaseAssets(published, assets, true);
+    await assertReleaseAssets(repository, published, assets, true);
   }
 
   return { listReleases, getRelease, ensureDraft, assertDraft, downloadRelease, publishRelease, publishExactRelease };
