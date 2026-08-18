@@ -1,0 +1,33 @@
+name: validate
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  validate-pinned:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { persist-credentials: false }
+      - name: Assert trusted runner and bootstrap pinned tools
+        uses: ./.github/actions/bootstrap-pinned
+      - run: |
+          bun --version; "$OCX_BIN" --version; "$OPENCODE_BIN" --version
+          bun install --frozen-lockfile
+          VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
+          bun run validate -- --version "$VERSION" --commit "$GITHUB_SHA" --work-dir "$RUNNER_TEMP/validate"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: validation
+          path: ${{ runner.temp }}/validate
+  validate-latest:
+    if: github.event_name == 'pull_request'
+    continue-on-error: true
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/bootstrap-pinned
+      - run: bun install --frozen-lockfile && bun test tests

@@ -1,0 +1,19 @@
+{
+  "name": "ocx-workspace-profile",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "bun@1.3.5",
+  "scripts": {
+    "build": "bun run scripts/build-registry.ts",
+    "test": "bun test tests",
+    "validate": "bun run scripts/validate.ts",
+    "package:release": "bun run scripts/package-release.ts",
+    "provenance": "bun run scripts/provenance.ts",
+    "release:api": "bun run scripts/release-api.ts",
+    "verify:install": "bun run scripts/verify-install.ts",
+    "verify:release": "bun run scripts/verify-release.ts"
+  },
+  "devDependencies": {
+    "jsonc-parser": "3.3.1"
+  }
+}

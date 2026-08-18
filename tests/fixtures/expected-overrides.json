@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "canonicalOverrideSha256": "09a80ff1f437a3f33a2708e417809151c963acd814bbf544ab30c54e78dd1135",
+  "models": {
+    "model": "openai/gpt-5.6-sol",
+    "small_model": "openai/gpt-5.6-luna"
+  },
+  "mcpKeys": ["context7", "exa", "gh_grep", "linear"],
+  "plugins": ["opencode-vibeguard@0.1.0", "@plannotator/opencode@0.26.0"]
+}
