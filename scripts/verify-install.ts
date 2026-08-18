@@ -1,7 +1,7 @@
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fail, parseArguments, parseVersion, readJsonc, repositoryRoot, requiredArgument, temporaryDirectory, writeJsonAtomic } from "./common";
-import { assertEvidenceIsSafe, parseInstallReceipt, sanitizeEvidenceValue, type InstallAttemptOutcome, type InstallEvidence } from "./evidence";
+import { assertEvidenceIsSafe, assertReceiptProfileRoot, parseInstallReceipt, parseRootProfileIdentity, sanitizeEvidenceValue, type InstallAttemptOutcome, type InstallEvidence, type ToolVersions, type ValidationRecord } from "./evidence";
 
 type StageRecord = {
   name: string;
@@ -30,6 +30,8 @@ const stageTimeouts = {
   verifyProfile: 30_000,
   smokeOpenCode: 30_000,
 } as const;
+const pinnedToolVersions = { ocx: "2.0.14", opencode: "1.17.15" } as const;
+const invokedRootProfile = parseRootProfileIdentity({ source: "matthewmorek/ws", installedName: "ws" });
 
 function elapsedMilliseconds(startedAt: number): number { return Math.round(performance.now() - startedAt); }
 
@@ -89,8 +91,23 @@ export function createSandboxEnvironment(sandbox: string): Record<string, string
   };
 }
 
-function assertPinnedVersion(tool: string, output: string, expected: string): void {
-  if (!new RegExp(`(?:^|\\D)${expected.replaceAll(".", "\\.")}(?:$|\\D)`).test(output)) fail(`${tool} must report version ${expected}, received ${output}.`);
+function parseReportedVersion(tool: string, output: string): string {
+  const matches = output.match(/(?:^|[^0-9])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=$|[^0-9])/g) ?? [];
+  if (matches.length !== 1) fail(`${tool} must report exactly one SemVer version, received ${output}.`);
+  return matches[0].match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/)![0];
+}
+
+function parseValidationRecord(mode: string, expectedOcxVersion: string | undefined, expectedOpenCodeVersion: string | undefined): Pick<ValidationRecord, "mode" | "expectedToolVersions"> {
+  if (mode === "advisory") {
+    if (expectedOcxVersion !== undefined || expectedOpenCodeVersion !== undefined) fail("Advisory validation must not receive expected tool versions.");
+    return { mode, expectedToolVersions: null };
+  }
+  if (mode !== "pinned" || expectedOcxVersion !== pinnedToolVersions.ocx || expectedOpenCodeVersion !== pinnedToolVersions.opencode) fail("Pinned validation requires OCX 2.0.14 and OpenCode 1.17.15.");
+  return { mode, expectedToolVersions: pinnedToolVersions };
+}
+
+function assertPinnedVersions(discovered: ToolVersions, expected: ToolVersions): void {
+  if (discovered.ocx !== expected.ocx || discovered.opencode !== expected.opencode) fail(`Pinned validation requires OCX ${expected.ocx} and OpenCode ${expected.opencode}; received OCX ${discovered.ocx} and OpenCode ${discovered.opencode}.`);
 }
 
 async function runStage(name: string, command: string[], environment: Record<string, string>, timeoutMs: number, stages: StageRecord[]): Promise<string> {
@@ -125,7 +142,7 @@ class InstallAttemptFailure extends Error {
   }
 }
 
-async function runInstallAttempt(registry: string, version: string, commit: string, ocx: string, opencode: string, diagnosticsDirectory: string): Promise<InstallEvidence> {
+async function runInstallAttempt(registry: string, version: string, commit: string, ocx: string, opencode: string, validation: Pick<ValidationRecord, "mode" | "expectedToolVersions">, diagnosticsDirectory: string): Promise<InstallEvidence> {
   const sandbox = await temporaryDirectory("ocx-install");
   const environment = createSandboxEnvironment(sandbox);
   let source: RegistrySource | undefined;
@@ -135,17 +152,19 @@ async function runInstallAttempt(registry: string, version: string, commit: stri
   try {
     await Promise.all([environment.HOME, environment.XDG_CONFIG_HOME, environment.XDG_DATA_HOME, environment.XDG_CACHE_HOME, environment.XDG_STATE_HOME].map((directory) => mkdir(directory, { recursive: true })));
     source = /^https?:\/\//.test(registry) ? { url: registry, stop: () => {} } : await serveRegistry(resolve(registry), requests);
-    const ocxVersion = (await runStage("verify OCX version", [ocx, "--version"], environment, stageTimeouts.toolVersion, stages)).trim();
-    const opencodeVersion = (await runStage("verify OpenCode version", [opencode, "--version"], environment, stageTimeouts.toolVersion, stages)).trim();
-    assertPinnedVersion("OCX", ocxVersion, "2.0.14");
-    assertPinnedVersion("OpenCode", opencodeVersion, "1.17.15");
+    const ocxVersion = parseReportedVersion("OCX", (await runStage("verify OCX version", [ocx, "--version"], environment, stageTimeouts.toolVersion, stages)).trim());
+    const opencodeVersion = parseReportedVersion("OpenCode", (await runStage("verify OpenCode version", [opencode, "--version"], environment, stageTimeouts.toolVersion, stages)).trim());
+    const discoveredToolVersions = { ocx: ocxVersion, opencode: opencodeVersion };
+    if (validation.mode === "pinned") assertPinnedVersions(discoveredToolVersions, validation.expectedToolVersions!);
     await runStage("initialize disposable OCX profile root", [ocx, "init", "--global", "--quiet"], environment, stageTimeouts.initializeProfile, stages);
-    await runStage("install official KDCO workspace profile", [ocx, "profile", "add", "ws", "--source", "matthewmorek/ws", "--from", source.url, "--global"], environment, stageTimeouts.installProfile, stages);
+    await runStage("install official KDCO workspace profile", [ocx, "profile", "add", invokedRootProfile.installedName, "--source", invokedRootProfile.source, "--from", source.url, "--global"], environment, stageTimeouts.installProfile, stages);
     await runStage("verify installed OCX profile", [ocx, "verify", "--cwd", join(environment.XDG_CONFIG_HOME, "opencode", "profiles", "ws")], environment, stageTimeouts.verifyProfile, stages);
     await runStage("smoke OpenCode profile startup", [ocx, "oc", "-p", "ws", "--help"], environment, stageTimeouts.smokeOpenCode, stages);
     const profileRoot = join(environment.XDG_CONFIG_HOME, "opencode", "profiles", "ws");
     const generated = await readJsonc<Record<string, unknown>>(join(profileRoot, "opencode.jsonc"));
-    const parsedReceipt = parseInstallReceipt(sanitizeEvidenceValue(await readJsonc<unknown>(join(profileRoot, ".ocx", "receipt.jsonc"))));
+    const rawReceipt = await readJsonc<unknown>(join(profileRoot, ".ocx", "receipt.jsonc"));
+    assertReceiptProfileRoot(rawReceipt, profileRoot);
+    const parsedReceipt = parseInstallReceipt(sanitizeEvidenceValue(rawReceipt));
     const sourceRegistry = await readJsonc<{ components?: Array<{ name?: string; opencode?: Record<string, unknown> }> }>(join(repositoryRoot, "registry.jsonc"));
     const expected = sourceRegistry.components?.find((component) => component.name === "ws-overrides")?.opencode;
     if (!expected) fail("Registry source has no ws-overrides opencode metadata.");
@@ -155,11 +174,11 @@ async function runInstallAttempt(registry: string, version: string, commit: stri
       schemaVersion: 1,
       version,
       commit,
-      installedComponents: parsedReceipt.components,
-      resolvedDependencies: parsedReceipt.resolvedDependencies,
+      rootProfile: invokedRootProfile,
+      resolvedDependencyComponents: parsedReceipt.resolvedDependencyComponents,
       assertions: assertions as Record<string, true>,
       receipt: parsedReceipt.receipt,
-      toolVersions: { ocx: ocxVersion, opencode: opencodeVersion },
+      validation: { ...validation, discoveredToolVersions },
     };
     assertEvidenceIsSafe(evidence);
     succeeded = true;
@@ -177,7 +196,7 @@ async function runInstallAttempt(registry: string, version: string, commit: stri
 }
 
 async function main(): Promise<void> {
-  const arguments_ = parseArguments(Bun.argv.slice(2), ["--registry", "--version", "--commit", "--evidence-out", "--diagnostics-dir"]);
+  const arguments_ = parseArguments(Bun.argv.slice(2), ["--registry", "--version", "--commit", "--evidence-out", "--diagnostics-dir", "--validation-mode", "--expected-ocx-version", "--expected-opencode-version"]);
   const registry = requiredArgument(arguments_, "--registry");
   const version = parseVersion(requiredArgument(arguments_, "--version"));
   const commit = requiredArgument(arguments_, "--commit");
@@ -186,6 +205,7 @@ async function main(): Promise<void> {
   const diagnosticsDirectory = diagnosticsArgument ? resolve(diagnosticsArgument) : join(dirname(evidenceOut), "install-diagnostics");
   const ocx = process.env.OCX_BIN ?? "ocx";
   const opencode = process.env.OPENCODE_BIN ?? "opencode";
+  const validation = parseValidationRecord(requiredArgument(arguments_, "--validation-mode"), arguments_.get("--expected-ocx-version"), arguments_.get("--expected-opencode-version"));
   await rm(diagnosticsDirectory, { recursive: true, force: true });
   await mkdir(diagnosticsDirectory, { recursive: true });
   const attempts: InstallAttemptOutcome[] = [];
@@ -193,7 +213,7 @@ async function main(): Promise<void> {
     const attemptDiagnostics = join(diagnosticsDirectory, `attempt-${number}`);
     await mkdir(attemptDiagnostics, { recursive: true });
     try {
-      const evidence = await runInstallAttempt(registry, version, commit, ocx, opencode, attemptDiagnostics);
+      const evidence = await runInstallAttempt(registry, version, commit, ocx, opencode, validation, attemptDiagnostics);
       attempts.push({ number, outcome: "succeeded" });
       const withAttempts: InstallEvidence = { ...evidence, attempts };
       assertEvidenceIsSafe(withAttempts);

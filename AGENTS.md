@@ -21,7 +21,7 @@ bun test tests
 VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
 COMMIT="$(git rev-parse HEAD)"
 bun run build -- --version "$VERSION" --out "$TMPDIR/pages"
-bun run validate -- --version "$VERSION" --commit "$COMMIT" --work-dir "$TMPDIR/validate"
+ bun run validate -- --version "$VERSION" --commit "$COMMIT" --work-dir "$TMPDIR/validate" --validation-mode pinned --expected-ocx-version 2.0.14 --expected-opencode-version 1.17.15
 ```
 
 After an annotated tag exists, package and preflight only the validation output; never rebuild in a publish job:

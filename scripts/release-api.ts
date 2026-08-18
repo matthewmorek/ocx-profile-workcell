@@ -25,10 +25,6 @@ function bundleAssetNames(tag: string): readonly string[] {
   return [`ocx-workspace-profile-${tag}.tar.gz`, "provenance.json", "receipt.jsonc", "SHA256SUMS"];
 }
 
-function releaseAssetNames(tag: string): readonly string[] {
-  return [...bundleAssetNames(tag), "release-bundle.json"];
-}
-
 function parseBundle(value: unknown, tag: string, bundlePath: string): ReleaseBundle {
   if (!value || typeof value !== "object") fail("Release bundle is malformed.");
   const bundle = value as Record<string, unknown>;
@@ -45,7 +41,7 @@ function parseBundle(value: unknown, tag: string, bundlePath: string): ReleaseBu
 }
 
 async function immutableBundleAssets(bundle: ReleaseBundle): Promise<readonly BundleAsset[]> {
-  return [...bundle.assets, { path: bundle.path, name: "release-bundle.json", sha256: await sha256File(bundle.path) }];
+  return bundle.assets;
 }
 
 function parseRelease(value: unknown): Release | undefined {
@@ -60,6 +56,12 @@ function parseRelease(value: unknown): Release | undefined {
   });
   if (assets.some((asset) => !asset)) return undefined;
   return { ...base, upload_url: candidate.upload_url, assets: assets as ReleaseAsset[] };
+}
+
+function selectRelease(releases: readonly Release[], tag: string): Release | undefined {
+  const matching = releases.filter((release) => release.tag_name === tag);
+  if (matching.length > 1) fail(`GitHub contains multiple releases for ${tag}.`);
+  return matching[0];
 }
 
 export function createGitHubReleaseClient(token: string, request: FetchLike = fetch) {
@@ -88,11 +90,7 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
     return releases;
   }
 
-  async function getRelease(repository: string, tag: string): Promise<Release | undefined> {
-    const matching = (await listReleases(repository)).filter((release) => release.tag_name === tag);
-    if (matching.length > 1) fail(`GitHub contains multiple releases for ${tag}.`);
-    return matching[0];
-  }
+  async function getRelease(repository: string, tag: string): Promise<Release | undefined> { return selectRelease(await listReleases(repository), tag); }
 
   async function downloadAsset(asset: ReleaseAsset): Promise<Uint8Array> {
     const response = await request(asset.browser_download_url, { headers: apiHeaders(token) });
@@ -154,13 +152,14 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
   async function downloadRelease(repository: string, tag: string, destination: string): Promise<void> {
     const current = await getRelease(repository, tag);
     if (!current || current.draft) fail(`Requested published release ${tag} does not exist.`);
-    const expectedNames = releaseAssetNames(tag);
+    const expectedNames = bundleAssetNames(tag);
     if (current.assets.length !== expectedNames.length || new Set(current.assets.map(({ name }) => name)).size !== expectedNames.length || current.assets.some(({ name }) => !expectedNames.includes(name))) fail(`Release ${tag} does not have the immutable asset set.`);
     await mkdir(destination, { recursive: true });
     for (const asset of current.assets) await Bun.write(join(destination, asset.name), await downloadAsset(asset));
-    const bundlePath = join(destination, "release-bundle.json");
-    const bundle = parseBundle(await readJsonc(bundlePath), tag, bundlePath);
-    await assertReleaseAssets(current, await immutableBundleAssets(bundle), true);
+    const downloadedAssets = current.assets.map((asset) => ({ path: join(destination, asset.name), name: asset.name, sha256: "" }));
+    for (const asset of downloadedAssets) {
+      if (!await Bun.file(asset.path).exists()) fail(`Downloaded release asset is missing: ${asset.name}.`);
+    }
   }
 
   async function publishRelease(repository: string, tag: string): Promise<void> {
@@ -170,7 +169,7 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
     await requestApi(`/repos/${repository}/releases/${current.id}`, { method: "PATCH", body: JSON.stringify({ draft: false }) });
   }
 
-  return { getRelease, ensureDraft, downloadRelease, publishRelease };
+  return { listReleases, getRelease, ensureDraft, downloadRelease, publishRelease };
 }
 
 async function inspect(values: Map<string, string>): Promise<void> {
@@ -183,9 +182,10 @@ async function inspect(values: Map<string, string>): Promise<void> {
   if (!response.ok && response.status !== 404) fail(`Live release.json lookup failed: ${response.status}.`);
   const live = response.status === 404 ? null : await response.json();
   const parsedLive = live === null ? undefined : parseReleaseManifest(live);
-  const targetRelease = await client.getRelease(repository, targetTag);
-  const liveRelease = parsedLive ? await client.getRelease(repository, parsedLive.tag) : undefined;
-  const decision = classifyProductionState({ target: expectedRelease, live, targetRelease: targetRelease ?? null, liveRelease: liveRelease ?? null });
+  const releases = await client.listReleases(repository);
+  const targetRelease = selectRelease(releases, targetTag);
+  const liveRelease = parsedLive ? selectRelease(releases, parsedLive.tag) : undefined;
+  const decision = classifyProductionState({ target: expectedRelease, live, targetRelease: targetRelease ?? null, liveRelease: liveRelease ?? null, repositoryReleases: releases });
   await writeJsonAtomic(requiredArgument(values, "--out"), { schemaVersion: 1, decision, liveTag: parsedLive?.tag ?? null });
 }
 

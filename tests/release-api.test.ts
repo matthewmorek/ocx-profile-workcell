@@ -7,7 +7,6 @@ import { sha256 } from "../scripts/common";
 
 const tag = "v0.1.0";
 const assetNames = [`ocx-workspace-profile-${tag}.tar.gz`, "provenance.json", "receipt.jsonc", "SHA256SUMS"];
-const allAssetNames = [...assetNames, "release-bundle.json"];
 
 type Asset = { name: string; browser_download_url: string };
 type Draft = { id: number; draft: boolean; tag_name: string; upload_url: string; assets: Asset[] };
@@ -47,7 +46,7 @@ describe("GitHub release API client", () => {
   test("reuses matching partial uploads and completes the exact draft asset contract", async () => {
     const { directory, bundle } = await temporaryBundle();
     const bytes = new Map<string, Uint8Array>();
-    for (const name of allAssetNames) bytes.set(name, new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer()));
+    for (const name of assetNames) bytes.set(name, new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer()));
     const current = draft([asset(assetNames[0])]); const uploaded: string[] = [];
     const request = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = String(input);
@@ -62,8 +61,8 @@ describe("GitHub release API client", () => {
     };
     try {
       await createGitHubReleaseClient("test-token", request as typeof fetch).ensureDraft("owner/repository", tag, bundle);
-      expect(uploaded).toEqual(allAssetNames.slice(1));
-      expect(current.assets.map(({ name }) => name)).toEqual(allAssetNames);
+      expect(uploaded).toEqual(assetNames.slice(1));
+      expect(current.assets.map(({ name }) => name)).toEqual(assetNames);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -88,8 +87,8 @@ describe("GitHub release API client", () => {
   test("treats a matching published release as a no-upload no-op and uses its retained ID to publish drafts", async () => {
     const { directory, bundle } = await temporaryBundle();
     const bytes = new Map<string, Uint8Array>();
-    for (const name of allAssetNames) bytes.set(name, new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer()));
-    const published = draft(allAssetNames.map(asset), false); const requests: Array<{ url: string; method?: string }> = [];
+    for (const name of assetNames) bytes.set(name, new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer()));
+    const published = draft(assetNames.map(asset), false); const requests: Array<{ url: string; method?: string }> = [];
     const request = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = String(input); requests.push({ url, method: init?.method });
       if (url.endsWith("page=1")) return Response.json([published]);
@@ -104,6 +103,26 @@ describe("GitHub release API client", () => {
       await client.publishRelease("owner/repository", tag);
       expect(requests.some(({ url }) => url.startsWith("https://uploads.example/"))).toBe(false);
       expect(requests).toContainEqual({ url: "https://api.github.com/repos/owner/repository/releases/47", method: "PATCH" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("downloads exactly the four public release assets without requiring the local bundle manifest", async () => {
+    const { directory } = await temporaryBundle();
+    const published = draft(assetNames.map(asset), false); const downloaded: string[] = [];
+    const request = async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith("page=1")) return Response.json([published]);
+      if (url.startsWith("https://assets.example/")) {
+        const name = decodeURIComponent(new URL(url).pathname.slice(1)); downloaded.push(name);
+        return new Response(name);
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    try {
+      const destination = join(directory, "downloaded");
+      await createGitHubReleaseClient("test-token", request as typeof fetch).downloadRelease("owner/repository", tag, destination);
+      expect(downloaded).toEqual(assetNames);
+      expect(await Bun.file(join(destination, "release-bundle.json")).exists()).toBe(false);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 

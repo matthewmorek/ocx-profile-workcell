@@ -15,7 +15,7 @@ const component = (identifier: string) => ({ identifier, revision: `sha256:${"a"
 const validEvidence = () => {
   const components = [component("kdco/workspace"), component("matthewmorek/ws-overrides")].sort((left, right) => `registry::${left.identifier}@${left.revision}`.localeCompare(`registry::${right.identifier}@${right.revision}`));
   const receipt = { version: 1, root: "<redacted-path>", installed: Object.fromEntries(components.map((entry) => [`registry::${entry.identifier}@${entry.revision}`, { registryName: entry.identifier.split("/")[0], name: entry.identifier.split("/")[1], revision: entry.revision, hash: entry.sha256 }])) };
-  return { schemaVersion: 1, version: "0.1.0", commit, installedComponents: components, resolvedDependencies: [components[0]], assertions: { install: true }, receipt, toolVersions: { ocx: "2.0.14", opencode: "1.17.15" } };
+  return { schemaVersion: 1, version: "0.1.0", commit, rootProfile: { source: "matthewmorek/ws", installedName: "ws" }, resolvedDependencyComponents: components, assertions: { install: true }, receipt, validation: { mode: "pinned", expectedToolVersions: { ocx: "2.0.14", opencode: "1.17.15" }, discoveredToolVersions: { ocx: "2.0.14", opencode: "1.17.15" } } };
 };
 
 async function temporaryDirectory(prefix: string): Promise<string> { return mkdtemp(join(tmpdir(), `${prefix}-`)); }
@@ -54,11 +54,15 @@ describe("strict CLI and evidence boundaries", () => {
 
   test("rejects incomplete, failed, path-contaminated, and secret-like evidence", () => {
     expect(parseInstallEvidence(validEvidence())).toMatchObject({ version: "0.1.0" });
-    expect(() => parseInstallEvidence({ ...validEvidence(), installedComponents: [component("matthewmorek/ws-overrides")] })).toThrow("component resolution");
+    expect(() => parseInstallEvidence({ ...validEvidence(), resolvedDependencyComponents: [component("matthewmorek/ws-overrides")] })).toThrow("dependency resolution");
     expect(() => parseInstallEvidence({ ...validEvidence(), assertions: { install: false } })).toThrow("all pass");
     expect(() => parseInstallEvidence({ ...validEvidence(), assertions: {} })).toThrow("non-empty named assertions");
     expect(() => parseInstallEvidence({ ...validEvidence(), receipt: { version: 1, root: "<redacted-path>", installed: {} } })).toThrow("incomplete");
-    expect(() => parseInstallEvidence({ ...validEvidence(), receipt: { ...validEvidence().receipt, root: "/Users/example" } })).toThrow("machine path");
+    expect(() => parseInstallEvidence({ ...validEvidence(), receipt: { ...validEvidence().receipt, root: "/Users/example" } })).toThrow("sanitized");
+    expect(() => parseInstallEvidence({ ...validEvidence(), rootProfile: { source: "matthewmorek/not-ws", installedName: "ws" } })).toThrow("root profile");
+    expect(() => parseInstallEvidence({ ...validEvidence(), rootProfile: { source: "matthewmorek/ws", installedName: "not-ws" } })).toThrow("root profile");
+    expect(parseInstallEvidence({ ...validEvidence(), validation: { mode: "advisory", expectedToolVersions: null, discoveredToolVersions: { ocx: "9.0.0", opencode: "9.0.1" } } }).validation.discoveredToolVersions).toEqual({ ocx: "9.0.0", opencode: "9.0.1" });
+    expect(() => parseInstallEvidence({ ...validEvidence(), validation: { mode: "advisory", expectedToolVersions: { ocx: "2.0.14", opencode: "1.17.15" }, discoveredToolVersions: { ocx: "9.0.0", opencode: "9.0.0" } } })).toThrow("Advisory");
     expect(sanitizeEvidenceValue({ token: "remove", location: "/Users/example/cache" })).toEqual({ location: "<redacted-path>" });
   });
 

@@ -17,7 +17,7 @@ jobs:
           bun --version; "$OCX_BIN" --version; "$OPENCODE_BIN" --version
           bun install --frozen-lockfile
           VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
-          bun run validate -- --version "$VERSION" --commit "$GITHUB_SHA" --work-dir "$RUNNER_TEMP/validate"
+          bun run validate -- --version "$VERSION" --commit "$GITHUB_SHA" --work-dir "$RUNNER_TEMP/validate" --validation-mode pinned --expected-ocx-version 2.0.14 --expected-opencode-version 1.17.15
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -58,4 +58,4 @@ jobs:
           "$OPENCODE_BIN" --version
           bun install --frozen-lockfile
           VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
-          bun run validate -- --version "$VERSION" --commit "$GITHUB_SHA" --work-dir "$RUNNER_TEMP/validate-latest"
+          bun run validate -- --version "$VERSION" --commit "$GITHUB_SHA" --work-dir "$RUNNER_TEMP/validate-latest" --validation-mode advisory

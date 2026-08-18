@@ -88,6 +88,7 @@ export function classifyProductionState(input: Readonly<{
   live: unknown | null;
   targetRelease: unknown | null;
   liveRelease: unknown | null;
+  repositoryReleases: readonly unknown[];
 }>): ProductionDecision {
   const target = parseReleaseManifest(input.target);
   if (!target) fail("Target release manifest is malformed.");
@@ -98,9 +99,15 @@ export function classifyProductionState(input: Readonly<{
   if (targetRelease && targetRelease.tag_name !== target.tag) fail("Target GitHub Release tag is inconsistent.");
   const liveRelease = input.liveRelease === null ? undefined : parseRemoteRelease(input.liveRelease);
   if (input.liveRelease !== null && !liveRelease) fail("Live GitHub Release state is malformed.");
+  const repositoryReleases = input.repositoryReleases.map((release) => {
+    const parsed = parseRemoteRelease(release);
+    if (!parsed) fail("Repository GitHub Release state is malformed.");
+    return parsed;
+  });
+  if (new Set(repositoryReleases.map((release) => release.id)).size !== repositoryReleases.length) fail("Repository GitHub Release state contains duplicate release IDs.");
 
   if (!live) {
-    if (targetRelease && !targetRelease.draft) fail("Published GitHub Release exists without a live registry.");
+    if (repositoryReleases.some((release) => !release.draft)) fail("Published GitHub Release exists without a live registry.");
     if (target.version !== "0.1.0") fail("Only v0.1.0 may be the first publication.");
     return { kind: "first-publication" };
   }

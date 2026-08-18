@@ -26,7 +26,7 @@ jobs:
           TAGGER_EPOCH="$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$GITHUB_REF_NAME")"
           test -n "$TAGGER_EPOCH"
           bun install --frozen-lockfile
-          bun run validate -- --version "$VERSION" --commit "$SOURCE_COMMIT" --work-dir "$RUNNER_TEMP/validate"
+           bun run validate -- --version "$VERSION" --commit "$SOURCE_COMMIT" --work-dir "$RUNNER_TEMP/validate" --validation-mode pinned --expected-ocx-version 2.0.14 --expected-opencode-version 1.17.15
           bun run package:release -- --version "$VERSION" --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --tagger-epoch "$TAGGER_EPOCH" --pages "$RUNNER_TEMP/validate/pages" --evidence "$RUNNER_TEMP/validate/install-evidence.json" --out-dir release-out
           bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance release-out/provenance.json --receipt release-out/receipt.jsonc --checksums release-out/SHA256SUMS --expected-tag "$GITHUB_REF_NAME" --extract-to "$RUNNER_TEMP/preflight-pages"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

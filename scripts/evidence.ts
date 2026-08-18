@@ -2,14 +2,18 @@ import { fail } from "./common";
 
 export type ResolvedComponent = Readonly<{ identifier: string; revision: string; sha256: string }>;
 export type InstallReceipt = Readonly<{ version: 1; root: string; installed: Readonly<Record<string, unknown>> }>;
-export type ParsedInstallReceipt = Readonly<{ receipt: InstallReceipt; components: readonly ResolvedComponent[]; resolvedDependencies: readonly ResolvedComponent[] }>;
-export type InstallEvidence = Readonly<{ schemaVersion: 1; version: string; commit: string; installedComponents: readonly ResolvedComponent[]; resolvedDependencies: readonly ResolvedComponent[]; assertions: Readonly<Record<string, true>>; receipt: InstallReceipt; toolVersions: Readonly<Record<string, string>>; attempts?: readonly InstallAttemptOutcome[] }>;
+export type RootProfileIdentity = Readonly<{ source: "matthewmorek/ws"; installedName: "ws" }>;
+export type ToolVersions = Readonly<{ ocx: string; opencode: string }>;
+export type ValidationRecord = Readonly<{ mode: "pinned" | "advisory"; expectedToolVersions: ToolVersions | null; discoveredToolVersions: ToolVersions }>;
+export type ParsedInstallReceipt = Readonly<{ receipt: InstallReceipt; resolvedDependencyComponents: readonly ResolvedComponent[] }>;
+export type InstallEvidence = Readonly<{ schemaVersion: 1; version: string; commit: string; rootProfile: RootProfileIdentity; resolvedDependencyComponents: readonly ResolvedComponent[]; assertions: Readonly<Record<string, true>>; receipt: InstallReceipt; validation: ValidationRecord; attempts?: readonly InstallAttemptOutcome[] }>;
 export type InstallAttemptOutcome = Readonly<{ number: number; outcome: "succeeded" | "failed"; failure?: "timeout" | "network" }>;
 
 const sensitiveKey = /token|secret|password|api[_-]?key/i;
 const machinePath = /(?:^|[\s"'=])(?:file:\/\/)?\/(?:Users|home|private|var|tmp|opt|Volumes)\//;
 const machinePathValue = /(^|[\s"'=])(?:file:\/\/)?\/(?:Users|home|private|var|tmp|opt|Volumes)\/[^\s"']+/g;
 const requiredComponents = ["kdco/workspace", "matthewmorek/ws-overrides"];
+const expectedRootProfile = { source: "matthewmorek/ws", installedName: "ws" } as const;
 
 export function sanitizeEvidenceValue(value: unknown): unknown {
   if (typeof value === "string") return value.replace(machinePathValue, "$1<redacted-path>");
@@ -18,6 +22,18 @@ export function sanitizeEvidenceValue(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !sensitiveKey.test(key)).map(([key, entry]) => [key, sanitizeEvidenceValue(entry)]));
 }
 export function assertEvidenceIsSafe(value: unknown): void { const serialized = JSON.stringify(value); if (machinePath.test(serialized) || sensitiveKey.test(serialized)) fail("Evidence contains a machine path or secret-like value."); }
+
+export function parseRootProfileIdentity(value: unknown): RootProfileIdentity {
+  if (!value || typeof value !== "object") fail("Install evidence root profile identity is malformed.");
+  const candidate = value as Record<string, unknown>;
+  if (candidate.source !== expectedRootProfile.source || candidate.installedName !== expectedRootProfile.installedName || Object.keys(candidate).some((key) => key !== "source" && key !== "installedName")) fail("Install evidence root profile must identify matthewmorek/ws installed as ws.");
+  return expectedRootProfile;
+}
+
+/** OCX receipts retain the filesystem root but not the invoked registry profile identity. */
+export function assertReceiptProfileRoot(value: unknown, expectedProfileRoot: string): void {
+  if (!value || typeof value !== "object" || (value as Record<string, unknown>).root !== expectedProfileRoot) fail("Install receipt root does not match the disposable ws profile root.");
+}
 
 function parseResolvedComponent(value: unknown, location: string): ResolvedComponent {
   if (!value || typeof value !== "object") fail(`${location} is malformed.`);
@@ -35,7 +51,8 @@ export function parseInstallReceipt(value: unknown): ParsedInstallReceipt {
   if (components.length === 0 || new Set(components.map(({ identifier }) => identifier)).size !== components.length || requiredComponents.some((identifier) => !components.some((component) => component.identifier === identifier))) fail("Install receipt has an incomplete component identity set.");
   const workspace = components.filter(({ identifier }) => identifier === "kdco/workspace");
   if (workspace.length !== 1) fail("Install receipt must resolve exactly one kdco/workspace revision.");
-  return { receipt: receipt as InstallReceipt, components, resolvedDependencies: workspace };
+  if (receipt.root !== "<redacted-path>") fail("Install receipt root must be sanitized before it is recorded.");
+  return { receipt: receipt as InstallReceipt, resolvedDependencyComponents: components };
 }
 
 function parseEvidenceComponents(value: unknown, location: string): readonly ResolvedComponent[] {
@@ -50,15 +67,37 @@ function parseEvidenceComponents(value: unknown, location: string): readonly Res
   return components;
 }
 
+function parseToolVersions(value: unknown, location: string): ToolVersions {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${location} is malformed.`);
+  const versions = value as Record<string, unknown>;
+  if (typeof versions.ocx !== "string" || !versions.ocx || typeof versions.opencode !== "string" || !versions.opencode || Object.keys(versions).some((key) => key !== "ocx" && key !== "opencode")) fail(`${location} is malformed.`);
+  return { ocx: versions.ocx, opencode: versions.opencode };
+}
+
+function parseValidationRecord(value: unknown): ValidationRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("Install evidence validation record is malformed.");
+  const validation = value as Record<string, unknown>;
+  if ((validation.mode !== "pinned" && validation.mode !== "advisory") || Object.keys(validation).some((key) => key !== "mode" && key !== "expectedToolVersions" && key !== "discoveredToolVersions")) fail("Install evidence validation record is malformed.");
+  const discoveredToolVersions = parseToolVersions(validation.discoveredToolVersions, "Install evidence discovered tool versions");
+  if (validation.mode === "advisory") {
+    if (validation.expectedToolVersions !== null) fail("Advisory validation must not claim expected tool versions.");
+    return { mode: "advisory", expectedToolVersions: null, discoveredToolVersions };
+  }
+  const expectedToolVersions = parseToolVersions(validation.expectedToolVersions, "Install evidence expected tool versions");
+  if (expectedToolVersions.ocx !== "2.0.14" || expectedToolVersions.opencode !== "1.17.15" || expectedToolVersions.ocx !== discoveredToolVersions.ocx || expectedToolVersions.opencode !== discoveredToolVersions.opencode) fail("Pinned validation tool versions do not match the required toolchain.");
+  return { mode: "pinned", expectedToolVersions, discoveredToolVersions };
+}
+
 export function parseInstallEvidence(value: unknown): InstallEvidence {
   if (!value || typeof value !== "object") fail("Install evidence is malformed."); const evidence = value as Record<string, unknown>;
   if (evidence.schemaVersion !== 1 || typeof evidence.version !== "string" || !evidence.version || typeof evidence.commit !== "string" || !/^[0-9a-f]{40}$/i.test(evidence.commit)) fail("Install evidence has an invalid schema, version, or commit.");
-  const parsedReceipt = parseInstallReceipt(evidence.receipt); const installedComponents = parseEvidenceComponents(evidence.installedComponents, "Install evidence installedComponents"); const resolvedDependencies = parseEvidenceComponents(evidence.resolvedDependencies, "Install evidence resolvedDependencies");
-  if (JSON.stringify(installedComponents) !== JSON.stringify(parsedReceipt.components) || JSON.stringify(resolvedDependencies) !== JSON.stringify(parsedReceipt.resolvedDependencies)) fail("Install evidence component resolution differs from its parsed receipt.");
+  const rootProfile = parseRootProfileIdentity(evidence.rootProfile);
+  const parsedReceipt = parseInstallReceipt(evidence.receipt); const resolvedDependencyComponents = parseEvidenceComponents(evidence.resolvedDependencyComponents, "Install evidence resolvedDependencyComponents");
+  if (JSON.stringify(resolvedDependencyComponents) !== JSON.stringify(parsedReceipt.resolvedDependencyComponents)) fail("Install evidence dependency resolution differs from its parsed receipt.");
   if (!evidence.assertions || typeof evidence.assertions !== "object" || Array.isArray(evidence.assertions) || Object.keys(evidence.assertions as Record<string, unknown>).length === 0 || Object.values(evidence.assertions).some((passed) => passed !== true)) fail("Install evidence must contain non-empty named assertions that all pass.");
-  if (!evidence.toolVersions || typeof evidence.toolVersions !== "object" || Array.isArray(evidence.toolVersions) || Object.values(evidence.toolVersions).some((toolVersion) => typeof toolVersion !== "string" || !toolVersion)) fail("Install evidence has invalid tool versions.");
+  const validation = parseValidationRecord(evidence.validation);
   if (evidence.attempts !== undefined) assertInstallAttempts(evidence.attempts); assertEvidenceIsSafe(evidence);
-  return { ...evidence, installedComponents, resolvedDependencies, assertions: evidence.assertions as Record<string, true>, receipt: parsedReceipt.receipt, toolVersions: evidence.toolVersions as Record<string, string> };
+  return { ...evidence, rootProfile, resolvedDependencyComponents, assertions: evidence.assertions as Record<string, true>, receipt: parsedReceipt.receipt, validation };
 }
 function assertInstallAttempts(value: unknown): asserts value is InstallAttemptOutcome[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 2) fail("Install evidence has an invalid attempt history.");

@@ -2,6 +2,8 @@
 
 Public MIT registry for `ws` on Apple Silicon macOS 14+. It installs `kdco/workspace`, then Matthew Morek’s pinned tail overrides.
 
+`CONTRIBUTING.md` is intentionally omitted: maintainer automation and release constraints live in `AGENTS.md`.
+
 ## Install and authenticate
 
 Install OCX 2.0.14 and OpenCode 1.17.15 from their official release assets, checking the published SHA-256 before executing either binary. Authenticate OpenCode with OpenAI before starting the profile:
@@ -36,14 +38,15 @@ bun install --frozen-lockfile
 bun test tests
 VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
 COMMIT="$(git rev-parse HEAD)"
-bun run validate -- --version "$VERSION" --commit "$COMMIT" --work-dir "$TMPDIR/validate"
+bun run validate -- --version "$VERSION" --commit "$COMMIT" --work-dir "$TMPDIR/validate" --validation-mode pinned --expected-ocx-version 2.0.14 --expected-opencode-version 1.17.15
 ```
 
 ## Release and verification
 
-After protected-PR validation, bump `registry.jsonc` and `package.json` together, merge `main`, and create only an annotated tag. Preflight the exact tagged bytes:
+After protected-PR validation, bump `registry.jsonc` and `package.json` together, merge `main`, and create only an annotated tag. Create and push it exactly as follows, then preflight the exact tagged bytes:
 
 ```sh
+git tag -a vX.Y.Z -m vX.Y.Z
 TAG="$(git describe --exact-match --tags)"
 TAGGER_EPOCH="$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$TAG")"
 bun run package:release -- --version "$VERSION" --tag "$TAG" --commit "$COMMIT" --tagger-epoch "$TAGGER_EPOCH" --pages "$TMPDIR/validate/pages" --evidence "$TMPDIR/validate/install-evidence.json" --out-dir release-out
@@ -51,11 +54,15 @@ bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$T
 shasum -a 256 release-out/ocx-workspace-profile-"$TAG".tar.gz release-out/provenance.json release-out/receipt.jsonc
 ```
 
-Push only the verified annotated tag. Confirm the release assets and Pages bytes explicitly:
+Push only the verified annotated tag with `git push origin vX.Y.Z`. Confirm the release assets and Pages bytes explicitly:
 
 ```sh
-gh release download "$TAG" --repo matthewmorek/ocx-workspace-profile --pattern 'ocx-workspace-profile-*.tar.gz' --pattern provenance.json --pattern receipt.jsonc --pattern SHA256SUMS --dir "$TMPDIR/$TAG"
+git push origin vX.Y.Z
+gh release download "$TAG" --repo matthewmorek/ocx-workspace-profile --pattern "ocx-workspace-profile-$TAG.tar.gz" --pattern provenance.json --pattern receipt.jsonc --pattern SHA256SUMS --dir "$TMPDIR/$TAG"
 (cd "$TMPDIR/$TAG" && shasum -a 256 -c SHA256SUMS)
+rm -rf "$TMPDIR/$TAG/pages"
+bun run verify:release -- bundle --archive "$TMPDIR/$TAG/ocx-workspace-profile-$TAG.tar.gz" --provenance "$TMPDIR/$TAG/provenance.json" --receipt "$TMPDIR/$TAG/receipt.jsonc" --checksums "$TMPDIR/$TAG/SHA256SUMS" --expected-tag "$TAG" --extract-to "$TMPDIR/$TAG/pages"
+bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance "$TMPDIR/$TAG/provenance.json" --release "$TMPDIR/$TAG/pages/release.json" --expected-tag "$TAG"
 curl --fail --show-error https://matthewmorek.github.io/ocx-workspace-profile/release.json
 curl --fail --show-error https://matthewmorek.github.io/ocx-workspace-profile/index.json
 ```
