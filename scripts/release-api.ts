@@ -9,6 +9,18 @@ type FetchLike = typeof fetch;
 type BundleAsset = Readonly<{ path: string; name: string; sha256: string }>;
 type ReleaseBundle = Readonly<{ tag: string; version: string; path: string; assets: readonly BundleAsset[] }>;
 
+export const releaseApiCommands = ["inspect", "inspect-first-publication-recovery", "ensure-draft", "assert-draft", "download", "publish", "publish-exact"] as const;
+type ReleaseApiCommand = typeof releaseApiCommands[number];
+const releaseApiCommandArguments = {
+  inspect: ["--repository", "--base-url", "--tag", "--expected-release", "--out", "--token-env"],
+  "inspect-first-publication-recovery": ["--repository", "--base-url", "--tag", "--expected-release", "--out", "--token-env", "--phase"],
+  "ensure-draft": ["--repository", "--tag", "--bundle", "--token-env"],
+  "assert-draft": ["--repository", "--tag", "--bundle", "--token-env"],
+  download: ["--repository", "--tag", "--out-dir", "--token-env"],
+  publish: ["--repository", "--tag", "--token-env"],
+  "publish-exact": ["--repository", "--tag", "--bundle", "--expected-release-id", "--token-env"],
+} as const satisfies Record<ReleaseApiCommand, readonly string[]>;
+
 const apiHeaders = (token: string): HeadersInit => ({
   Accept: "application/vnd.github+json",
   Authorization: `Bearer ${token}`,
@@ -23,6 +35,13 @@ function requiredToken(values: Map<string, string>): string {
 
 function bundleAssetNames(tag: string): readonly string[] {
   return [`ocx-workspace-profile-${tag}.tar.gz`, "provenance.json", "receipt.jsonc", "SHA256SUMS"];
+}
+
+function parseReleaseId(value: string): number {
+  if (!/^[1-9]\d*$/.test(value)) fail("Expected release ID must be a positive integer.");
+  const releaseId = Number(value);
+  if (!Number.isSafeInteger(releaseId)) fail("Expected release ID must be a safe integer.");
+  return releaseId;
 }
 
 export function parseReleaseBundle(value: unknown, tag: string, bundlePath: string): ReleaseBundle {
@@ -177,7 +196,24 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
     await requestApi(`/repos/${repository}/releases/${current.id}`, { method: "PATCH", body: JSON.stringify({ draft: false }) });
   }
 
-  return { listReleases, getRelease, ensureDraft, assertDraft, downloadRelease, publishRelease };
+  async function publishExactRelease(repository: string, tag: string, bundle: ReleaseBundle, expectedReleaseId: number): Promise<void> {
+    const assets = await immutableBundleAssets(bundle);
+    const releasesBeforePublish = await listReleases(repository);
+    const draft = selectRelease(releasesBeforePublish, tag);
+    if (!draft) fail("Exact recovery draft does not exist.");
+    if (draft.id !== expectedReleaseId) fail("Exact recovery draft ID changed before publication.");
+    if (!draft.draft) fail("Exact recovery release is already published; refusing a generic no-op.");
+    if (releasesBeforePublish.length !== 1) fail("Exact recovery requires the sole repository release to be the target draft.");
+    await assertReleaseAssets(draft, assets, true);
+    await requestApi(`/repos/${repository}/releases/${draft.id}`, { method: "PATCH", body: JSON.stringify({ draft: false }) });
+    const releasesAfterPublish = await listReleases(repository);
+    const published = selectRelease(releasesAfterPublish, tag);
+    if (!published || published.id !== expectedReleaseId || published.draft) fail("Exact recovery publication postcondition failed.");
+    if (releasesAfterPublish.length !== 1) fail("Exact recovery publication changed the repository release inventory.");
+    await assertReleaseAssets(published, assets, true);
+  }
+
+  return { listReleases, getRelease, ensureDraft, assertDraft, downloadRelease, publishRelease, publishExactRelease };
 }
 
 async function inspect(values: Map<string, string>): Promise<void> {
@@ -211,25 +247,16 @@ async function inspectFailedFirstPublicationRecovery(values: Map<string, string>
   const releases = await client.listReleases(repository);
   const targetRelease = selectRelease(releases, targetTag);
   const decision = classifyFailedFirstPublicationRecovery({ target: expectedRelease, live, targetRelease: targetRelease ?? null, repositoryReleases: releases, phase });
-  await writeJsonAtomic(requiredArgument(values, "--out"), { schemaVersion: 1, decision });
+  await writeJsonAtomic(requiredArgument(values, "--out"), { schemaVersion: 1, decision, targetReleaseId: targetRelease?.id ?? null });
+}
+
+function parseReleaseApiCommand(value: string | undefined): ReleaseApiCommand | undefined {
+  return releaseApiCommands.find((command) => command === value);
 }
 
 async function main(): Promise<void> {
-  const command = Bun.argv[2];
-  const allowed = command === "inspect"
-    ? ["--repository", "--base-url", "--tag", "--expected-release", "--out", "--token-env"]
-    : command === "inspect-first-publication-recovery"
-      ? ["--repository", "--base-url", "--tag", "--expected-release", "--out", "--token-env", "--phase"]
-      : command === "ensure-draft"
-      ? ["--repository", "--tag", "--bundle", "--token-env"]
-      : command === "assert-draft"
-        ? ["--repository", "--tag", "--bundle", "--token-env"]
-      : command === "download"
-        ? ["--repository", "--tag", "--out-dir", "--token-env"]
-        : command === "publish"
-          ? ["--repository", "--tag", "--token-env"]
-          : [];
-  const values = parseArguments(Bun.argv.slice(3), allowed);
+  const command = parseReleaseApiCommand(Bun.argv[2]);
+  const values = parseArguments(Bun.argv.slice(3), command ? releaseApiCommandArguments[command] : []);
   if (command === "inspect") return inspect(values);
   if (command === "inspect-first-publication-recovery") return inspectFailedFirstPublicationRecovery(values);
   const repository = requiredArgument(values, "--repository");
@@ -245,7 +272,11 @@ async function main(): Promise<void> {
   }
   if (command === "download") return client.downloadRelease(repository, tag, requiredArgument(values, "--out-dir"));
   if (command === "publish") return client.publishRelease(repository, tag);
-  fail("Expected release-api subcommand inspect, inspect-first-publication-recovery, ensure-draft, assert-draft, download, or publish.");
+  if (command === "publish-exact") {
+    const bundlePath = requiredArgument(values, "--bundle");
+    return client.publishExactRelease(repository, tag, parseReleaseBundle(await readJsonc(bundlePath), tag, bundlePath), parseReleaseId(requiredArgument(values, "--expected-release-id")));
+  }
+  fail("Expected release-api subcommand inspect, inspect-first-publication-recovery, ensure-draft, assert-draft, download, publish, or publish-exact.");
 }
 
 if (import.meta.main) await main();

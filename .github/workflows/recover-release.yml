@@ -47,11 +47,12 @@ jobs:
           git merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
           git show "$SOURCE_COMMIT:registry.jsonc" > "$RUNNER_TEMP/tag-registry.jsonc"
           VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file(process.argv[1]).text()).version)' "$RUNNER_TEMP/tag-registry.jsonc")"
-          test "$VERSION" = "${RECOVERY_TAG#v}"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > source-run.json
+           test "$VERSION" = "${RECOVERY_TAG#v}"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > latest-source-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT" > requested-source-attempt.json
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" > source-artifacts.json
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > source-artifact.json
-          bun run recovery -- assert-source --run source-run.json --artifacts source-artifacts.json --artifact source-artifact.json --repository "$GITHUB_REPOSITORY" --tag "$RECOVERY_TAG" --commit "$SOURCE_COMMIT" --source-run-id "$SOURCE_RUN_ID" --source-run-attempt "$SOURCE_RUN_ATTEMPT" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST"
+          bun run recovery -- assert-source --latest-run latest-source-run.json --attempt-run requested-source-attempt.json --artifacts source-artifacts.json --artifact source-artifact.json --repository "$GITHUB_REPOSITORY" --tag "$RECOVERY_TAG" --commit "$SOURCE_COMMIT" --source-run-id "$SOURCE_RUN_ID" --source-run-attempt "$SOURCE_RUN_ATTEMPT" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST"
           printf 'source_commit=%s\n' "$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
           printf 'tag_object_sha=%s\n' "$TAG_OBJECT_SHA" >> "$GITHUB_OUTPUT"
       - name: Download only the retained artifact ID
@@ -126,7 +127,7 @@ jobs:
           RECOVERY_TAG: ${{ inputs.tag }}
         run: bun run release:api -- ensure-draft --repository "$GITHUB_REPOSITORY" --tag "$RECOVERY_TAG" --bundle bundle/release-bundle.json --token-env GITHUB_TOKEN
   deploy-exact-pages:
-    needs: prepare-exact-draft
+    needs: [preflight-recovery, prepare-exact-draft]
     runs-on: macos-14
     permissions: { actions: read, contents: read, pages: write, id-token: write }
     environment: github-pages
@@ -157,8 +158,13 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT_SHA" > current-tag.json
           bun run recovery -- assert-tag --reference current-tag-reference.json --tag current-tag.json --provenance bundle/provenance.json --tag-object-sha "$TAG_OBJECT_SHA" --commit "$SOURCE_COMMIT"
           bun run release:api -- inspect-first-publication-recovery --phase pre-deploy --repository "$GITHUB_REPOSITORY" --base-url https://matthewmorek.github.io/ocx-workspace-profile --tag "$RECOVERY_TAG" --expected-release "$RUNNER_TEMP/target-pages/release.json" --out state.json --token-env GITHUB_TOKEN
-          DECISION="$(bun -e 'process.stdout.write(JSON.parse(await Bun.file("state.json").text()).decision.kind)')"
-          case "$DECISION" in resume-draft) printf 'deploy=true\n' >> "$GITHUB_OUTPUT" ;; resume-live) printf 'deploy=false\n' >> "$GITHUB_OUTPUT" ;; *) exit 1 ;; esac
+           DECISION="$(bun -e 'process.stdout.write(JSON.parse(await Bun.file("state.json").text()).decision.kind)')"
+           case "$DECISION" in resume-draft) printf 'deploy=true\n' >> "$GITHUB_OUTPUT" ;; resume-live) printf 'deploy=false\n' >> "$GITHUB_OUTPUT" ;; *) exit 1 ;; esac
+      - name: Reverify the sole exact draft immediately before Pages mutation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECOVERY_TAG: ${{ inputs.tag }}
+        run: bun run release:api -- assert-draft --repository "$GITHUB_REPOSITORY" --tag "$RECOVERY_TAG" --bundle bundle/release-bundle.json --token-env GITHUB_TOKEN
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
         if: steps.decision.outputs.deploy == 'true'
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
@@ -212,12 +218,12 @@ jobs:
           bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$RECOVERY_TAG.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$RECOVERY_TAG" --extract-to "$RUNNER_TEMP/target-pages"
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RECOVERY_TAG" > current-tag-reference.json
           gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT_SHA" > current-tag.json
-          bun run recovery -- assert-tag --reference current-tag-reference.json --tag current-tag.json --provenance bundle/provenance.json --tag-object-sha "$TAG_OBJECT_SHA" --commit "$SOURCE_COMMIT"
-          bun run release:api -- assert-draft --repository "$GITHUB_REPOSITORY" --tag "$RECOVERY_TAG" --bundle bundle/release-bundle.json --token-env GITHUB_TOKEN
-          bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$RECOVERY_TAG"
+           bun run recovery -- assert-tag --reference current-tag-reference.json --tag current-tag.json --provenance bundle/provenance.json --tag-object-sha "$TAG_OBJECT_SHA" --commit "$SOURCE_COMMIT"
           bun run release:api -- inspect-first-publication-recovery --phase pre-publish --repository "$GITHUB_REPOSITORY" --base-url https://matthewmorek.github.io/ocx-workspace-profile --tag "$RECOVERY_TAG" --expected-release "$RUNNER_TEMP/target-pages/release.json" --out state.json --token-env GITHUB_TOKEN
-      - name: Publish exact verified draft
+          EXPECTED_RELEASE_ID="$(bun -e 'const state = JSON.parse(await Bun.file("state.json").text()); if (!Number.isSafeInteger(state.targetReleaseId) || state.targetReleaseId < 1) throw new Error("Pre-publish state lacks an exact draft release ID."); process.stdout.write(String(state.targetReleaseId))')"
+          bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$RECOVERY_TAG"
+          bun run release:api -- publish-exact --repository "$GITHUB_REPOSITORY" --tag "$RECOVERY_TAG" --bundle bundle/release-bundle.json --expected-release-id "$EXPECTED_RELEASE_ID" --token-env GITHUB_TOKEN
+      - name: Verify exact live Pages bytes after publication
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           RECOVERY_TAG: ${{ inputs.tag }}
-        run: bun run release:api -- publish --repository "$GITHUB_REPOSITORY" --tag "$RECOVERY_TAG" --token-env GITHUB_TOKEN
+        run: bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$RECOVERY_TAG"

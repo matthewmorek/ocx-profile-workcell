@@ -103,25 +103,88 @@ describe("GitHub release API client", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  test("treats a matching published release as a no-upload no-op and uses its retained ID to publish drafts", async () => {
+  test("fails fresh draft verification when draft assets are deleted, added, or altered between phases", async () => {
     const { directory, bundle } = await temporaryBundle();
     const bytes = new Map<string, Uint8Array>();
     for (const name of assetNames) bytes.set(name, new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer()));
-    const published = draft(assetNames.map(asset), false); const requests: Array<{ url: string; method?: string }> = [];
+    const requestFor = (current: Draft) => async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith("page=1")) return Response.json([current]);
+      if (url.startsWith("https://assets.example/")) return new Response(bytes.get(decodeURIComponent(new URL(url).pathname.slice(1))));
+      throw new Error(`Unexpected request ${url}`);
+    };
+    try {
+      const missing = draft(assetNames.slice(1).map(asset));
+      const extra = draft([...assetNames.map(asset), asset("unexpected.txt")]);
+      const altered = draft([{ name: assetNames[0], browser_download_url: "https://assets.example/altered" }, ...assetNames.slice(1).map(asset)]);
+      for (const [current, message] of [[missing, "missing required asset"], [extra, "unexpected asset"], [altered, "diverges"]] as const) {
+        await expect(createGitHubReleaseClient("test-token", requestFor(current) as typeof fetch).assertDraft("owner/repository", tag, bundle)).rejects.toThrow(message);
+      }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("normal publication publishes drafts, safely accepts matching published releases, and rejects missing or mismatched tags", async () => {
+    const current = draft(); const requests: Array<{ url: string; method?: string }> = [];
     const request = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = String(input); requests.push({ url, method: init?.method });
-      if (url.endsWith("page=1")) return Response.json([published]);
+      if (url.endsWith("page=1")) return Response.json([current]);
+      if (url.endsWith("/releases/47") && init?.method === "PATCH") { current.draft = false; return Response.json(current); }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const mismatchedTag = { ...draft(), tag_name: "v0.1.1" };
+    const mismatchedRequest = async (): Promise<Response> => Response.json([mismatchedTag]);
+    const missingRequest = async (): Promise<Response> => Response.json([]);
+    const client = createGitHubReleaseClient("test-token", request as typeof fetch);
+    await client.publishRelease("owner/repository", tag);
+    await client.publishRelease("owner/repository", tag);
+    expect(requests.filter(({ method }) => method === "PATCH")).toEqual([{ url: "https://api.github.com/repos/owner/repository/releases/47", method: "PATCH" }]);
+    await expect(createGitHubReleaseClient("test-token", missingRequest as typeof fetch).publishRelease("owner/repository", tag)).rejects.toThrow("Release draft does not exist");
+    await expect(createGitHubReleaseClient("test-token", mismatchedRequest as typeof fetch).publishRelease("owner/repository", tag)).rejects.toThrow("Release draft does not exist");
+  });
+
+  test("publishes only the expected sole exact draft and verifies its published postcondition", async () => {
+    const { directory, bundle } = await temporaryBundle();
+    const bytes = new Map<string, Uint8Array>();
+    for (const name of assetNames) bytes.set(name, new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer()));
+    const current = draft(assetNames.map(asset)); const requests: Array<{ url: string; method?: string }> = [];
+    const request = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input); requests.push({ url, method: init?.method });
+      if (url.endsWith("page=1")) return Response.json([current]);
       if (url.startsWith("https://assets.example/")) return new Response(bytes.get(decodeURIComponent(new URL(url).pathname.slice(1))));
-      if (url.endsWith("/releases/47") && init?.method === "PATCH") return Response.json({});
+      if (url.endsWith("/releases/47") && init?.method === "PATCH") { current.draft = false; return Response.json(current); }
       throw new Error(`Unexpected request ${url}`);
     };
     try {
       const client = createGitHubReleaseClient("test-token", request as typeof fetch);
-      await client.ensureDraft("owner/repository", tag, bundle);
-      published.draft = true;
-      await client.publishRelease("owner/repository", tag);
+      await client.publishExactRelease("owner/repository", tag, bundle, 47);
       expect(requests.some(({ url }) => url.startsWith("https://uploads.example/"))).toBe(false);
       expect(requests).toContainEqual({ url: "https://api.github.com/repos/owner/repository/releases/47", method: "PATCH" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("rejects release-ID, inventory, asset, and publication-status changes around exact publication", async () => {
+    const { directory, bundle } = await temporaryBundle();
+    const bytes = new Map<string, Uint8Array>();
+    for (const name of assetNames) bytes.set(name, new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer()));
+    const requestFor = (responses: () => Draft[], patch?: (current: Draft) => void) => async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.endsWith("page=1")) return Response.json(responses());
+      if (url.startsWith("https://assets.example/")) return new Response(bytes.get(decodeURIComponent(new URL(url).pathname.slice(1))));
+      if (url.endsWith("/releases/47") && init?.method === "PATCH") { patch?.(responses()[0]!); return Response.json({}); }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    try {
+      const current = draft(assetNames.map(asset));
+      await expect(createGitHubReleaseClient("test-token", requestFor(() => [current]) as typeof fetch).publishExactRelease("owner/repository", tag, bundle, 48)).rejects.toThrow("ID changed");
+
+      const extraRelease = { ...draft(), id: 48, tag_name: "v0.1.1" };
+      await expect(createGitHubReleaseClient("test-token", requestFor(() => [draft(assetNames.map(asset)), extraRelease]) as typeof fetch).publishExactRelease("owner/repository", tag, bundle, 47)).rejects.toThrow("sole repository release");
+
+      const divergent = draft([{ name: assetNames[0], browser_download_url: "https://assets.example/divergent" }, ...assetNames.slice(1).map(asset)]);
+      await expect(createGitHubReleaseClient("test-token", requestFor(() => [divergent]) as typeof fetch).publishExactRelease("owner/repository", tag, bundle, 47)).rejects.toThrow("diverges");
+
+      const unchangedDraft = draft(assetNames.map(asset));
+      await expect(createGitHubReleaseClient("test-token", requestFor(() => [unchangedDraft]) as typeof fetch).publishExactRelease("owner/repository", tag, bundle, 47)).rejects.toThrow("postcondition failed");
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 

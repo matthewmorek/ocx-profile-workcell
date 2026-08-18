@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { repositoryRoot } from "../scripts/common";
+import { releaseApiCommands } from "../scripts/release-api";
 import { shouldRestoreDeployment } from "../scripts/release-state";
 
 type YamlValue = string | number | boolean | null | YamlValue[] | { [key: string]: YamlValue };
@@ -51,6 +52,13 @@ function stepByName(job: YamlObject, name: string): YamlObject {
   if (!step) throw new Error(`Workflow step ${name} is missing.`);
   return step;
 }
+function requiredJobs(job: YamlObject): string[] {
+  const needs = job.needs;
+  return typeof needs === "string" ? [needs] : Array.isArray(needs) && needs.every((value) => typeof value === "string") ? needs as string[] : [];
+}
+function workflowReleaseApiCommands(jobs: YamlObject): string[] {
+  return Object.values(jobs).flatMap((job) => steps(object(job, "workflow job")).flatMap((step) => typeof step.run === "string" ? [...step.run.matchAll(/\bbun\s+run\s+release:api\s+--\s+([a-z-]+)/g)].map((match) => match[1]!) : []));
+}
 
 describe("workflow supply-chain and production guards", () => {
   test("Ruby Psych parses every workflow and composite action, safely restoring the YAML 1.1 on key", async () => {
@@ -60,6 +68,14 @@ describe("workflow supply-chain and production guards", () => {
       const parsed = await parseYaml(await readFile(path, "utf8"));
       expect(typeof parsed).toBe("object");
       if (path.includes("/workflows/")) expect(parsed.on).toBeDefined();
+    }
+  });
+
+  test("uses only implemented release API commands in normal and recovery workflows", async () => {
+    for (const name of ["release.yml", "recover-release.yml"]) {
+      const commands = workflowReleaseApiCommands(object((await parseYaml(await workflow(name))).jobs, `${name}.jobs`));
+      expect(commands.length).toBeGreaterThan(0);
+      for (const command of commands) expect(releaseApiCommands).toContain(command);
     }
   });
 
@@ -104,6 +120,7 @@ describe("workflow supply-chain and production guards", () => {
     expect(deployed.permissions).toEqual({ actions: "read", contents: "read", pages: "write", "id-token": "write" });
     expect(published.permissions).toEqual({ actions: "read", contents: "write" });
     expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain('actions/runs/$SOURCE_RUN_ID');
+    expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain('actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT');
     expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain("--source-run-attempt");
     expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain("--artifact-digest");
     const downloads = [preflight, prepared, deployed, published].map((job) => steps(job).find((step) => step.uses === "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"));
@@ -115,12 +132,20 @@ describe("workflow supply-chain and production guards", () => {
     }
     expect(recoverySource).not.toContain("bun run build");
     expect(recoverySource).not.toContain("bun run package:release");
-    expect(prepared.needs).toBe("preflight-recovery"); expect(deployed.needs).toBe("prepare-exact-draft"); expect(published.needs).toEqual(["preflight-recovery", "prepare-exact-draft", "deploy-exact-pages"]);
+    expect(prepared.needs).toBe("preflight-recovery"); expect(deployed.needs).toEqual(["preflight-recovery", "prepare-exact-draft"]); expect(published.needs).toEqual(["preflight-recovery", "prepare-exact-draft", "deploy-exact-pages"]);
+    for (const job of [preflight, prepared, deployed, published]) {
+      const dependencies = requiredJobs(job);
+      for (const match of JSON.stringify(job).matchAll(/needs\.([a-z0-9-]+)\.outputs/g)) expect(dependencies).toContain(match[1]);
+    }
     const deployIndex = steps(deployed).findIndex((step) => step.id === "deploy-pages"); const liveIndex = steps(deployed).findIndex((step) => step.id === "live-verification");
     expect(deployIndex).toBeGreaterThan(-1); expect(liveIndex).toBeGreaterThan(deployIndex);
+    const preDeployStateIndex = steps(deployed).findIndex((step) => step.id === "decision"); const draftVerificationIndex = steps(deployed).findIndex((step) => step.name === "Reverify the sole exact draft immediately before Pages mutation");
+    expect(draftVerificationIndex).toBeGreaterThan(preDeployStateIndex); expect(draftVerificationIndex).toBeLessThan(deployIndex);
     expect(stepByName(deployed, "Fail first-publication recovery without restoration").if).toBe("always() && steps.live-verification.outputs.verified != 'true'");
     expect(recoverySource).not.toContain("restore-");
-    expect(String(stepByName(published, "Publish exact verified draft").run)).toContain("release:api -- publish");
+    expect(String(stepByName(published, "Reassert tag, exact draft, live Pages, and pre-publish state").run)).toContain("release:api -- publish-exact");
+    expect(String(stepByName(published, "Reassert tag, exact draft, live Pages, and pre-publish state").run)).toContain("--expected-release-id");
+    expect(stepByName(published, "Verify exact live Pages bytes after publication")).toBeDefined();
     for (const phase of ["pre-draft", "pre-deploy", "pre-publish"]) expect(recoverySource).toContain(`--phase ${phase}`);
     expect(recoverySource).toContain("resume-live");
   });
