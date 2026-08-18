@@ -8,54 +8,22 @@ jobs:
   validate-pinned:
     runs-on: macos-14
     timeout-minutes: 8
+    permissions: { contents: read }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { persist-credentials: false }
-      - name: Assert trusted runner and bootstrap pinned tools
-        uses: ./.github/actions/bootstrap-pinned
-      - run: |
-          bun --version; "$OCX_BIN" --version; "$OPENCODE_BIN" --version
-          bun install --frozen-lockfile
-          VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
-          bun run validate -- --version "$VERSION" --commit "$GITHUB_SHA" --work-dir "$RUNNER_TEMP/validate" --validation-mode pinned --expected-ocx-version 2.0.14 --expected-opencode-version 1.17.15
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: validation
-          path: ${{ runner.temp }}/validate
-  validate-latest:
-    if: github.event_name == 'pull_request'
-    continue-on-error: true
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with: { persist-credentials: false }
-      - name: Bootstrap checksum-pinned Bun and discover current official OCX and OpenCode
+      - name: Install pinned Bun and validate the Apple Silicon runner
         run: |
           set -euo pipefail
+          npm install --global bun@1.3.5
+          test "$(bun --version)" = 1.3.5
           test "$(uname -m)" = arm64
-          /usr/bin/curl -fsSL -o "$RUNNER_TEMP/bun.zip" https://github.com/oven-sh/bun/releases/download/bun-v1.3.5/bun-darwin-aarch64.zip
-          echo "db17588a4aea8804856825d4bead3f05e1f37276ca606f37e369b4f72f35d3fb  $RUNNER_TEMP/bun.zip" | /usr/bin/shasum -a 256 -c -
-          unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bun"
-          chmod +x "$RUNNER_TEMP/bun/bun-darwin-aarch64"
-          echo "$RUNNER_TEMP/bun/bun-darwin-aarch64" >> "$GITHUB_PATH"
-          OCX_URL="$(/usr/bin/curl -fsSL https://api.github.com/repos/kdcokenny/ocx/releases/latest | jq -r '.assets[] | select(.name == "ocx-darwin-arm64") | .browser_download_url')"
-          OPENCODE_URL="$(/usr/bin/curl -fsSL https://api.github.com/repos/anomalyco/opencode/releases/latest | jq -r '.assets[] | select(.name == "opencode-darwin-arm64.zip") | .browser_download_url')"
-          test -n "$OCX_URL" && test "$OCX_URL" != null
-          test -n "$OPENCODE_URL" && test "$OPENCODE_URL" != null
-          /usr/bin/curl -fsSL -o "$RUNNER_TEMP/ocx-latest" "$OCX_URL"
-          /usr/bin/curl -fsSL -o "$RUNNER_TEMP/opencode-latest.zip" "$OPENCODE_URL"
-          chmod +x "$RUNNER_TEMP/ocx-latest"
-          unzip -q "$RUNNER_TEMP/opencode-latest.zip" -d "$RUNNER_TEMP/opencode-latest"
-          chmod +x "$RUNNER_TEMP/opencode-latest/opencode"
-          echo "OCX_BIN=$RUNNER_TEMP/ocx-latest" >> "$GITHUB_ENV"
-          echo "OPENCODE_BIN=$RUNNER_TEMP/opencode-latest/opencode" >> "$GITHUB_ENV"
-      - name: Log discovered tool versions and run the full advisory validation contract
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 14
+      - name: Build, test, and smoke-test the minimal registry
         run: |
           set -euo pipefail
-          bun --version
-          "$OCX_BIN" --version
-          "$OPENCODE_BIN" --version
           bun install --frozen-lockfile
-          VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
-          bun run validate -- --version "$VERSION" --commit "$GITHUB_SHA" --work-dir "$RUNNER_TEMP/validate-latest" --validation-mode advisory
+          test "$(./node_modules/.bin/ocx --version)" = 2.0.14
+          bun run build
+          REGISTRY_DIST=dist bun run test
+          REGISTRY_DIST=dist bun run smoke

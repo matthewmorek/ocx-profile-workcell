@@ -7,15 +7,24 @@ concurrency:
   group: pages-production
   cancel-in-progress: false
 jobs:
-  verify-and-package:
+  release:
     runs-on: macos-14
-    timeout-minutes: 8
-    permissions: { contents: read }
+    timeout-minutes: 10
+    permissions: { contents: write, pages: write, id-token: write }
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy-pages.outputs.page_url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { persist-credentials: false, fetch-depth: 0 }
-      - uses: ./.github/actions/bootstrap-pinned
-      - name: Validate annotated tag and construct immutable bundle
+      - name: Install pinned Bun and validate the Apple Silicon runner
+        run: |
+          set -euo pipefail
+          npm install --global bun@1.3.5
+          test "$(bun --version)" = 1.3.5
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 14
+      - name: Validate the annotated tag, test, and build Pages
         run: |
           set -euo pipefail
           test "$(git cat-file -t "$GITHUB_REF")" = tag
@@ -23,177 +32,78 @@ jobs:
           git merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
           VERSION="${GITHUB_REF_NAME#v}"
           test "$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')" = "$VERSION"
-          TAGGER_EPOCH="$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$GITHUB_REF_NAME")"
-          test -n "$TAGGER_EPOCH"
+          test "$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')" = "$VERSION"
           bun install --frozen-lockfile
-           bun run validate -- --version "$VERSION" --commit "$SOURCE_COMMIT" --work-dir "$RUNNER_TEMP/validate" --validation-mode pinned --expected-ocx-version 2.0.14 --expected-opencode-version 1.17.15
-          bun run package:release -- --version "$VERSION" --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --tagger-epoch "$TAGGER_EPOCH" --pages "$RUNNER_TEMP/validate/pages" --evidence "$RUNNER_TEMP/validate/install-evidence.json" --out-dir release-out
-          bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance release-out/provenance.json --receipt release-out/receipt.jsonc --checksums release-out/SHA256SUMS --expected-tag "$GITHUB_REF_NAME" --extract-to "$RUNNER_TEMP/preflight-pages"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: target-release-bundle
-          path: release-out
-          if-no-files-found: error
-  prepare-production:
-    needs: verify-and-package
-    runs-on: macos-14
-    permissions: { contents: write }
-    outputs:
-      kind: ${{ steps.decision.outputs.kind }}
-      recovery_tag: ${{ steps.recovery.outputs.tag }}
-      recovery_available: ${{ steps.recovery.outputs.available }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with: { persist-credentials: false }
-      - uses: ./.github/actions/bootstrap-pinned
-      - run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with: { name: target-release-bundle, path: bundle }
-      - name: Verify target archive before production inspection
+          test "$(./node_modules/.bin/ocx --version)" = 2.0.14
+          bun run build
+          REGISTRY_DIST=dist bun run test
+          REGISTRY_DIST=dist bun run smoke
+          bun -e 'const [version, tag, commit, path] = process.argv.slice(1); await Bun.write(path, `${JSON.stringify({ version, tag, commit })}\n`)' "$VERSION" "$GITHUB_REF_NAME" "$SOURCE_COMMIT" dist/release.json
+      - id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
+      - name: Reject a stale Pages version
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
         run: |
           set -euo pipefail
-          bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$GITHUB_REF_NAME" --extract-to "$RUNNER_TEMP/target-pages"
-      - id: decision
-        name: Inspect and classify production state
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          bun run release:api -- inspect --repository matthewmorek/ocx-workspace-profile --base-url https://matthewmorek.github.io/ocx-workspace-profile --tag "$GITHUB_REF_NAME" --expected-release "$RUNNER_TEMP/target-pages/release.json" --out state.json --token-env GITHUB_TOKEN
-          DECISION="$(bun -e 'process.stdout.write(JSON.parse(await Bun.file("state.json").text()).decision.kind)')"
-           case "$DECISION" in first-publication|release-with-recovery|resume-draft|published-noop) ;; *) exit 1 ;; esac
-           printf 'kind=%s\n' "$DECISION" >> "$GITHUB_OUTPUT"
-           printf 'recovery_tag=%s\n' "$(bun -e 'process.stdout.write(JSON.parse(await Bun.file("state.json").text()).decision.recoveryTag ?? "")')" >> "$GITHUB_OUTPUT"
-      - name: Verify equal-version draft live bytes before resume
-        if: steps.decision.outputs.kind == 'resume-draft'
-        run: bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$GITHUB_REF_NAME"
-      - id: recovery
-        name: Capture verified recovery bundle before deployment
-        if: steps.decision.outputs.kind == 'release-with-recovery' || steps.decision.outputs.kind == 'resume-draft'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.decision.outputs.kind }}" = release-with-recovery ]; then
-            RECOVERY_TAG="${{ steps.decision.outputs.recovery_tag }}"
-            bun run release:api -- download --repository matthewmorek/ocx-workspace-profile --tag "$RECOVERY_TAG" --out-dir recovery --token-env GITHUB_TOKEN
-            bun run verify:release -- bundle --archive "recovery/ocx-workspace-profile-$RECOVERY_TAG.tar.gz" --provenance recovery/provenance.json --receipt recovery/receipt.jsonc --checksums recovery/SHA256SUMS --expected-tag "$RECOVERY_TAG" --extract-to recovery/pages
-          else
-            RECOVERY_TAG="$GITHUB_REF_NAME"
-            cp -R bundle recovery
-            cp -R "$RUNNER_TEMP/target-pages" recovery/pages
-          fi
-          printf 'tag=%s\n' "$RECOVERY_TAG" >> "$GITHUB_OUTPUT"
-           printf 'available=true\n' >> "$GITHUB_OUTPUT"
-      - name: Create or verify exact immutable release assets
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bun run release:api -- ensure-draft --repository matthewmorek/ocx-workspace-profile --tag "$GITHUB_REF_NAME" --bundle bundle/release-bundle.json --token-env GITHUB_TOKEN
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: steps.recovery.outputs.available == 'true'
-        with:
-          name: verified-recovery-release-bundle
-          path: recovery
-          if-no-files-found: error
-  deploy-pages:
-    needs: prepare-production
-    runs-on: macos-14
-    permissions: { contents: read, pages: write, id-token: write }
-    environment: github-pages
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with: { persist-credentials: false }
-      - uses: ./.github/actions/bootstrap-pinned
-      - run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with: { name: target-release-bundle, path: bundle }
-      - name: Verify target archive before deployment
-        run: bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$GITHUB_REF_NAME" --extract-to "$RUNNER_TEMP/target-pages"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        if: needs.prepare-production.outputs.recovery_available == 'true'
-        with: { name: verified-recovery-release-bundle, path: recovery }
-      - name: Re-verify transferred recovery bundle
-        if: needs.prepare-production.outputs.recovery_available == 'true'
-        run: bun run verify:release -- bundle --archive "recovery/ocx-workspace-profile-${{ needs.prepare-production.outputs.recovery_tag }}.tar.gz" --provenance recovery/provenance.json --receipt recovery/receipt.jsonc --checksums recovery/SHA256SUMS --expected-tag "${{ needs.prepare-production.outputs.recovery_tag }}" --extract-to "$RUNNER_TEMP/recovery-pages"
-      - name: Verify already-published no-op is still live
-        if: needs.prepare-production.outputs.kind == 'published-noop'
-        run: bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$GITHUB_REF_NAME"
-      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
-        if: needs.prepare-production.outputs.kind != 'published-noop'
+          LIVE_RELEASE="$RUNNER_TEMP/live-release.json"
+          STATUS="$(curl --silent --show-error --output "$LIVE_RELEASE" --write-out '%{http_code}' "$BASE_URL/release.json")"
+          case "$STATUS" in
+            200) bun -e '
+              const parse = (version) => {
+                const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version);
+                if (!match) throw new Error(`Invalid SemVer: ${version}`);
+                return { core: match.slice(1, 4).map(BigInt), prerelease: match[4]?.split(".") ?? [] };
+              };
+              const compareIdentifier = (left, right) => {
+                const leftNumeric = /^\d+$/.test(left);
+                const rightNumeric = /^\d+$/.test(right);
+                if (leftNumeric && rightNumeric) return BigInt(left) === BigInt(right) ? 0 : BigInt(left) > BigInt(right) ? 1 : -1;
+                if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+                return left === right ? 0 : left > right ? 1 : -1;
+              };
+              const compare = (left, right) => {
+                for (let index = 0; index < left.core.length; index += 1) if (left.core[index] !== right.core[index]) return left.core[index] > right.core[index] ? 1 : -1;
+                if (!left.prerelease.length || !right.prerelease.length) return left.prerelease.length === right.prerelease.length ? 0 : left.prerelease.length ? -1 : 1;
+                for (let index = 0; index < Math.min(left.prerelease.length, right.prerelease.length); index += 1) { const result = compareIdentifier(left.prerelease[index], right.prerelease[index]); if (result) return result; }
+                return left.prerelease.length === right.prerelease.length ? 0 : left.prerelease.length > right.prerelease.length ? 1 : -1;
+              };
+              const live = JSON.parse(await Bun.file(process.argv[1]).text()).version;
+              const target = process.argv[2];
+              if (compare(parse(target), parse(live)) <= 0) throw new Error(`Target ${target} is not newer than live ${live}.`);
+            ' "$LIVE_RELEASE" "${GITHUB_REF_NAME#v}" ;;
+            404) ;;
+            *) echo "Unable to read the live release version (HTTP $STATUS)." >&2; exit 1 ;;
+          esac
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
-        if: needs.prepare-production.outputs.kind != 'published-noop'
         with:
-          name: target-pages-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/target-pages
-      - id: deployment-attempt
-        if: needs.prepare-production.outputs.kind != 'published-noop'
-        run: printf 'attempted=true\n' >> "$GITHUB_OUTPUT"
+          name: github-pages
+          path: dist
       - id: deploy-pages
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128
-        if: needs.prepare-production.outputs.kind != 'published-noop'
         with:
-          artifact_name: target-pages-${{ github.run_id }}-${{ github.run_attempt }}
-      - id: live-verification
-        name: Live-verify deployed Pages bytes
-        if: needs.prepare-production.outputs.kind != 'published-noop' && steps.deploy-pages.outcome == 'success'
+          artifact_name: github-pages
+      - name: Compare the live registry with dist
+        env:
+          BASE_URL: ${{ steps.deploy-pages.outputs.page_url }}
         run: |
-          bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$GITHUB_REF_NAME"
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
-      - id: restore-preflight
-        name: Prepare verified restoration
-        if: always() && steps.deployment-attempt.outputs.attempted == 'true' && steps.live-verification.outputs.verified != 'true' && needs.prepare-production.outputs.recovery_available == 'true'
-        run: printf 'restore=true\n' >> "$GITHUB_OUTPUT"
-      - id: restore-configure
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
-        if: always() && steps.restore-preflight.outputs.restore == 'true'
-      - id: restore-upload
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
-        if: always() && steps.restore-configure.outcome == 'success'
-        with:
-          name: recovery-pages-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/recovery-pages
-      - id: restore-deploy
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128
-        if: always() && steps.restore-upload.outcome == 'success'
-        with:
-          artifact_name: recovery-pages-${{ github.run_id }}-${{ github.run_attempt }}
-      - id: restoration-verification
-        name: Verify restored Pages bytes
-        if: always() && steps.restore-deploy.outcome == 'success'
-        run: |
-          bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance recovery/provenance.json --release "$RUNNER_TEMP/recovery-pages/release.json" --expected-tag "${{ needs.prepare-production.outputs.recovery_tag }}"
-          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
-      - name: Report restoration result loudly
-        if: always() && steps.restore-preflight.outputs.restore == 'true'
-        run: |
-          if [ "${{ steps.restoration-verification.outputs.verified }}" != true ]; then
-            echo '::error::Release deployment failed and restoration did not verify.'
-          else
-            echo '::error::Release deployment failed after verified restoration of prior Pages bytes.'
-          fi
-          exit 1
-      - name: Report failed first publication cleanup state
-        if: always() && needs.prepare-production.outputs.kind == 'first-publication' && steps.live-verification.outputs.verified != 'true'
-        run: |
-          echo '::error::Initial publication did not live-verify. The draft is retained; Pages may contain unverified bytes. Inspect Pages and the draft before retrying or cleaning up.'
-          exit 1
-  publish-release:
-    needs: [prepare-production, deploy-pages]
-    if: needs.prepare-production.outputs.kind != 'published-noop'
-    runs-on: macos-14
-    permissions: { contents: write }
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with: { persist-credentials: false }
-      - uses: ./.github/actions/bootstrap-pinned
-      - run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with: { name: target-release-bundle, path: bundle }
-      - name: Re-check exact draft assets before publishing
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/live/components/ws/profiles/ws"
+          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/release.json" > "$RUNNER_TEMP/live/release.json"
+          cmp "dist/release.json" "$RUNNER_TEMP/live/release.json"
+          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/index.json" > "$RUNNER_TEMP/live/index.json"
+          cmp "dist/index.json" "$RUNNER_TEMP/live/index.json"
+          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/components/ws.json" > "$RUNNER_TEMP/live/components/ws.json"
+          cmp "dist/components/ws.json" "$RUNNER_TEMP/live/components/ws.json"
+          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/components/ws-overrides.json" > "$RUNNER_TEMP/live/components/ws-overrides.json"
+          cmp "dist/components/ws-overrides.json" "$RUNNER_TEMP/live/components/ws-overrides.json"
+          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/components/ws/profiles/ws/AGENTS.md" > "$RUNNER_TEMP/live/components/ws/profiles/ws/AGENTS.md"
+          cmp "dist/components/ws/profiles/ws/AGENTS.md" "$RUNNER_TEMP/live/components/ws/profiles/ws/AGENTS.md"
+          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/components/ws/profiles/ws/ocx.jsonc" > "$RUNNER_TEMP/live/components/ws/profiles/ws/ocx.jsonc"
+          cmp "dist/components/ws/profiles/ws/ocx.jsonc" "$RUNNER_TEMP/live/components/ws/profiles/ws/ocx.jsonc"
+      - name: Create the GitHub Release when it does not already exist
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: bun run release:api -- ensure-draft --repository matthewmorek/ocx-workspace-profile --tag "$GITHUB_REF_NAME" --bundle bundle/release-bundle.json --token-env GITHUB_TOKEN
-      - name: Publish verified draft
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bun run release:api -- publish --repository matthewmorek/ocx-workspace-profile --tag "$GITHUB_REF_NAME" --token-env GITHUB_TOKEN
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
