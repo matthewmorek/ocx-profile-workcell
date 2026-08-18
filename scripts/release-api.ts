@@ -1,7 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fail, parseArguments, parseTag, readJsonc, requiredArgument, resolvedInside, sha256, sha256File, writeJsonAtomic } from "./common";
-import { classifyProductionState, parseReleaseManifest, parseRemoteRelease, type RemoteRelease } from "./release-state";
+import { classifyFailedFirstPublicationRecovery, classifyProductionState, parseReleaseManifest, parseRemoteRelease, type RemoteRelease } from "./release-state";
 
 type ReleaseAsset = Readonly<{ name: string; browser_download_url: string }>;
 type Release = RemoteRelease & Readonly<{ upload_url: string; assets: readonly ReleaseAsset[] }>;
@@ -25,7 +25,9 @@ function bundleAssetNames(tag: string): readonly string[] {
   return [`ocx-workspace-profile-${tag}.tar.gz`, "provenance.json", "receipt.jsonc", "SHA256SUMS"];
 }
 
-function parseBundle(value: unknown, tag: string, bundlePath: string): ReleaseBundle {
+export function parseReleaseBundle(value: unknown, tag: string, bundlePath: string): ReleaseBundle {
+  const manifestPath = resolve(bundlePath);
+  const manifestRoot = dirname(manifestPath);
   if (!value || typeof value !== "object") fail("Release bundle is malformed.");
   const bundle = value as Record<string, unknown>;
   if (bundle.schemaVersion !== 1 || bundle.tag !== tag || bundle.version !== tag.slice(1) || !Array.isArray(bundle.assets)) fail("Release bundle tag or assets are malformed.");
@@ -33,11 +35,11 @@ function parseBundle(value: unknown, tag: string, bundlePath: string): ReleaseBu
     if (!asset || typeof asset !== "object") fail("Release bundle contains a malformed asset.");
     const candidate = asset as Record<string, unknown>;
     if (typeof candidate.path !== "string" || typeof candidate.name !== "string" || typeof candidate.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(candidate.sha256) || isAbsolute(candidate.path) || candidate.path.includes("\\") || candidate.path.includes(":") || candidate.path.split("/").some((part) => !part || part === "." || part === "..") || basename(candidate.path) !== candidate.name) fail("Release bundle contains an unsafe asset.");
-    return { path: resolvedInside(dirname(bundlePath), candidate.path), name: candidate.name, sha256: candidate.sha256 };
+    return { path: resolvedInside(manifestRoot, candidate.path), name: candidate.name, sha256: candidate.sha256 };
   });
   const expected = bundleAssetNames(tag);
   if (assets.length !== expected.length || new Set(assets.map(({ name }) => name)).size !== expected.length || assets.some(({ name }) => !expected.includes(name))) fail("Release bundle asset set is incomplete or unexpected.");
-  return { tag, version: bundle.version, path: bundlePath, assets };
+  return { tag, version: bundle.version, path: manifestPath, assets };
 }
 
 async function immutableBundleAssets(bundle: ReleaseBundle): Promise<readonly BundleAsset[]> {
@@ -189,11 +191,28 @@ async function inspect(values: Map<string, string>): Promise<void> {
   await writeJsonAtomic(requiredArgument(values, "--out"), { schemaVersion: 1, decision, liveTag: parsedLive?.tag ?? null });
 }
 
+async function inspectFailedFirstPublicationRecovery(values: Map<string, string>): Promise<void> {
+  const repository = requiredArgument(values, "--repository");
+  const targetTag = parseTag(requiredArgument(values, "--tag"));
+  const expectedRelease = parseReleaseManifest(await readJsonc(requiredArgument(values, "--expected-release")));
+  if (!expectedRelease || expectedRelease.tag !== targetTag) fail("Expected release manifest does not match the target tag.");
+  const client = createGitHubReleaseClient(requiredToken(values));
+  const response = await fetch(`${requiredArgument(values, "--base-url").replace(/\/$/, "")}/release.json`);
+  if (!response.ok && response.status !== 404) fail(`Live release.json lookup failed: ${response.status}.`);
+  const live = response.status === 404 ? null : await response.json();
+  const releases = await client.listReleases(repository);
+  const targetRelease = selectRelease(releases, targetTag);
+  const decision = classifyFailedFirstPublicationRecovery({ target: expectedRelease, live, targetRelease: targetRelease ?? null, repositoryReleases: releases });
+  await writeJsonAtomic(requiredArgument(values, "--out"), { schemaVersion: 1, decision });
+}
+
 async function main(): Promise<void> {
   const command = Bun.argv[2];
   const allowed = command === "inspect"
     ? ["--repository", "--base-url", "--tag", "--expected-release", "--out", "--token-env"]
-    : command === "ensure-draft"
+    : command === "inspect-first-publication-recovery"
+      ? ["--repository", "--base-url", "--tag", "--expected-release", "--out", "--token-env"]
+      : command === "ensure-draft"
       ? ["--repository", "--tag", "--bundle", "--token-env"]
       : command === "download"
         ? ["--repository", "--tag", "--out-dir", "--token-env"]
@@ -202,16 +221,17 @@ async function main(): Promise<void> {
           : [];
   const values = parseArguments(Bun.argv.slice(3), allowed);
   if (command === "inspect") return inspect(values);
+  if (command === "inspect-first-publication-recovery") return inspectFailedFirstPublicationRecovery(values);
   const repository = requiredArgument(values, "--repository");
   const tag = parseTag(requiredArgument(values, "--tag"));
   const client = createGitHubReleaseClient(requiredToken(values));
   if (command === "ensure-draft") {
     const bundlePath = requiredArgument(values, "--bundle");
-    return client.ensureDraft(repository, tag, parseBundle(await readJsonc(bundlePath), tag, bundlePath));
+    return client.ensureDraft(repository, tag, parseReleaseBundle(await readJsonc(bundlePath), tag, bundlePath));
   }
   if (command === "download") return client.downloadRelease(repository, tag, requiredArgument(values, "--out-dir"));
   if (command === "publish") return client.publishRelease(repository, tag);
-  fail("Expected release-api subcommand inspect, ensure-draft, download, or publish.");
+  fail("Expected release-api subcommand inspect, inspect-first-publication-recovery, ensure-draft, download, or publish.");
 }
 
 if (import.meta.main) await main();

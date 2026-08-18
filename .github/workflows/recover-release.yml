@@ -1,0 +1,171 @@
+name: recover failed first publication
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing failed annotated tag
+        required: true
+        type: string
+      source_run_id:
+        description: Original release workflow run that retained target-release-bundle
+        required: true
+        type: string
+      confirm: { description: Type PUBLISH_EXACT, required: true, type: string }
+permissions: {}
+concurrency:
+  group: pages-production
+  cancel-in-progress: false
+jobs:
+  preflight-recovery:
+    if: inputs.confirm == 'PUBLISH_EXACT'
+    runs-on: macos-14
+    permissions: { actions: read, contents: read }
+    outputs:
+      kind: ${{ steps.decision.outputs.kind }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { persist-credentials: false, fetch-depth: 0 }
+      - uses: ./.github/actions/bootstrap-pinned
+      - run: bun install --frozen-lockfile
+      - name: Bind the retained bundle to the original annotated tag run
+        env:
+          RECOVERY_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git cat-file -t "refs/tags/$RECOVERY_TAG")" = tag
+          SOURCE_COMMIT="$(git rev-parse "refs/tags/$RECOVERY_TAG^{commit}")"
+          export SOURCE_COMMIT
+          git merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
+          git show "$RECOVERY_TAG:registry.jsonc" > "$RUNNER_TEMP/tag-registry.jsonc"
+          VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file(process.argv[1]).text()).version)' "$RUNNER_TEMP/tag-registry.jsonc")"
+          test "$VERSION" = "${RECOVERY_TAG#v}"
+          case "$SOURCE_RUN_ID" in *[!0-9]*|'') exit 1 ;; esac
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > source-run.json
+          bun -e 'const run = JSON.parse(await Bun.file("source-run.json").text()); const tag = process.env.RECOVERY_TAG; const commit = process.env.SOURCE_COMMIT; if (run.id !== Number(process.env.SOURCE_RUN_ID) || run.event !== "push" || run.head_branch !== tag || run.head_sha !== commit || run.path !== ".github/workflows/release.yml") throw new Error("Source run is not the original release run for the requested tag.");'
+      - name: Download and verify only the retained immutable bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: target-release-bundle
+          path: bundle
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Preflight exact retained bytes before production inspection
+        env:
+          RECOVERY_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$RECOVERY_TAG.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$RECOVERY_TAG" --extract-to "$RUNNER_TEMP/target-pages"
+          test "$(bun -e 'process.stdout.write(JSON.parse(await Bun.file(process.argv[1]).text()).commit)' "$RUNNER_TEMP/target-pages/release.json")" = "$(git rev-parse "refs/tags/$RECOVERY_TAG^{commit}")"
+      - id: decision
+        name: Inspect strict failed first-publication state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECOVERY_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          bun run release:api -- inspect-first-publication-recovery --repository matthewmorek/ocx-workspace-profile --base-url https://matthewmorek.github.io/ocx-workspace-profile --tag "$RECOVERY_TAG" --expected-release "$RUNNER_TEMP/target-pages/release.json" --out state.json --token-env GITHUB_TOKEN
+          DECISION="$(bun -e 'process.stdout.write(JSON.parse(await Bun.file("state.json").text()).decision.kind)')"
+          case "$DECISION" in first-publication|resume-draft) ;; *) exit 1 ;; esac
+          printf 'kind=%s\n' "$DECISION" >> "$GITHUB_OUTPUT"
+  prepare-exact-draft:
+    needs: preflight-recovery
+    runs-on: macos-14
+    permissions: { actions: read, contents: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/bootstrap-pinned
+      - run: bun install --frozen-lockfile
+      - name: Download the exact retained bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: target-release-bundle
+          path: bundle
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Re-verify and create or reuse exact draft assets
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECOVERY_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$RECOVERY_TAG.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$RECOVERY_TAG" --extract-to "$RUNNER_TEMP/target-pages"
+          bun run release:api -- ensure-draft --repository matthewmorek/ocx-workspace-profile --tag "$RECOVERY_TAG" --bundle bundle/release-bundle.json --token-env GITHUB_TOKEN
+  deploy-exact-pages:
+    needs: prepare-exact-draft
+    runs-on: macos-14
+    permissions: { actions: read, contents: read, pages: write, id-token: write }
+    environment: github-pages
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/bootstrap-pinned
+      - run: bun install --frozen-lockfile
+      - name: Download the exact retained bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: target-release-bundle
+          path: bundle
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Re-verify exact Pages bytes before deployment
+        env:
+          RECOVERY_TAG: ${{ inputs.tag }}
+        run: bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$RECOVERY_TAG.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$RECOVERY_TAG" --extract-to "$RUNNER_TEMP/target-pages"
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
+        with:
+          name: recovered-pages-${{ inputs.source_run_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/target-pages
+      - id: deploy-pages
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128
+        with:
+          artifact_name: recovered-pages-${{ inputs.source_run_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - id: live-verification
+        name: Live-verify every recovered provenance file
+        if: steps.deploy-pages.outcome == 'success'
+        env:
+          RECOVERY_TAG: ${{ inputs.tag }}
+        run: |
+          bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$RECOVERY_TAG"
+          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+      - name: Fail first-publication recovery without restoration
+        if: always() && steps.live-verification.outputs.verified != 'true'
+        run: |
+          echo '::error::Recovered first publication did not live-verify. The draft is retained; no restoration exists because there was no prior live release.'
+          exit 1
+  publish-exact-release:
+    needs: [prepare-exact-draft, deploy-exact-pages]
+    runs-on: macos-14
+    permissions: { actions: read, contents: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/bootstrap-pinned
+      - run: bun install --frozen-lockfile
+      - name: Download the exact retained bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: target-release-bundle
+          path: bundle
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Re-check exact draft assets before publishing
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECOVERY_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$RECOVERY_TAG.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$RECOVERY_TAG" --extract-to "$RUNNER_TEMP/target-pages"
+          bun run release:api -- ensure-draft --repository matthewmorek/ocx-workspace-profile --tag "$RECOVERY_TAG" --bundle bundle/release-bundle.json --token-env GITHUB_TOKEN
+      - name: Publish exact verified draft
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECOVERY_TAG: ${{ inputs.tag }}
+        run: bun run release:api -- publish --repository matthewmorek/ocx-workspace-profile --tag "$RECOVERY_TAG" --token-env GITHUB_TOKEN

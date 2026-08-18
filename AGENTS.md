@@ -39,6 +39,23 @@ After a protected PR passes required `validate-pinned`, bump source `registry.js
 
 The shared `pages-production` lock never cancels in-progress deployments. Initial publication is only `v0.1.0` with no prior live release. Higher versions capture a verified recovery bundle before mutation. Equal exact content resumes a draft or is a verified published no-op; equal mismatch, lower tag, malformed state, missing recovery, or divergent assets fail closed. If deploy was attempted, live verification failed, and recovery exists, restore and verify old bytes. A failed first publication leaves the draft and requires explicit cleanup/recovery; never improvise restoration.
 
+## Failed first-publication recovery
+
+Use `recover-release.yml` only when the original immutable tag run failed during its first publication. The agent maintainer must confirm all guards before dispatching it:
+
+- The tag is an existing annotated tag on `main`, and its version matches `registry.jsonc` in that tag.
+- The original release run is the `push` run for that exact tag and commit, and it retained `target-release-bundle`.
+- The live site has no release for the tag, or has no live release at all. The only other accepted state is the tag's sole exact matching draft release.
+- The retained bundle verifies before any production inspection or publication.
+
+Dispatch the workflow with the original release run ID and the exact confirmation string:
+
+```sh
+gh workflow run recover-release.yml --repo matthewmorek/ocx-workspace-profile -f tag=v0.1.0 -f source_run_id=32149931346 -f confirm=PUBLISH_EXACT
+```
+
+This is not the normal release path and is not rollback. It publishes only the bytes retained by the original tag run. Never retag, rebuild, repack, overwrite assets, move a tag, or manually deploy Pages. Recovery re-verifies the bundle, creates or reuses only the exact draft, deploys and live-verifies those bytes, then publishes the draft. If first-publication live verification fails, the workflow fails closed, retains the draft and diagnostics, and does not restore anything because no prior live release exists.
+
 ## Rollback and recovery
 
 Run the manual rollback workflow with an existing release tag and explicit confirmation. It downloads that release, verifies checksums/provenance/receipt/archive before extraction, and redeploys exact bytes. It changes global `latest`; it neither moves tags nor pins future `kdco/workspace` resolution. If a release job fails, retain diagnostics and draft, inspect `release.json`, then rerun only after the state machine’s guards are satisfied.

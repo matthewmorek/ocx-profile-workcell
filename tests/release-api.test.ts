@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { createGitHubReleaseClient } from "../scripts/release-api";
+import { join, relative } from "node:path";
+import { createGitHubReleaseClient, parseReleaseBundle } from "../scripts/release-api";
 import { sha256 } from "../scripts/common";
 
 const tag = "v0.1.0";
@@ -31,6 +31,25 @@ function draft(assets: Asset[] = [], draftRelease = true): Draft {
 }
 
 describe("GitHub release API client", () => {
+  test("resolves manifest-relative assets from relative and absolute manifest paths without permitting escapes", async () => {
+    const { directory, bundle } = await temporaryBundle();
+    const manifest = JSON.parse(await Bun.file(bundle.path).text());
+    try {
+      const relativeManifestPath = relative(process.cwd(), bundle.path);
+      for (const manifestPath of [relativeManifestPath, bundle.path]) {
+        const parsed = parseReleaseBundle(manifest, tag, manifestPath);
+        expect(parsed.path).toBe(bundle.path);
+        expect(parsed.assets.map(({ path }) => path)).toEqual(bundle.assets.map(({ path }) => path));
+      }
+      const traversal = structuredClone(manifest);
+      traversal.assets[0].path = `../${assetNames[0]}`;
+      const absolute = structuredClone(manifest);
+      absolute.assets[0].path = bundle.assets[0].path;
+      expect(() => parseReleaseBundle(traversal, tag, relativeManifestPath)).toThrow("unsafe asset");
+      expect(() => parseReleaseBundle(absolute, tag, relativeManifestPath)).toThrow("unsafe asset");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   test("finds drafts through authenticated paginated release listings", async () => {
     const target = draft(); const headers: string[] = [];
     const request = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

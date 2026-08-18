@@ -20,6 +20,10 @@ export type ProductionDecision =
   | Readonly<{ kind: "resume-draft" }>
   | Readonly<{ kind: "published-noop" }>;
 
+export type FailedFirstPublicationRecoveryDecision =
+  | Readonly<{ kind: "first-publication" }>
+  | Readonly<{ kind: "resume-draft" }>;
+
 export function shouldRestoreDeployment(input: Readonly<{ deploymentAttempted: boolean; liveVerified: boolean; recoveryAvailable: boolean }>): boolean {
   return input.deploymentAttempted && !input.liveVerified && input.recoveryAvailable;
 }
@@ -72,6 +76,33 @@ export function parseRemoteRelease(value: unknown): RemoteRelease | undefined {
   const candidate = value as Record<string, unknown>;
   if (!Number.isSafeInteger(candidate.id) || typeof candidate.draft !== "boolean" || typeof candidate.tag_name !== "string" || !Array.isArray(candidate.assets)) return undefined;
   return { id: candidate.id, draft: candidate.draft, tag_name: candidate.tag_name };
+}
+
+/** Allows recovery only when v0.1.0 has never been published or has its sole retained draft. */
+export function classifyFailedFirstPublicationRecovery(input: Readonly<{
+  target: ReleaseManifest;
+  live: unknown | null;
+  targetRelease: unknown | null;
+  repositoryReleases: readonly unknown[];
+}>): FailedFirstPublicationRecoveryDecision {
+  const target = parseReleaseManifest(input.target);
+  if (!target || target.version !== "0.1.0") fail("Failed first-publication recovery requires v0.1.0.");
+  if (input.live !== null) {
+    if (!parseReleaseManifest(input.live)) fail("Live release.json is malformed.");
+    fail("Failed first-publication recovery requires no live Pages release.");
+  }
+  const targetRelease = input.targetRelease === null ? undefined : parseRemoteRelease(input.targetRelease);
+  if (input.targetRelease !== null && !targetRelease) fail("Target GitHub Release state is malformed.");
+  if (targetRelease && (targetRelease.tag_name !== target.tag || !targetRelease.draft)) fail("Recovery draft is not an exact matching draft.");
+  const releases = input.repositoryReleases.map((release) => {
+    const parsed = parseRemoteRelease(release);
+    if (!parsed) fail("Repository GitHub Release state is malformed.");
+    return parsed;
+  });
+  if (new Set(releases.map((release) => release.id)).size !== releases.length) fail("Repository GitHub Release state contains duplicate release IDs.");
+  if (!targetRelease && releases.length === 0) return { kind: "first-publication" };
+  if (!targetRelease || releases.length !== 1 || releases[0].id !== targetRelease.id) fail("Failed first-publication recovery found an unexpected release state.");
+  return { kind: "resume-draft" };
 }
 
 function manifestsAreIdentical(left: ReleaseManifest, right: ReleaseManifest): boolean {

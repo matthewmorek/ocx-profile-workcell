@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { classifyProductionState, type ReleaseManifest } from "../scripts/release-state";
+import { classifyFailedFirstPublicationRecovery, classifyProductionState, type ReleaseManifest } from "../scripts/release-state";
 
 const target: ReleaseManifest = { schemaVersion: 1, tag: "v0.2.0", version: "0.2.0", commit: "b".repeat(40), releasedAt: "2026-08-18T00:00:00.000Z" };
 const first: ReleaseManifest = { ...target, tag: "v0.1.0", version: "0.1.0" };
@@ -8,6 +8,16 @@ const release = (tag: string, draft: boolean) => ({ id: 1, draft, tag_name: tag,
 const state = (overrides: Partial<Parameters<typeof classifyProductionState>[0]> = {}) => ({ target, live: null, targetRelease: null, liveRelease: null, repositoryReleases: [], ...overrides });
 
 describe("production release state classification", () => {
+  test("allows failed first-publication recovery only with no release or its sole matching draft", () => {
+    const recoveryState = (overrides: Partial<Parameters<typeof classifyFailedFirstPublicationRecovery>[0]> = {}) => ({ target: first, live: null, targetRelease: null, repositoryReleases: [], ...overrides });
+    const matchingDraft = release(first.tag, true);
+    expect(classifyFailedFirstPublicationRecovery(recoveryState())).toEqual({ kind: "first-publication" });
+    expect(classifyFailedFirstPublicationRecovery(recoveryState({ targetRelease: matchingDraft, repositoryReleases: [matchingDraft] }))).toEqual({ kind: "resume-draft" });
+    expect(() => classifyFailedFirstPublicationRecovery(recoveryState({ live: first }))).toThrow("no live Pages");
+    expect(() => classifyFailedFirstPublicationRecovery(recoveryState({ targetRelease: release(first.tag, false), repositoryReleases: [release(first.tag, false)] }))).toThrow("exact matching draft");
+    expect(() => classifyFailedFirstPublicationRecovery(recoveryState({ repositoryReleases: [release("v0.0.9", true)] }))).toThrow("unexpected release state");
+  });
+
   test("allows only a truly absent v0.1.0 first publication", () => {
     expect(classifyProductionState(state({ target: first }))).toEqual({ kind: "first-publication" });
     expect(classifyProductionState(state({ target: first, targetRelease: release(first.tag, true), repositoryReleases: [release(first.tag, true)] }))).toEqual({ kind: "first-publication" });

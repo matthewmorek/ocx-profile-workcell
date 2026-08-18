@@ -67,6 +67,29 @@ curl --fail --show-error https://matthewmorek.github.io/ocx-workspace-profile/re
 curl --fail --show-error https://matthewmorek.github.io/ocx-workspace-profile/index.json
 ```
 
+### Recover a failed first publication
+
+Use this exceptional workflow only when the original immutable tag run produced and retained the release bundle but failed during its first publication. It is not a normal release mechanism or a rollback. The workflow accepts only a failed annotated tag run with no live release, or the sole exact matching draft; it verifies the retained bytes before deployment and publication.
+
+Dispatch it with the original release run ID:
+
+```sh
+gh workflow run recover-release.yml --repo matthewmorek/ocx-workspace-profile -f tag=v0.1.0 -f source_run_id=32149931346 -f confirm=PUBLISH_EXACT
+```
+
+Monitor the recovery run, then verify the published artifact and live Pages content:
+
+```sh
+gh run list --repo matthewmorek/ocx-workspace-profile --workflow recover-release.yml --limit 5
+gh run watch RUN_ID --repo matthewmorek/ocx-workspace-profile --exit-status
+gh release download v0.1.0 --repo matthewmorek/ocx-workspace-profile --pattern "ocx-workspace-profile-v0.1.0.tar.gz" --pattern provenance.json --pattern receipt.jsonc --pattern SHA256SUMS --dir "$TMPDIR/v0.1.0"
+(cd "$TMPDIR/v0.1.0" && shasum -a 256 -c SHA256SUMS)
+bun run verify:release -- bundle --archive "$TMPDIR/v0.1.0/ocx-workspace-profile-v0.1.0.tar.gz" --provenance "$TMPDIR/v0.1.0/provenance.json" --receipt "$TMPDIR/v0.1.0/receipt.jsonc" --checksums "$TMPDIR/v0.1.0/SHA256SUMS" --expected-tag v0.1.0 --extract-to "$TMPDIR/v0.1.0/pages"
+bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance "$TMPDIR/v0.1.0/provenance.json" --release "$TMPDIR/v0.1.0/pages/release.json" --expected-tag v0.1.0
+```
+
+Never retag, rebuild, repack, overwrite assets, move a tag, or manually deploy Pages. If recovery fails live verification, retain the draft and diagnostics. There is no restoration path because first publication has no prior live release.
+
 Roll back only a published, verified release:
 
 ```sh
