@@ -33,11 +33,13 @@ jobs:
           name: immutable-release-bundle
           path: release-out
           if-no-files-found: error
-  publish:
+  prepare-production:
     needs: verify-and-package
     runs-on: macos-14
-    permissions: { contents: write, pages: write, id-token: write }
-    environment: github-pages
+    permissions: { contents: write }
+    outputs:
+      kind: ${{ steps.decision.outputs.kind }}
+      recovery_tag: ${{ steps.decision.outputs.recovery_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { persist-credentials: false }
@@ -70,35 +72,56 @@ jobs:
           bun run release:api -- download --repository matthewmorek/ocx-workspace-profile --tag "${{ steps.decision.outputs.recovery_tag }}" --out-dir recovery --token-env GITHUB_TOKEN
           bun run verify:release -- bundle --archive "recovery/ocx-workspace-profile-${{ steps.decision.outputs.recovery_tag }}.tar.gz" --provenance recovery/provenance.json --receipt recovery/receipt.jsonc --checksums recovery/SHA256SUMS --extract-to "$RUNNER_TEMP/recovery-pages"
           printf 'available=true\n' >> "$GITHUB_OUTPUT"
-      - name: Create or reuse exact release draft and assets
-        if: steps.decision.outputs.kind != 'published-noop'
+      - name: Create or verify exact immutable release assets
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: bun run release:api -- ensure-draft --repository matthewmorek/ocx-workspace-profile --tag "$GITHUB_REF_NAME" --bundle bundle/release-bundle.json --token-env GITHUB_TOKEN
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: steps.recovery.outputs.available == 'true'
+        with:
+          name: verified-recovery-pages
+          path: ${{ runner.temp }}/recovery-pages
+          if-no-files-found: error
+  deploy-pages:
+    needs: prepare-production
+    runs-on: macos-14
+    permissions: { contents: read, pages: write, id-token: write }
+    environment: github-pages
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/bootstrap-pinned
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with: { name: immutable-release-bundle, path: bundle }
+      - name: Verify target archive before deployment
+        run: bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --extract-to "$RUNNER_TEMP/target-pages"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: needs.prepare-production.outputs.kind == 'release-with-recovery'
+        with: { name: verified-recovery-pages, path: ${{ runner.temp }}/recovery-pages }
       - name: Verify already-published no-op is still live
-        if: steps.decision.outputs.kind == 'published-noop'
+        if: needs.prepare-production.outputs.kind == 'published-noop'
         run: bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json"
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
-        if: steps.decision.outputs.kind != 'published-noop'
+        if: needs.prepare-production.outputs.kind != 'published-noop'
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
-        if: steps.decision.outputs.kind != 'published-noop'
-        with:
-          path: ${{ runner.temp }}/target-pages
+        if: needs.prepare-production.outputs.kind != 'published-noop'
+        with: { path: ${{ runner.temp }}/target-pages }
       - id: deployment-attempt
-        if: steps.decision.outputs.kind != 'published-noop'
+        if: needs.prepare-production.outputs.kind != 'published-noop'
         run: printf 'attempted=true\n' >> "$GITHUB_OUTPUT"
       - id: deploy-pages
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128
-        if: steps.decision.outputs.kind != 'published-noop'
+        if: needs.prepare-production.outputs.kind != 'published-noop'
       - id: live-verification
         name: Live-verify deployed Pages bytes
-        if: steps.decision.outputs.kind != 'published-noop' && success()
+        if: needs.prepare-production.outputs.kind != 'published-noop' && success()
         run: |
           bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json"
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
       - id: restore-preflight
         name: Prepare verified restoration
-        if: always() && steps.deployment-attempt.outputs.attempted == 'true' && steps.live-verification.outputs.verified != 'true' && steps.recovery.outputs.available == 'true'
+        if: always() && steps.deployment-attempt.outputs.attempted == 'true' && steps.live-verification.outputs.verified != 'true' && needs.prepare-production.outputs.kind == 'release-with-recovery'
         run: printf 'restore=true\n' >> "$GITHUB_OUTPUT"
       - id: restore-configure
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
@@ -106,8 +129,7 @@ jobs:
       - id: restore-upload
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
         if: always() && steps.restore-configure.outcome == 'success'
-        with:
-          path: ${{ runner.temp }}/recovery-pages
+        with: { path: ${{ runner.temp }}/recovery-pages }
       - id: restore-deploy
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128
         if: always() && steps.restore-upload.outcome == 'success'
@@ -127,12 +149,21 @@ jobs:
           fi
           exit 1
       - name: Report failed first publication cleanup state
-        if: always() && steps.decision.outputs.kind == 'first-publication' && steps.live-verification.outputs.verified != 'true'
+        if: always() && needs.prepare-production.outputs.kind == 'first-publication' && steps.live-verification.outputs.verified != 'true'
         run: |
           echo '::error::Initial publication did not live-verify. The draft is retained; Pages may contain unverified bytes. Inspect Pages and the draft before retrying or cleaning up.'
           exit 1
+  publish-release:
+    needs: [prepare-production, deploy-pages]
+    if: needs.prepare-production.outputs.kind != 'published-noop'
+    runs-on: macos-14
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/bootstrap-pinned
+      - run: bun install --frozen-lockfile
       - name: Publish verified draft
-        if: steps.decision.outputs.kind != 'published-noop' && steps.live-verification.outputs.verified == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: bun run release:api -- publish --repository matthewmorek/ocx-workspace-profile --tag "$GITHUB_REF_NAME" --token-env GITHUB_TOKEN

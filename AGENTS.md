@@ -11,7 +11,25 @@ This repository authors an OCX registry. `registry.jsonc`, `files/profiles/ws/oc
 
 ## Local preparation
 
-Use the verified Bun 1.3.5 binary, not a system Bun: `bun install --frozen-lockfile`; `bun test tests`; `bun run build -- --version 0.1.0 --out "$TMPDIR/pages"`; `bun run validate -- --version 0.1.0 --commit "$(git rev-parse HEAD)" --work-dir "$TMPDIR/validate"`. Keep OCX/OpenCode and all XDG roots disposable; never test against the real profile.
+Use the verified Bun 1.3.5 binary, not a system Bun. Keep OCX/OpenCode and all XDG roots disposable; never test against the real profile.
+
+```sh
+bun install --frozen-lockfile
+bun test tests
+VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
+COMMIT="$(git rev-parse HEAD)"
+bun run build -- --version "$VERSION" --out "$TMPDIR/pages"
+bun run validate -- --version "$VERSION" --commit "$COMMIT" --work-dir "$TMPDIR/validate"
+```
+
+After an annotated tag exists, package and preflight only the validation output; never rebuild in a publish job:
+
+```sh
+TAG="$(git describe --exact-match --tags)"
+TAGGER_EPOCH="$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$TAG")"
+bun run package:release -- --version "$VERSION" --tag "$TAG" --commit "$COMMIT" --tagger-epoch "$TAGGER_EPOCH" --pages "$TMPDIR/validate/pages" --evidence "$TMPDIR/validate/install-evidence.json" --out-dir release-out
+bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$TAG.tar.gz" --provenance release-out/provenance.json --receipt release-out/receipt.jsonc --checksums release-out/SHA256SUMS --extract-to "$TMPDIR/preflight-pages"
+```
 
 ## Release state machine
 

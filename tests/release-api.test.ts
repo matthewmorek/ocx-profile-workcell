@@ -50,4 +50,9 @@ describe("GitHub release API client", () => {
       await expect(createGitHubReleaseClient("test-token", request as typeof fetch).ensureDraft("owner/repository", tag, bundle)).rejects.toThrow("diverges");
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
+
+  test("fails loudly when the upstream release API is unavailable", async () => {
+    const request = async (): Promise<Response> => new Response("unavailable", { status: 503 });
+    await expect(createGitHubReleaseClient("test-token", request as typeof fetch).getRelease("owner/repository", tag)).rejects.toThrow("503");
+  });
 });

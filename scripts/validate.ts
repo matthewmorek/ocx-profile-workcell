@@ -14,4 +14,4 @@ async function main(): Promise<void> {
   if (!(await pathExists(evidence))) fail("Install verification did not create evidence.");
   await writeJsonAtomic(join(work, "validation-result.json"), { schemaVersion: 1, version, commit, pages, pagesHash: await sha256File(join(pages, "index.json")), evidence, evidenceHash: await sha256File(evidence) });
 }
-await main();
+if (import.meta.main) await main();

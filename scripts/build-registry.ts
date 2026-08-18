@@ -1,9 +1,9 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fail, parseArguments, parseVersion, promoteDirectory, readJsonc, repositoryRoot, requiredArgument, temporaryDirectory } from "./common";
 
 type Registry = { version?: unknown; components?: unknown[] };
-const expectedComponents = ["ws", "ws-overrides"];
+export const expectedComponents = ["ws", "ws-overrides"] as const;
 
 async function main(): Promise<void> {
   const arguments_ = parseArguments(Bun.argv.slice(2), ["--version", "--out"]);
@@ -28,18 +28,25 @@ async function main(): Promise<void> {
   } finally { await rm(stagedParent, { recursive: true, force: true }); }
 }
 
-async function normalizeOcxOutput(directory: string, version: string): Promise<void> {
+export async function normalizeOcxOutput(directory: string, version: string): Promise<void> {
   const index = await readJsonc<{ version?: unknown }>(join(directory, "index.json"));
   if (typeof index.version !== "string") fail("OCX output index.json has no version.");
+  const componentDirectory = join(directory, "components");
+  const names = (await readdir(componentDirectory, { withFileTypes: true }))
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .sort();
+  const expectedNames = expectedComponents.map((component) => `${component}.json`).sort();
+  if (JSON.stringify(names) !== JSON.stringify(expectedNames)) fail("OCX output must contain exactly ws and ws-overrides packuments.");
   index.version = version;
   await Bun.write(join(directory, "index.json"), `${JSON.stringify(index, null, 2)}\n`);
   for (const component of expectedComponents) {
     const path = join(directory, "components", `${component}.json`);
     const packument = await readJsonc<{ versions?: Record<string, unknown>; [key: string]: unknown }>(path);
-    if (!packument.versions || Object.keys(packument.versions).length !== 1) fail(`Unexpected OCX packument shape for ${component}.`);
+    if (!packument.versions || typeof packument.versions !== "object" || Object.keys(packument.versions).length !== 1) fail(`Unexpected OCX packument shape for ${component}.`);
     const [builderVersion] = Object.keys(packument.versions);
     const manifest = packument.versions[builderVersion] as Record<string, unknown>;
-    if ("version" in manifest) fail(`Component manifest ${component} unexpectedly contains a version field.`);
+    if (!manifest || typeof manifest !== "object" || "version" in manifest) fail(`Component manifest ${component} unexpectedly contains a version field.`);
     packument.versions = { [version]: manifest };
     const tags = packument["dist-tags"] as Record<string, unknown> | undefined;
     if (!tags || typeof tags !== "object") fail(`Packument ${component} has no dist-tags.`);
@@ -48,7 +55,7 @@ async function normalizeOcxOutput(directory: string, version: string): Promise<v
   }
 }
 
-async function validateOutput(directory: string, version: string): Promise<void> {
+export async function validateOutput(directory: string, version: string): Promise<void> {
   const index = await readJsonc<{ version?: unknown }>(join(directory, "index.json"));
   if (index.version !== version) fail("Normalized index version is incorrect.");
   for (const component of expectedComponents) {
@@ -59,4 +66,4 @@ async function validateOutput(directory: string, version: string): Promise<void>
   }
 }
 
-await main();
+if (import.meta.main) await main();

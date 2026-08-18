@@ -7,24 +7,40 @@ import { parseReleaseManifest } from "./release-state";
 type ArchiveEntry = Readonly<{ path: string; content: Uint8Array; mode: number }>;
 type ProvenanceFile = Readonly<{ path: string; sha256: string; mode: number }>;
 type Provenance = Readonly<{ archiveSha256: string; files: readonly ProvenanceFile[] }>;
+const expectedPagePaths = ["components/ws-overrides.json", "components/ws.json", "index.json", "release.json"];
 
 function tarField(header: Uint8Array, start: number, length: number): string {
   return Buffer.from(header.slice(start, start + length)).toString().replace(/\0.*$/, "").trim();
 }
 
-function parseTar(archive: Uint8Array): ArchiveEntry[] {
+function tarNumber(header: Uint8Array, start: number, length: number, field: string): number {
+  const text = tarField(header, start, length);
+  if (!/^[0-7]+$/.test(text)) fail(`Tar ${field} is not canonical octal.`);
+  const value = Number.parseInt(text, 8);
+  if (!Number.isSafeInteger(value)) fail(`Tar ${field} is outside the safe integer range.`);
+  return value;
+}
+
+function verifyHeaderChecksum(header: Uint8Array): void {
+  const declared = tarNumber(header, 148, 8, "checksum");
+  const actual = header.reduce((total, byte, index) => total + (index >= 148 && index < 156 ? 0x20 : byte), 0);
+  if (declared !== actual) fail("Tar header checksum mismatch.");
+}
+
+export function parseTar(archive: Uint8Array): ArchiveEntry[] {
   const data = gunzipSync(archive);
   const entries: ArchiveEntry[] = [];
   const names = new Set<string>();
   let offset = 0;
   while (offset + 512 <= data.length && data.slice(offset, offset + 512).some(Boolean)) {
     const header = data.slice(offset, offset + 512);
+    verifyHeaderChecksum(header);
     const path = tarField(header, 0, 100);
     const type = tarField(header, 156, 1) || "0";
-    const mode = Number.parseInt(tarField(header, 100, 8), 8);
-    const size = Number.parseInt(tarField(header, 124, 12), 8);
+    const mode = tarNumber(header, 100, 8, "mode");
+    const size = tarNumber(header, 124, 12, "size");
     const prefix = tarField(header, 345, 155);
-    if (!path || prefix || path.startsWith("/") || path.split("/").some((part) => !part || part === "." || part === "..") || names.has(path) || type !== "0" || mode !== 0o644 || !Number.isSafeInteger(size) || size < 0) fail(`Unsafe tar entry ${path || "<empty>"}.`);
+    if (!path || prefix || path.startsWith("/") || path.split("/").some((part) => !part || part === "." || part === "..") || names.has(path) || type !== "0" || mode !== 0o644 || size < 0) fail(`Unsafe tar entry ${path || "<empty>"}.`);
     const contentStart = offset + 512;
     const content = data.slice(contentStart, contentStart + size);
     if (content.length !== size) fail(`Truncated tar entry ${path}.`);
@@ -36,7 +52,7 @@ function parseTar(archive: Uint8Array): ArchiveEntry[] {
   return entries;
 }
 
-function parseProvenance(value: unknown): Provenance {
+export function parseProvenance(value: unknown): Provenance {
   if (!value || typeof value !== "object") fail("Provenance is malformed.");
   const candidate = value as Record<string, unknown>;
   if (typeof candidate.archiveSha256 !== "string" || !/^[a-f0-9]{64}$/.test(candidate.archiveSha256) || !Array.isArray(candidate.files)) fail("Provenance checksum declaration is malformed.");
@@ -47,6 +63,7 @@ function parseProvenance(value: unknown): Provenance {
     return declaration as ProvenanceFile;
   });
   if (new Set(files.map(({ path }) => path)).size !== files.length) fail("Provenance contains duplicate paths.");
+  if (JSON.stringify(files.map(({ path }) => path)) !== JSON.stringify(expectedPagePaths)) fail("Provenance page paths are missing, extra, or out of order.");
   return { archiveSha256: candidate.archiveSha256, files };
 }
 
@@ -100,6 +117,8 @@ async function verifyLive(): Promise<void> {
   }
 }
 
-if (Bun.argv[2] === "bundle") await verifyBundle();
-else if (Bun.argv[2] === "live") await verifyLive();
-else fail("Expected verify-release subcommand bundle or live.");
+if (import.meta.main) {
+  if (Bun.argv[2] === "bundle") await verifyBundle();
+  else if (Bun.argv[2] === "live") await verifyLive();
+  else fail("Expected verify-release subcommand bundle or live.");
+}

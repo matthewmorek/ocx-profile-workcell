@@ -5,7 +5,10 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parse, printParseErrorCode, type ParseError } from "jsonc-parser";
 
 export const repositoryRoot = resolve(import.meta.dir, "..");
-export const strictSemver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const numericIdentifier = "(?:0|[1-9]\\d*)";
+const prereleaseIdentifier = "(?:0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)";
+const buildIdentifier = "[0-9A-Za-z-]+";
+export const strictSemver = new RegExp(`^${numericIdentifier}\\.${numericIdentifier}\\.${numericIdentifier}(?:-${prereleaseIdentifier}(?:\\.${prereleaseIdentifier})*)?(?:\\+${buildIdentifier}(?:\\.${buildIdentifier})*)?$`);
 
 export function fail(message: string): never { throw new Error(message); }
 
@@ -33,7 +36,7 @@ export function parseVersion(value: string): string {
 }
 
 export function parseTag(value: string): string {
-  if (!/^v/.test(value)) fail(`Expected v-prefixed SemVer tag, received ${value}.`);
+  if (!value.startsWith("v")) fail(`Expected v-prefixed SemVer tag, received ${value}.`);
   parseVersion(value.slice(1));
   return value;
 }
