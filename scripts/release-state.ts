@@ -20,6 +20,10 @@ export type ProductionDecision =
   | Readonly<{ kind: "resume-draft" }>
   | Readonly<{ kind: "published-noop" }>;
 
+export function shouldRestoreDeployment(input: Readonly<{ deploymentAttempted: boolean; liveVerified: boolean; recoveryAvailable: boolean }>): boolean {
+  return input.deploymentAttempted && !input.liveVerified && input.recoveryAvailable;
+}
+
 type ParsedVersion = Readonly<{ major: number; minor: number; patch: number; prerelease: readonly string[] }>;
 
 function parseVersion(value: string): ParsedVersion | undefined {

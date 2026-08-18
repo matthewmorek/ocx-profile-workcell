@@ -35,9 +35,9 @@ async function main(): Promise<void> {
   const archive = join(output, `ocx-workspace-profile-${tag}.tar.gz`); await deterministicArchive(pages, archive, epoch);
   const provenance = join(output, "provenance.json"); const evidence = parseInstallEvidence(await readJsonc(requiredArgument(arguments_, "--evidence")));
   if (evidence.version !== version || evidence.commit !== commit) fail("Install evidence does not match the release version and commit.");
-  const listed = await sortedFiles(pages); await writeJsonAtomic(provenance, { schemaVersion: 1, tag, version, commit, archiveSha256: await sha256File(archive), evidence, files: await Promise.all(listed.map(async (path) => ({ path, sha256: await sha256File(join(pages, path)), mode: 0o644 }))) });
+  const listed = await sortedFiles(pages); await writeJsonAtomic(provenance, { schemaVersion: 1, tag, version, commit, taggerEpoch: epoch, archiveSha256: await sha256File(archive), evidence, files: await Promise.all(listed.map(async (path) => ({ path, sha256: await sha256File(join(pages, path)), mode: 0o644 }))) });
   const receipt = join(output, "receipt.jsonc"); await writeJsonAtomic(receipt, evidence.receipt);
   const checksums = join(output, "SHA256SUMS"); await writeTextAtomic(checksums, `${await sha256File(archive)}  ${archive.split("/").at(-1)}\n${await sha256File(provenance)}  provenance.json\n${await sha256File(receipt)}  receipt.jsonc\n`);
-  await writeJsonAtomic(join(output, "release-bundle.json"), { schemaVersion: 1, tag, version, assets: await Promise.all([archive, provenance, receipt, checksums].map(async (path) => ({ path, name: path.split("/").at(-1), sha256: await sha256File(path) }))) });
+  await writeJsonAtomic(join(output, "release-bundle.json"), { schemaVersion: 1, tag, version, assets: await Promise.all([archive, provenance, receipt, checksums].map(async (path) => ({ path: path.split("/").at(-1), name: path.split("/").at(-1), sha256: await sha256File(path) }))) });
 }
 if (import.meta.main) await main();

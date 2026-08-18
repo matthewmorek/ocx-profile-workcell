@@ -1,7 +1,7 @@
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fail, parseArguments, parseVersion, readJsonc, repositoryRoot, requiredArgument, temporaryDirectory, writeJsonAtomic } from "./common";
-import { assertEvidenceIsSafe, sanitizeEvidenceValue, type InstallAttemptOutcome, type InstallEvidence } from "./evidence";
+import { assertEvidenceIsSafe, parseInstallReceipt, sanitizeEvidenceValue, type InstallAttemptOutcome, type InstallEvidence } from "./evidence";
 
 type StageRecord = {
   name: string;
@@ -145,14 +145,22 @@ async function runInstallAttempt(registry: string, version: string, commit: stri
     await runStage("smoke OpenCode profile startup", [ocx, "oc", "-p", "ws", "--help"], environment, stageTimeouts.smokeOpenCode, stages);
     const profileRoot = join(environment.XDG_CONFIG_HOME, "opencode", "profiles", "ws");
     const generated = await readJsonc<Record<string, unknown>>(join(profileRoot, "opencode.jsonc"));
-    const receipt = await readJsonc<unknown>(join(profileRoot, ".ocx", "receipt.jsonc"));
+    const parsedReceipt = parseInstallReceipt(sanitizeEvidenceValue(await readJsonc<unknown>(join(profileRoot, ".ocx", "receipt.jsonc"))));
     const sourceRegistry = await readJsonc<{ components?: Array<{ name?: string; opencode?: Record<string, unknown> }> }>(join(repositoryRoot, "registry.jsonc"));
     const expected = sourceRegistry.components?.find((component) => component.name === "ws-overrides")?.opencode;
     if (!expected) fail("Registry source has no ws-overrides opencode metadata.");
     const assertions = assertInstalledConfiguration(generated, expected);
     if (Object.values(assertions).some((passed) => !passed)) fail(`Installed profile assertions failed: ${Object.entries(assertions).filter(([, passed]) => !passed).map(([key]) => key).join(", ")}.`);
-    const sanitizedReceipt = sanitizeEvidenceValue(receipt);
-    const evidence: InstallEvidence = { schemaVersion: 1, version, commit, installedComponents: collectComponentKeys(receipt), resolvedDependencies: sanitizedReceipt, assertions, receipt: sanitizedReceipt, toolVersions: { ocx: ocxVersion, opencode: opencodeVersion } };
+    const evidence: InstallEvidence = {
+      schemaVersion: 1,
+      version,
+      commit,
+      installedComponents: parsedReceipt.components,
+      resolvedDependencies: parsedReceipt.resolvedDependencies,
+      assertions: assertions as Record<string, true>,
+      receipt: parsedReceipt.receipt,
+      toolVersions: { ocx: ocxVersion, opencode: opencodeVersion },
+    };
     assertEvidenceIsSafe(evidence);
     succeeded = true;
     return evidence;
@@ -235,11 +243,22 @@ export function assertInstalledConfiguration(generated: Record<string, unknown>,
   const semanticAgents = Object.entries(expectedAgents).every(([name, agent]) => JSON.stringify(canonicalize(generatedAgents?.[name])) === JSON.stringify(canonicalize(agent)) && !Object.hasOwn(generatedAgents[name], "reasoningEffort") && !Object.hasOwn(generatedAgents[name], "textVerbosity"));
   const mcp = generated.mcp as Record<string, unknown> | undefined;
   const plugins = generated.plugin as unknown[] | undefined;
-  return { model: equal("model"), smallModel: equal("small_model"), agents: semanticAgents, permissions: equal("permission"), mcps: ["context7", "exa", "gh_grep", "linear"].every((name) => name in (mcp ?? {})) && !mcp?.posthog && !mcp?.tuple, tailPlugins: Array.isArray(plugins) && plugins.includes("opencode-vibeguard@0.1.0") && plugins.includes("@plannotator/opencode@0.26.0"), noPosthogOrTuple: !mcp?.posthog && !mcp?.tuple };
-}
-
-export function collectComponentKeys(receipt: unknown): string[] {
-  const text = JSON.stringify(receipt);
-  return ["ws", ...["ws-overrides", "workspace"].filter((component) => text.includes(`\"${component}\"`))];
+  const expectedMcps = expected.mcp as Record<string, unknown>;
+  const exactMcps = Boolean(mcp) && JSON.stringify(canonicalize(mcp)) === JSON.stringify(canonicalize(expectedMcps));
+  const expectedPlugins = ["@franlol/opencode-md-table-formatter@0.0.6", "@plannotator/opencode@0.26.0", "@tarquinen/opencode-dcp@3.1.3", "opencode-vibeguard@0.1.0"];
+  const canonicalPlugins = Array.isArray(plugins) && plugins.every((plugin) => typeof plugin === "string")
+    ? [...plugins].sort()
+    : [];
+  const pinnedPlugins = JSON.stringify(canonicalPlugins) === JSON.stringify(expectedPlugins);
+  return {
+    model: equal("model"),
+    smallModel: equal("small_model"),
+    agents: semanticAgents,
+    permissions: equal("permission"),
+    mcps: exactMcps,
+    canonicalPlugins: new Set(canonicalPlugins).size === canonicalPlugins.length,
+    pinnedPlugins,
+    noPosthogOrTuple: !mcp?.posthog && !mcp?.tuple,
+  };
 }
 if (import.meta.main) await main();

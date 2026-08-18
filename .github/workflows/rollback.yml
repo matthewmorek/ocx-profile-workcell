@@ -29,11 +29,11 @@ jobs:
         run: |
           set -euo pipefail
           bun run release:api -- download --repository matthewmorek/ocx-workspace-profile --tag "$RELEASE_TAG" --out-dir bundle --token-env GITHUB_TOKEN
-          bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$RELEASE_TAG.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --extract-to "$RUNNER_TEMP/pages"
+          bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$RELEASE_TAG.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$RELEASE_TAG" --extract-to "$RUNNER_TEMP/pages"
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
         with:
           path: ${{ runner.temp }}/pages
       - uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128
       - name: Live-verify exact rollback bytes
-        run: bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/pages/release.json"
+        run: bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/pages/release.json" --expected-tag "${{ inputs.tag }}"

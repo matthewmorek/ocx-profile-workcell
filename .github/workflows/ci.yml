@@ -30,5 +30,32 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { persist-credentials: false }
-      - uses: ./.github/actions/bootstrap-pinned
-      - run: bun install --frozen-lockfile && bun test tests
+      - name: Bootstrap checksum-pinned Bun and discover current official OCX and OpenCode
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          /usr/bin/curl -fsSL -o "$RUNNER_TEMP/bun.zip" https://github.com/oven-sh/bun/releases/download/bun-v1.3.5/bun-darwin-aarch64.zip
+          echo "db17588a4aea8804856825d4bead3f05e1f37276ca606f37e369b4f72f35d3fb  $RUNNER_TEMP/bun.zip" | /usr/bin/shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bun"
+          echo "$RUNNER_TEMP/bun/bun-darwin-aarch64" >> "$GITHUB_PATH"
+          echo "BUN_BIN=$RUNNER_TEMP/bun/bun-darwin-aarch64" >> "$GITHUB_ENV"
+          OCX_URL="$(/usr/bin/curl -fsSL https://api.github.com/repos/kdcokenny/ocx/releases/latest | jq -r '.assets[] | select(.name == "ocx-darwin-arm64") | .browser_download_url')"
+          OPENCODE_URL="$(/usr/bin/curl -fsSL https://api.github.com/repos/anomalyco/opencode/releases/latest | jq -r '.assets[] | select(.name == "opencode-darwin-arm64.zip") | .browser_download_url')"
+          test -n "$OCX_URL" && test "$OCX_URL" != null
+          test -n "$OPENCODE_URL" && test "$OPENCODE_URL" != null
+          /usr/bin/curl -fsSL -o "$RUNNER_TEMP/ocx-latest" "$OCX_URL"
+          /usr/bin/curl -fsSL -o "$RUNNER_TEMP/opencode-latest.zip" "$OPENCODE_URL"
+          chmod +x "$RUNNER_TEMP/ocx-latest"
+          unzip -q "$RUNNER_TEMP/opencode-latest.zip" -d "$RUNNER_TEMP/opencode-latest"
+          chmod +x "$RUNNER_TEMP/opencode-latest/opencode"
+          echo "OCX_BIN=$RUNNER_TEMP/ocx-latest" >> "$GITHUB_ENV"
+          echo "OPENCODE_BIN=$RUNNER_TEMP/opencode-latest/opencode" >> "$GITHUB_ENV"
+      - name: Log discovered tool versions and run the full advisory validation contract
+        run: |
+          set -euo pipefail
+          bun --version
+          "$OCX_BIN" --version
+          "$OPENCODE_BIN" --version
+          bun install --frozen-lockfile
+          VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
+          bun run validate -- --version "$VERSION" --commit "$GITHUB_SHA" --work-dir "$RUNNER_TEMP/validate-latest"

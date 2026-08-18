@@ -1,40 +1,69 @@
 # OCX Workspace Profile
 
-Public MIT registry for `ws` on Apple Silicon macOS 14+. It installs Workspace from `kdco/workspace`, then applies Matthew Morek’s tail overrides.
+Public MIT registry for `ws` on Apple Silicon macOS 14+. It installs `kdco/workspace`, then Matthew Morek’s pinned tail overrides.
 
-## Install and use
+## Install and authenticate
 
-Prerequisites: macOS 14+ on ARM64, OCX 2.0.14, OpenCode 1.17.15, and an OpenAI account entitled to the configured models. Install into a disposable or intended global OpenCode config:
+Install OCX 2.0.14 and OpenCode 1.17.15 from their official release assets, checking the published SHA-256 before executing either binary. Authenticate OpenCode with OpenAI before starting the profile:
 
 ```sh
-ocx profile add ws --source matthewmorek/ws --from https://matthewmorek.github.io/ocx-workspace-profile --global
-ocx verify --cwd ~/.config/opencode/profiles/ws
-ocx oc -p ws
+opencode auth login
+# Select OpenAI, complete the browser OAuth flow, then confirm the account:
+opencode auth list
 ```
 
-The four remote MCPs are Linear, Context7, Exa, and gh_grep. Linear is enabled by default: complete its OAuth flow only on a machine where read/write access is intended. Context7, Exa, and gh_grep are anonymous. Native OpenCode global configuration is additive, so globally configured plugins/MCPs may still appear. Installed profiles are immutable managed artifacts: replace them with OCX rather than hand-editing them.
+Use a disposable XDG root for a live installation check; this makes no model or MCP calls:
 
-### Maintainer compatibility note
+```sh
+SANDBOX="$(mktemp -d)"
+export HOME="$SANDBOX/home" XDG_CONFIG_HOME="$SANDBOX/config" XDG_DATA_HOME="$SANDBOX/data" XDG_CACHE_HOME="$SANDBOX/cache" XDG_STATE_HOME="$SANDBOX/state"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+ocx init --global --quiet
+ocx profile add ws --source matthewmorek/ws --from https://matthewmorek.github.io/ocx-workspace-profile --global
+ocx verify --cwd "$XDG_CONFIG_HOME/opencode/profiles/ws"
+ocx oc -p ws --help
+rm -rf "$SANDBOX"
+```
 
-OCX 2.0.14 cannot serialize direct `agent.reasoningEffort` or `agent.textVerbosity`. Their canonical values are transported under each agent’s supported `options` object, which OpenCode 1.17.15 merges into the resolved runtime agent. Do not restore or duplicate direct copies.
+Linear is enabled and opens its OAuth flow on first use; only approve it where read/write Linear access is intended. Context7, Exa, and gh_grep are anonymous. OpenCode global configuration is additive, so machine-global plugins/MCPs can still appear.
 
-## Maintainer release checklist
+## Pinned maintainer bootstrap
 
-1. Update bare SemVer in `registry.jsonc` and `package.json`; no `v` in either. Run `bun install --frozen-lockfile`, `bun test tests`, and `bun run validate -- --version X.Y.Z --commit "$(git rev-parse HEAD)" --work-dir "$TMPDIR/validate"` with verified pinned binaries.
-2. Open and merge a protected PR only after required `validate-pinned` passes; advisory `validate-latest` does not gate release.
-3. From merged `main`, create the annotated tag `git tag -a vX.Y.Z -m vX.Y.Z`; never retag or manually deploy Pages.
-4. Before pushing that tag, preflight the same bytes locally:
+Use verified Bun 1.3.5 and checksum-pin every downloaded tool before extraction. The CI bootstrap records these release-asset digests: Bun `db17588a4aea8804856825d4bead3f05e1f37276ca606f37e369b4f72f35d3fb`, OCX `1bdcb928da5d938fad787fc046e47068a87c8a2987466bba014294264efdc4b8`, and OpenCode `9667289c143d1fbdd440055af4041bb432f44b07ddf0aef048a8c7f2f7c65e2d`. Do not replace a checksum without an independently reviewed upstream release-provenance check.
 
-   ```sh
-   VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
-   COMMIT="$(git rev-parse HEAD)"
-   TAG="$(git describe --exact-match --tags)"
-   TAGGER_EPOCH="$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$TAG")"
-   bun run package:release -- --version "$VERSION" --tag "$TAG" --commit "$COMMIT" --tagger-epoch "$TAGGER_EPOCH" --pages "$TMPDIR/validate/pages" --evidence "$TMPDIR/validate/install-evidence.json" --out-dir release-out
-   bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$TAG.tar.gz" --provenance release-out/provenance.json --receipt release-out/receipt.jsonc --checksums release-out/SHA256SUMS --extract-to "$TMPDIR/preflight-pages"
-   ```
+```sh
+bun install --frozen-lockfile
+bun test tests
+VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
+COMMIT="$(git rev-parse HEAD)"
+bun run validate -- --version "$VERSION" --commit "$COMMIT" --work-dir "$TMPDIR/validate"
+```
 
-5. Push only the verified annotated tag with `git push origin vX.Y.Z`, then confirm the published release has the tarball, `provenance.json`, sanitized `receipt.jsonc`, and `SHA256SUMS`; verify Pages `release.json`, index, both packuments, and all provenance files. Perform a clean disposable-XDG install without model/MCP calls.
-6. To roll back, manually dispatch `rollback.yml` with an existing release tag and explicit confirmation. It deploys checksum-verified historic bytes and changes global `latest`; it does not recreate tags or freeze KDCO.
+## Release and verification
 
-`CONTRIBUTING.md` is intentionally omitted until outside contributions are material.
+After protected-PR validation, bump `registry.jsonc` and `package.json` together, merge `main`, and create only an annotated tag. Preflight the exact tagged bytes:
+
+```sh
+TAG="$(git describe --exact-match --tags)"
+TAGGER_EPOCH="$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$TAG")"
+bun run package:release -- --version "$VERSION" --tag "$TAG" --commit "$COMMIT" --tagger-epoch "$TAGGER_EPOCH" --pages "$TMPDIR/validate/pages" --evidence "$TMPDIR/validate/install-evidence.json" --out-dir release-out
+bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$TAG.tar.gz" --provenance release-out/provenance.json --receipt release-out/receipt.jsonc --checksums release-out/SHA256SUMS --expected-tag "$TAG" --extract-to "$TMPDIR/preflight-pages"
+shasum -a 256 release-out/ocx-workspace-profile-"$TAG".tar.gz release-out/provenance.json release-out/receipt.jsonc
+```
+
+Push only the verified annotated tag. Confirm the release assets and Pages bytes explicitly:
+
+```sh
+gh release download "$TAG" --repo matthewmorek/ocx-workspace-profile --pattern 'ocx-workspace-profile-*.tar.gz' --pattern provenance.json --pattern receipt.jsonc --pattern SHA256SUMS --dir "$TMPDIR/$TAG"
+(cd "$TMPDIR/$TAG" && shasum -a 256 -c SHA256SUMS)
+curl --fail --show-error https://matthewmorek.github.io/ocx-workspace-profile/release.json
+curl --fail --show-error https://matthewmorek.github.io/ocx-workspace-profile/index.json
+```
+
+Roll back only a published, verified release:
+
+```sh
+gh workflow run rollback.yml --repo matthewmorek/ocx-workspace-profile -f tag=vX.Y.Z -f confirm=ROLLBACK
+```
+
+If first publication fails live verification, retain the draft and inspect Pages plus `release.json`; do not manually deploy or delete evidence. If a later deployment fails, the workflow restores the verified recovery bundle; if restoration also fails, stop, retain diagnostics/draft, inspect the release state, and rerun only after its guards are satisfied. Never retag, overwrite assets, or improvise a restoration.

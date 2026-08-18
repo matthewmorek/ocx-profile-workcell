@@ -28,10 +28,10 @@ jobs:
           bun install --frozen-lockfile
           bun run validate -- --version "$VERSION" --commit "$SOURCE_COMMIT" --work-dir "$RUNNER_TEMP/validate"
           bun run package:release -- --version "$VERSION" --tag "$GITHUB_REF_NAME" --commit "$SOURCE_COMMIT" --tagger-epoch "$TAGGER_EPOCH" --pages "$RUNNER_TEMP/validate/pages" --evidence "$RUNNER_TEMP/validate/install-evidence.json" --out-dir release-out
-          bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance release-out/provenance.json --receipt release-out/receipt.jsonc --checksums release-out/SHA256SUMS --extract-to "$RUNNER_TEMP/preflight-pages"
+          bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance release-out/provenance.json --receipt release-out/receipt.jsonc --checksums release-out/SHA256SUMS --expected-tag "$GITHUB_REF_NAME" --extract-to "$RUNNER_TEMP/preflight-pages"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: immutable-release-bundle
+          name: target-release-bundle
           path: release-out
           if-no-files-found: error
   prepare-production:
@@ -40,18 +40,19 @@ jobs:
     permissions: { contents: write }
     outputs:
       kind: ${{ steps.decision.outputs.kind }}
-      recovery_tag: ${{ steps.decision.outputs.recovery_tag }}
+      recovery_tag: ${{ steps.recovery.outputs.tag }}
+      recovery_available: ${{ steps.recovery.outputs.available }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { persist-credentials: false }
       - uses: ./.github/actions/bootstrap-pinned
       - run: bun install --frozen-lockfile
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with: { name: immutable-release-bundle, path: bundle }
+        with: { name: target-release-bundle, path: bundle }
       - name: Verify target archive before production inspection
         run: |
           set -euo pipefail
-          bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --extract-to "$RUNNER_TEMP/target-pages"
+          bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$GITHUB_REF_NAME" --extract-to "$RUNNER_TEMP/target-pages"
       - id: decision
         name: Inspect and classify production state
         env:
@@ -60,19 +61,30 @@ jobs:
           set -euo pipefail
           bun run release:api -- inspect --repository matthewmorek/ocx-workspace-profile --base-url https://matthewmorek.github.io/ocx-workspace-profile --tag "$GITHUB_REF_NAME" --expected-release "$RUNNER_TEMP/target-pages/release.json" --out state.json --token-env GITHUB_TOKEN
           DECISION="$(bun -e 'process.stdout.write(JSON.parse(await Bun.file("state.json").text()).decision.kind)')"
-          case "$DECISION" in first-publication|release-with-recovery|resume-draft|published-noop) ;; *) exit 1 ;; esac
-          printf 'kind=%s\n' "$DECISION" >> "$GITHUB_OUTPUT"
-          printf 'recovery_tag=%s\n' "$(bun -e 'process.stdout.write(JSON.parse(await Bun.file("state.json").text()).decision.recoveryTag ?? "")')" >> "$GITHUB_OUTPUT"
+           case "$DECISION" in first-publication|release-with-recovery|resume-draft|published-noop) ;; *) exit 1 ;; esac
+           printf 'kind=%s\n' "$DECISION" >> "$GITHUB_OUTPUT"
+           printf 'recovery_tag=%s\n' "$(bun -e 'process.stdout.write(JSON.parse(await Bun.file("state.json").text()).decision.recoveryTag ?? "")')" >> "$GITHUB_OUTPUT"
+      - name: Verify equal-version draft live bytes before resume
+        if: steps.decision.outputs.kind == 'resume-draft'
+        run: bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$GITHUB_REF_NAME"
       - id: recovery
-        name: Capture and pre-validate prior Pages bytes
-        if: steps.decision.outputs.kind == 'release-with-recovery'
+        name: Capture verified recovery bundle before deployment
+        if: steps.decision.outputs.kind == 'release-with-recovery' || steps.decision.outputs.kind == 'resume-draft'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          bun run release:api -- download --repository matthewmorek/ocx-workspace-profile --tag "${{ steps.decision.outputs.recovery_tag }}" --out-dir recovery --token-env GITHUB_TOKEN
-          bun run verify:release -- bundle --archive "recovery/ocx-workspace-profile-${{ steps.decision.outputs.recovery_tag }}.tar.gz" --provenance recovery/provenance.json --receipt recovery/receipt.jsonc --checksums recovery/SHA256SUMS --extract-to "$RUNNER_TEMP/recovery-pages"
-          printf 'available=true\n' >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.decision.outputs.kind }}" = release-with-recovery ]; then
+            RECOVERY_TAG="${{ steps.decision.outputs.recovery_tag }}"
+            bun run release:api -- download --repository matthewmorek/ocx-workspace-profile --tag "$RECOVERY_TAG" --out-dir recovery --token-env GITHUB_TOKEN
+            bun run verify:release -- bundle --archive "recovery/ocx-workspace-profile-$RECOVERY_TAG.tar.gz" --provenance recovery/provenance.json --receipt recovery/receipt.jsonc --checksums recovery/SHA256SUMS --expected-tag "$RECOVERY_TAG" --extract-to recovery/pages
+          else
+            RECOVERY_TAG="$GITHUB_REF_NAME"
+            cp -R bundle recovery
+            cp -R "$RUNNER_TEMP/target-pages" recovery/pages
+          fi
+          printf 'tag=%s\n' "$RECOVERY_TAG" >> "$GITHUB_OUTPUT"
+           printf 'available=true\n' >> "$GITHUB_OUTPUT"
       - name: Create or verify exact immutable release assets
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -80,8 +92,8 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: steps.recovery.outputs.available == 'true'
         with:
-          name: verified-recovery-pages
-          path: ${{ runner.temp }}/recovery-pages
+          name: verified-recovery-release-bundle
+          path: recovery
           if-no-files-found: error
   deploy-pages:
     needs: prepare-production
@@ -94,35 +106,42 @@ jobs:
       - uses: ./.github/actions/bootstrap-pinned
       - run: bun install --frozen-lockfile
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with: { name: immutable-release-bundle, path: bundle }
+        with: { name: target-release-bundle, path: bundle }
       - name: Verify target archive before deployment
-        run: bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --extract-to "$RUNNER_TEMP/target-pages"
+        run: bun run verify:release -- bundle --archive "bundle/ocx-workspace-profile-$GITHUB_REF_NAME.tar.gz" --provenance bundle/provenance.json --receipt bundle/receipt.jsonc --checksums bundle/SHA256SUMS --expected-tag "$GITHUB_REF_NAME" --extract-to "$RUNNER_TEMP/target-pages"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        if: needs.prepare-production.outputs.kind == 'release-with-recovery'
-        with: { name: verified-recovery-pages, path: ${{ runner.temp }}/recovery-pages }
+        if: needs.prepare-production.outputs.recovery_available == 'true'
+        with: { name: verified-recovery-release-bundle, path: recovery }
+      - name: Re-verify transferred recovery bundle
+        if: needs.prepare-production.outputs.recovery_available == 'true'
+        run: bun run verify:release -- bundle --archive "recovery/ocx-workspace-profile-${{ needs.prepare-production.outputs.recovery_tag }}.tar.gz" --provenance recovery/provenance.json --receipt recovery/receipt.jsonc --checksums recovery/SHA256SUMS --expected-tag "${{ needs.prepare-production.outputs.recovery_tag }}" --extract-to "$RUNNER_TEMP/recovery-pages"
       - name: Verify already-published no-op is still live
         if: needs.prepare-production.outputs.kind == 'published-noop'
-        run: bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json"
+        run: bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$GITHUB_REF_NAME"
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
         if: needs.prepare-production.outputs.kind != 'published-noop'
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
         if: needs.prepare-production.outputs.kind != 'published-noop'
-        with: { path: ${{ runner.temp }}/target-pages }
+        with:
+          name: target-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/target-pages
       - id: deployment-attempt
         if: needs.prepare-production.outputs.kind != 'published-noop'
         run: printf 'attempted=true\n' >> "$GITHUB_OUTPUT"
       - id: deploy-pages
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128
         if: needs.prepare-production.outputs.kind != 'published-noop'
+        with:
+          artifact_name: target-pages-${{ github.run_id }}-${{ github.run_attempt }}
       - id: live-verification
         name: Live-verify deployed Pages bytes
-        if: needs.prepare-production.outputs.kind != 'published-noop' && success()
+        if: needs.prepare-production.outputs.kind != 'published-noop' && steps.deploy-pages.outcome == 'success'
         run: |
-          bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json"
+          bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance bundle/provenance.json --release "$RUNNER_TEMP/target-pages/release.json" --expected-tag "$GITHUB_REF_NAME"
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
       - id: restore-preflight
         name: Prepare verified restoration
-        if: always() && steps.deployment-attempt.outputs.attempted == 'true' && steps.live-verification.outputs.verified != 'true' && needs.prepare-production.outputs.kind == 'release-with-recovery'
+        if: always() && steps.deployment-attempt.outputs.attempted == 'true' && steps.live-verification.outputs.verified != 'true' && needs.prepare-production.outputs.recovery_available == 'true'
         run: printf 'restore=true\n' >> "$GITHUB_OUTPUT"
       - id: restore-configure
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
@@ -130,15 +149,19 @@ jobs:
       - id: restore-upload
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
         if: always() && steps.restore-configure.outcome == 'success'
-        with: { path: ${{ runner.temp }}/recovery-pages }
+        with:
+          name: recovery-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/recovery-pages
       - id: restore-deploy
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128
         if: always() && steps.restore-upload.outcome == 'success'
+        with:
+          artifact_name: recovery-pages-${{ github.run_id }}-${{ github.run_attempt }}
       - id: restoration-verification
         name: Verify restored Pages bytes
         if: always() && steps.restore-deploy.outcome == 'success'
         run: |
-          bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance recovery/provenance.json --release "$RUNNER_TEMP/recovery-pages/release.json"
+          bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance recovery/provenance.json --release "$RUNNER_TEMP/recovery-pages/release.json" --expected-tag "${{ needs.prepare-production.outputs.recovery_tag }}"
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
       - name: Report restoration result loudly
         if: always() && steps.restore-preflight.outputs.restore == 'true'
@@ -164,6 +187,12 @@ jobs:
         with: { persist-credentials: false }
       - uses: ./.github/actions/bootstrap-pinned
       - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with: { name: target-release-bundle, path: bundle }
+      - name: Re-check exact draft assets before publishing
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun run release:api -- ensure-draft --repository matthewmorek/ocx-workspace-profile --tag "$GITHUB_REF_NAME" --bundle bundle/release-bundle.json --token-env GITHUB_TOKEN
       - name: Publish verified draft
         env:
           GITHUB_TOKEN: ${{ github.token }}
