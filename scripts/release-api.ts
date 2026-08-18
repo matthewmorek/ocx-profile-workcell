@@ -8,6 +8,8 @@ type Release = RemoteRelease & Readonly<{ upload_url: string; assets: readonly R
 type FetchLike = typeof fetch;
 type BundleAsset = Readonly<{ path: string; name: string; sha256: string }>;
 type ReleaseBundle = Readonly<{ tag: string; version: string; path: string; assets: readonly BundleAsset[] }>;
+type ReleaseIdentityDiagnostic = Readonly<{ id: number | null; tag: string | null; draft: boolean | null }>;
+type LiveReleaseIdentityDiagnostic = Readonly<{ tag: string; version: string; commit: string; releasedAt: string }> | null;
 
 export const releaseApiCommands = ["inspect", "inspect-first-publication-recovery", "ensure-draft", "assert-draft", "download", "publish", "publish-exact"] as const;
 type ReleaseApiCommand = typeof releaseApiCommands[number];
@@ -95,6 +97,26 @@ function selectRelease(releases: readonly Release[], tag: string): Release | und
   const matching = releases.filter((release) => release.tag_name === tag);
   if (matching.length > 1) fail(`GitHub contains multiple releases for ${tag}.`);
   return matching[0];
+}
+
+function normalizedReleaseIdentity(release: RemoteRelease | undefined): ReleaseIdentityDiagnostic {
+  if (!release) return { id: null, tag: null, draft: null };
+  return { id: release.id, tag: release.tag_name, draft: release.draft };
+}
+
+function normalizedLiveReleaseIdentity(live: unknown | null): LiveReleaseIdentityDiagnostic {
+  if (live === null) return null;
+  const manifest = parseReleaseManifest(live);
+  if (!manifest) return null;
+  return { tag: manifest.tag, version: manifest.version, commit: manifest.commit, releasedAt: manifest.releasedAt };
+}
+
+function reportClassificationFailure(live: unknown | null, targetRelease: RemoteRelease | undefined, releases: readonly RemoteRelease[]): void {
+  console.error(JSON.stringify({
+    liveRelease: normalizedLiveReleaseIdentity(live),
+    targetRelease: normalizedReleaseIdentity(targetRelease),
+    repositoryReleases: releases.map(normalizedReleaseIdentity),
+  }));
 }
 
 export function createGitHubReleaseClient(token: string, request: FetchLike = fetch) {
@@ -275,9 +297,17 @@ async function inspect(values: Map<string, string>): Promise<void> {
   const live = response.status === 404 ? null : await response.json();
   const parsedLive = live === null ? undefined : parseReleaseManifest(live);
   const releases = await client.listReleases(repository);
-  const targetRelease = selectRelease(releases, targetTag);
-  const liveRelease = parsedLive ? selectRelease(releases, parsedLive.tag) : undefined;
-  const decision = classifyProductionState({ target: expectedRelease, live, targetRelease: targetRelease ?? null, liveRelease: liveRelease ?? null, repositoryReleases: releases });
+  let targetRelease: Release | undefined;
+  const decision = (() => {
+    try {
+      targetRelease = selectRelease(releases, targetTag);
+      const liveRelease = parsedLive ? selectRelease(releases, parsedLive.tag) : undefined;
+      return classifyProductionState({ target: expectedRelease, live, targetRelease: targetRelease ?? null, liveRelease: liveRelease ?? null, repositoryReleases: releases });
+    } catch (error) {
+      reportClassificationFailure(live, targetRelease, releases);
+      throw error;
+    }
+  })();
   await writeJsonAtomic(requiredArgument(values, "--out"), { schemaVersion: 1, decision, liveTag: parsedLive?.tag ?? null });
 }
 
@@ -293,8 +323,16 @@ async function inspectFailedFirstPublicationRecovery(values: Map<string, string>
   if (!response.ok && response.status !== 404) fail(`Live release.json lookup failed: ${response.status}.`);
   const live = response.status === 404 ? null : await response.json();
   const releases = await client.listReleases(repository);
-  const targetRelease = selectRelease(releases, targetTag);
-  const decision = classifyFailedFirstPublicationRecovery({ target: expectedRelease, live, targetRelease: targetRelease ?? null, repositoryReleases: releases, phase });
+  let targetRelease: Release | undefined;
+  const decision = (() => {
+    try {
+      targetRelease = selectRelease(releases, targetTag);
+      return classifyFailedFirstPublicationRecovery({ target: expectedRelease, live, targetRelease: targetRelease ?? null, repositoryReleases: releases, phase });
+    } catch (error) {
+      reportClassificationFailure(live, targetRelease, releases);
+      throw error;
+    }
+  })();
   await writeJsonAtomic(requiredArgument(values, "--out"), { schemaVersion: 1, decision, targetReleaseId: targetRelease?.id ?? null });
 }
 

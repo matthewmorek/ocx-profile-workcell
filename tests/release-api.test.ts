@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { createGitHubReleaseClient, parseReleaseBundle } from "../scripts/release-api";
-import { sha256 } from "../scripts/common";
+import { repositoryRoot, sha256 } from "../scripts/common";
 
 const tag = "v0.1.0";
 const repository = "owner/repository";
@@ -35,7 +35,56 @@ function draft(assets: Asset[] = [], draftRelease = true): Draft {
   return { id: 47, draft: draftRelease, tag_name: tag, upload_url: "https://uploads.example/release{?name,label}", assets };
 }
 
+const expectedRelease = { schemaVersion: 1, tag, version: "0.1.0", commit: "a".repeat(40), releasedAt: "2026-01-01T00:00:00.000Z" };
+
+async function inspectClassificationFailure(command: "inspect" | "inspect-first-publication-recovery") {
+  const directory = await mkdtemp(join(tmpdir(), "release-api-inspect-test-"));
+  const manifestPath = join(directory, "release.json");
+  const preloadPath = join(directory, "mock-fetch.ts");
+  const outputPath = join(directory, "state.json");
+  const token = "classification-token-secret";
+  const rawPayloadMarker = "classification-raw-payload-secret";
+  const assetUrl = "https://private.example/classification-asset-secret";
+  await Bun.write(manifestPath, JSON.stringify(expectedRelease));
+  await Bun.write(preloadPath, [
+    "globalThis.fetch = async (input) => {",
+    "  const url = String(input);",
+    "  if (url === 'https://pages.example/release.json') return Response.json({ token: 'classification-token-secret', raw: 'classification-raw-payload-secret', asset: 'https://private.example/classification-asset-secret' });",
+    "  if (url === 'https://api.github.com/repos/owner/repository/releases?per_page=100&page=1') return Response.json([{ id: 47, draft: true, tag_name: 'v0.1.0', upload_url: 'https://private.example/classification-upload-secret', assets: [{ id: 99, name: 'classification-asset-secret', url: 'https://private.example/classification-asset-secret', browser_download_url: 'https://private.example/classification-download-secret' }], token: 'classification-token-secret', raw: 'classification-raw-payload-secret' }]);",
+    "  throw new Error(`Unexpected fetch: ${url}`);",
+    "};",
+  ].join("\n"));
+  const argumentsForCommand = [process.execPath, "--preload", preloadPath, "scripts/release-api.ts", command, "--repository", repository, "--base-url", "https://pages.example", "--tag", tag, "--expected-release", manifestPath, "--out", outputPath, "--token-env", "RELEASE_API_TEST_TOKEN"];
+  if (command === "inspect-first-publication-recovery") argumentsForCommand.push("--phase", "pre-draft");
+  const child = Bun.spawn(argumentsForCommand, { cwd: repositoryRoot, env: { ...process.env, RELEASE_API_TEST_TOKEN: token }, stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  await rm(directory, { recursive: true, force: true });
+  return { assetUrl, exitCode, rawPayloadMarker, stderr, token };
+}
+
+function classificationDiagnostic(stderr: string): Record<string, unknown> {
+  const line = stderr.split("\n").find((candidate) => candidate.startsWith("{"));
+  if (!line) throw new Error(`Classification failure diagnostic is missing: ${stderr}`);
+  return JSON.parse(line) as Record<string, unknown>;
+}
+
 describe("GitHub release API client", () => {
+  for (const command of ["inspect", "inspect-first-publication-recovery"] as const) {
+    test(`${command} emits normalized classification diagnostics without leaking raw state`, async () => {
+      const { assetUrl, exitCode, rawPayloadMarker, stderr, token } = await inspectClassificationFailure(command);
+      const diagnostic = classificationDiagnostic(stderr);
+      expect(exitCode).not.toBe(0);
+      expect(stderr).toContain("Live release.json is malformed.");
+      expect(Object.keys(diagnostic)).toEqual(["liveRelease", "targetRelease", "repositoryReleases"]);
+      expect(diagnostic.liveRelease).toBeNull();
+      expect(diagnostic.targetRelease).toEqual({ id: 47, tag, draft: true });
+      expect(diagnostic.repositoryReleases).toEqual([{ id: 47, tag, draft: true }]);
+      expect(Object.keys(diagnostic.targetRelease as Record<string, unknown>)).toEqual(["id", "tag", "draft"]);
+      for (const release of diagnostic.repositoryReleases as Record<string, unknown>[]) expect(Object.keys(release)).toEqual(["id", "tag", "draft"]);
+      for (const secret of [assetUrl, rawPayloadMarker, token]) expect(stderr).not.toContain(secret);
+    });
+  }
+
   test("resolves manifest-relative assets from relative and absolute manifest paths without permitting escapes", async () => {
     const { directory, bundle } = await temporaryBundle();
     const manifest = JSON.parse(await Bun.file(bundle.path).text());

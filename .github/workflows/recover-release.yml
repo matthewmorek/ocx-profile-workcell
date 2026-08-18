@@ -19,7 +19,6 @@ jobs:
     runs-on: macos-14
     permissions: { actions: read, contents: read }
     outputs:
-      kind: ${{ steps.decision.outputs.kind }}
       source_commit: ${{ steps.identity.outputs.source_commit }}
       tag_object_sha: ${{ steps.identity.outputs.tag_object_sha }}
     steps:
@@ -75,17 +74,6 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RECOVERY_TAG" > current-tag-reference.json
           gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_OBJECT_SHA" > current-tag.json
           bun run recovery -- assert-tag --reference current-tag-reference.json --tag current-tag.json --provenance bundle/provenance.json --tag-object-sha "$TAG_OBJECT_SHA" --commit "$SOURCE_COMMIT"
-      - id: decision
-        name: Inspect pre-draft recovery production state
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          RECOVERY_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          bun run release:api -- inspect-first-publication-recovery --phase pre-draft --repository "$GITHUB_REPOSITORY" --base-url https://matthewmorek.github.io/ocx-workspace-profile --tag "$RECOVERY_TAG" --expected-release "$RUNNER_TEMP/target-pages/release.json" --out state.json --token-env GITHUB_TOKEN
-          DECISION="$(bun -e 'process.stdout.write(JSON.parse(await Bun.file("state.json").text()).decision.kind)')"
-          case "$DECISION" in first-publication|resume-draft|resume-live) ;; *) exit 1 ;; esac
-          printf 'kind=%s\n' "$DECISION" >> "$GITHUB_OUTPUT"
   prepare-exact-draft:
     needs: preflight-recovery
     runs-on: macos-14
@@ -129,7 +117,7 @@ jobs:
   deploy-exact-pages:
     needs: [preflight-recovery, prepare-exact-draft]
     runs-on: macos-14
-    permissions: { actions: read, contents: read, pages: write, id-token: write }
+    permissions: { actions: read, contents: write, pages: write, id-token: write }
     environment: github-pages
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
