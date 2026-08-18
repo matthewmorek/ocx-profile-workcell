@@ -17,6 +17,7 @@ runs:
         /usr/bin/curl -fsSL -o "$RUNNER_TEMP/bun.zip" https://github.com/oven-sh/bun/releases/download/bun-v1.3.5/bun-darwin-aarch64.zip
         echo "db17588a4aea8804856825d4bead3f05e1f37276ca606f37e369b4f72f35d3fb  $RUNNER_TEMP/bun.zip" | /usr/bin/shasum -a 256 -c -
         unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bun"
+        chmod +x "$RUNNER_TEMP/bun/bun-darwin-aarch64"
         /usr/bin/curl -fsSL -o "$RUNNER_TEMP/ocx" https://github.com/kdcokenny/ocx/releases/download/v2.0.14/ocx-darwin-arm64
         echo "1bdcb928da5d938fad787fc046e47068a87c8a2987466bba014294264efdc4b8  $RUNNER_TEMP/ocx" | /usr/bin/shasum -a 256 -c -
         chmod +x "$RUNNER_TEMP/ocx"

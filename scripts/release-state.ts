@@ -1,4 +1,4 @@
-import { fail } from "./common";
+import { fail, strictSemver } from "./common";
 
 export type ReleaseManifest = Readonly<{
   schemaVersion: 1;
@@ -20,9 +20,14 @@ export type ProductionDecision =
   | Readonly<{ kind: "resume-draft" }>
   | Readonly<{ kind: "published-noop" }>;
 
+export function shouldRestoreDeployment(input: Readonly<{ deploymentAttempted: boolean; liveVerified: boolean; recoveryAvailable: boolean }>): boolean {
+  return input.deploymentAttempted && !input.liveVerified && input.recoveryAvailable;
+}
+
 type ParsedVersion = Readonly<{ major: number; minor: number; patch: number; prerelease: readonly string[] }>;
 
 function parseVersion(value: string): ParsedVersion | undefined {
+  if (!strictSemver.test(value)) return undefined;
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
   if (!match) return undefined;
   return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]), prerelease: match[4]?.split(".") ?? [] };
@@ -58,7 +63,7 @@ export function parseReleaseManifest(value: unknown): ReleaseManifest | undefine
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Record<string, unknown>;
   if (candidate.schemaVersion !== 1 || typeof candidate.tag !== "string" || typeof candidate.version !== "string" || typeof candidate.commit !== "string" || typeof candidate.releasedAt !== "string") return undefined;
-  if (candidate.tag !== `v${candidate.version}` || !parseVersion(candidate.version) || !candidate.commit || Number.isNaN(Date.parse(candidate.releasedAt))) return undefined;
+  if (candidate.tag !== `v${candidate.version}` || !parseVersion(candidate.version) || !/^[0-9a-f]{40}$/i.test(candidate.commit) || Number.isNaN(Date.parse(candidate.releasedAt)) || new Date(candidate.releasedAt).toISOString() !== candidate.releasedAt) return undefined;
   return candidate as ReleaseManifest;
 }
 
@@ -83,6 +88,7 @@ export function classifyProductionState(input: Readonly<{
   live: unknown | null;
   targetRelease: unknown | null;
   liveRelease: unknown | null;
+  repositoryReleases: readonly unknown[];
 }>): ProductionDecision {
   const target = parseReleaseManifest(input.target);
   if (!target) fail("Target release manifest is malformed.");
@@ -91,9 +97,17 @@ export function classifyProductionState(input: Readonly<{
   const targetRelease = input.targetRelease === null ? undefined : parseRemoteRelease(input.targetRelease);
   if (input.targetRelease !== null && !targetRelease) fail("Target GitHub Release state is malformed.");
   if (targetRelease && targetRelease.tag_name !== target.tag) fail("Target GitHub Release tag is inconsistent.");
+  const liveRelease = input.liveRelease === null ? undefined : parseRemoteRelease(input.liveRelease);
+  if (input.liveRelease !== null && !liveRelease) fail("Live GitHub Release state is malformed.");
+  const repositoryReleases = input.repositoryReleases.map((release) => {
+    const parsed = parseRemoteRelease(release);
+    if (!parsed) fail("Repository GitHub Release state is malformed.");
+    return parsed;
+  });
+  if (new Set(repositoryReleases.map((release) => release.id)).size !== repositoryReleases.length) fail("Repository GitHub Release state contains duplicate release IDs.");
 
   if (!live) {
-    if (targetRelease && !targetRelease.draft) fail("Published GitHub Release exists without a live registry.");
+    if (repositoryReleases.some((release) => !release.draft)) fail("Published GitHub Release exists without a live registry.");
     if (target.version !== "0.1.0") fail("Only v0.1.0 may be the first publication.");
     return { kind: "first-publication" };
   }
@@ -104,13 +118,13 @@ export function classifyProductionState(input: Readonly<{
 
   if (comparison < 0) {
     if (targetRelease && !targetRelease.draft) fail("A published target release cannot replace an older live registry.");
-    const liveRelease = parseRemoteRelease(input.liveRelease);
     if (!liveRelease || liveRelease.draft || liveRelease.tag_name !== live.tag) fail("Prior live registry has no consistent published recovery release.");
     return { kind: "release-with-recovery", recoveryTag: live.tag };
   }
 
   if (!manifestsAreIdentical(live, target)) fail("Live registry release.json differs from the requested release.");
   if (!targetRelease) fail("Live registry has no corresponding GitHub Release.");
+  if (liveRelease && liveRelease.tag_name !== target.tag) fail("Live GitHub Release tag is inconsistent.");
   if (targetRelease.draft) return { kind: "resume-draft" };
   return { kind: "published-noop" };
 }

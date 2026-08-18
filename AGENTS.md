@@ -11,7 +11,27 @@ This repository authors an OCX registry. `registry.jsonc`, `files/profiles/ws/oc
 
 ## Local preparation
 
-Use the verified Bun 1.3.5 binary, not a system Bun: `bun install --frozen-lockfile`; `bun test tests`; `bun run build -- --version 0.1.0 --out "$TMPDIR/pages"`; `bun run validate -- --version 0.1.0 --commit "$(git rev-parse HEAD)" --work-dir "$TMPDIR/validate"`. Keep OCX/OpenCode and all XDG roots disposable; never test against the real profile.
+Use the verified Bun 1.3.5 binary, not a system Bun. Keep OCX/OpenCode and all XDG roots disposable; never test against the real profile.
+
+Bootstrap downloaded Bun/OCX/OpenCode only after checking the checksum-pinned release assets recorded in `.github/actions/bootstrap-pinned/action.yml`. OpenAI authentication is `opencode auth login` (select OpenAI, complete browser OAuth, then `opencode auth list`); never place credentials in repository files or evidence.
+
+```sh
+bun install --frozen-lockfile
+bun test tests
+VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
+COMMIT="$(git rev-parse HEAD)"
+bun run build -- --version "$VERSION" --out "$TMPDIR/pages"
+ bun run validate -- --version "$VERSION" --commit "$COMMIT" --work-dir "$TMPDIR/validate" --validation-mode pinned --expected-ocx-version 2.0.14 --expected-opencode-version 1.17.15
+```
+
+After an annotated tag exists, package and preflight only the validation output; never rebuild in a publish job:
+
+```sh
+TAG="$(git describe --exact-match --tags)"
+TAGGER_EPOCH="$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$TAG")"
+bun run package:release -- --version "$VERSION" --tag "$TAG" --commit "$COMMIT" --tagger-epoch "$TAGGER_EPOCH" --pages "$TMPDIR/validate/pages" --evidence "$TMPDIR/validate/install-evidence.json" --out-dir release-out
+ bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$TAG.tar.gz" --provenance release-out/provenance.json --receipt release-out/receipt.jsonc --checksums release-out/SHA256SUMS --expected-tag "$TAG" --extract-to "$TMPDIR/preflight-pages"
+```
 
 ## Release state machine
 
@@ -22,6 +42,12 @@ The shared `pages-production` lock never cancels in-progress deployments. Initia
 ## Rollback and recovery
 
 Run the manual rollback workflow with an existing release tag and explicit confirmation. It downloads that release, verifies checksums/provenance/receipt/archive before extraction, and redeploys exact bytes. It changes global `latest`; it neither moves tags nor pins future `kdco/workspace` resolution. If a release job fails, retain diagnostics and draft, inspect `release.json`, then rerun only after the state machine’s guards are satisfied.
+
+```sh
+gh workflow run rollback.yml --repo matthewmorek/ocx-workspace-profile -f tag=vX.Y.Z -f confirm=ROLLBACK
+```
+
+For first-publication live-verification failure, retain the draft and inspect Pages plus `release.json`; do not manually deploy. For later failure, the workflow restores only a verified recovery bundle; stop if restoration does not verify.
 
 ## Supply chain and secrets
 
