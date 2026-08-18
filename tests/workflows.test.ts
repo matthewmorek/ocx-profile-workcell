@@ -96,28 +96,33 @@ describe("workflow supply-chain and production guards", () => {
     const preflight = object(jobs["preflight-recovery"], "preflight-recovery"); const prepared = object(jobs["prepare-exact-draft"], "prepare-exact-draft"); const deployed = object(jobs["deploy-exact-pages"], "deploy-exact-pages"); const published = object(jobs["publish-exact-release"], "publish-exact-release");
     const inputs = object(object(recovery.on, "recovery.on")["workflow_dispatch"], "workflow_dispatch").inputs;
     expect(object(inputs, "workflow_dispatch.inputs").confirm).toEqual({ description: "Type PUBLISH_EXACT", required: true, type: "string" });
+    for (const input of ["source_run_id", "source_run_attempt", "artifact_id", "artifact_digest", "tag_object_sha"]) expect(object(inputs, "workflow_dispatch.inputs")[input]).toMatchObject({ required: true, type: "string" });
     expect(preflight.if).toBe("inputs.confirm == 'PUBLISH_EXACT'");
     expect(recovery.concurrency).toEqual({ group: "pages-production", "cancel-in-progress": false });
     expect(preflight.permissions).toEqual({ actions: "read", contents: "read" });
     expect(prepared.permissions).toEqual({ actions: "read", contents: "write" });
     expect(deployed.permissions).toEqual({ actions: "read", contents: "read", pages: "write", "id-token": "write" });
     expect(published.permissions).toEqual({ actions: "read", contents: "write" });
-    expect(String(stepByName(preflight, "Bind the retained bundle to the original annotated tag run").run)).toContain('refs/tags/$RECOVERY_TAG');
-    expect(String(stepByName(preflight, "Bind the retained bundle to the original annotated tag run").run)).toContain('actions/runs/$SOURCE_RUN_ID');
+    expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain('actions/runs/$SOURCE_RUN_ID');
+    expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain("--source-run-attempt");
+    expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain("--artifact-digest");
     const downloads = [preflight, prepared, deployed, published].map((job) => steps(job).find((step) => step.uses === "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"));
     expect(downloads).toHaveLength(4);
     for (const download of downloads) {
       const withValues = object(download?.with, "cross-run artifact input");
-      expect(withValues).toMatchObject({ name: "target-release-bundle", path: "bundle", "github-token": "${{ github.token }}", repository: "${{ github.repository }}", "run-id": "${{ inputs.source_run_id }}" });
+      expect(withValues).toMatchObject({ "artifact-ids": "${{ inputs.artifact_id }}", path: "bundle", "github-token": "${{ github.token }}", repository: "${{ github.repository }}", "run-id": "${{ inputs.source_run_id }}" });
+      expect(withValues).not.toHaveProperty("name");
     }
     expect(recoverySource).not.toContain("bun run build");
     expect(recoverySource).not.toContain("bun run package:release");
-    expect(prepared.needs).toBe("preflight-recovery"); expect(deployed.needs).toBe("prepare-exact-draft"); expect(published.needs).toEqual(["prepare-exact-draft", "deploy-exact-pages"]);
+    expect(prepared.needs).toBe("preflight-recovery"); expect(deployed.needs).toBe("prepare-exact-draft"); expect(published.needs).toEqual(["preflight-recovery", "prepare-exact-draft", "deploy-exact-pages"]);
     const deployIndex = steps(deployed).findIndex((step) => step.id === "deploy-pages"); const liveIndex = steps(deployed).findIndex((step) => step.id === "live-verification");
     expect(deployIndex).toBeGreaterThan(-1); expect(liveIndex).toBeGreaterThan(deployIndex);
     expect(stepByName(deployed, "Fail first-publication recovery without restoration").if).toBe("always() && steps.live-verification.outputs.verified != 'true'");
     expect(recoverySource).not.toContain("restore-");
     expect(String(stepByName(published, "Publish exact verified draft").run)).toContain("release:api -- publish");
+    for (const phase of ["pre-draft", "pre-deploy", "pre-publish"]) expect(recoverySource).toContain(`--phase ${phase}`);
+    expect(recoverySource).toContain("resume-live");
   });
 
   test("simulates success, failed deployment, failed live verification, and first-publication failure control flow", async () => {

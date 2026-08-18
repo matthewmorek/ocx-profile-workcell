@@ -9,6 +9,7 @@
     "validate": "bun run scripts/validate.ts",
     "package:release": "bun run scripts/package-release.ts",
     "provenance": "bun run scripts/provenance.ts",
+    "recovery": "bun run scripts/recovery.ts",
     "release:api": "bun run scripts/release-api.ts",
     "verify:install": "bun run scripts/verify-install.ts",
     "verify:release": "bun run scripts/verify-release.ts"

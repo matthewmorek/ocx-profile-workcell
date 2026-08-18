@@ -8,14 +8,30 @@ const release = (tag: string, draft: boolean) => ({ id: 1, draft, tag_name: tag,
 const state = (overrides: Partial<Parameters<typeof classifyProductionState>[0]> = {}) => ({ target, live: null, targetRelease: null, liveRelease: null, repositoryReleases: [], ...overrides });
 
 describe("production release state classification", () => {
-  test("allows failed first-publication recovery only with no release or its sole matching draft", () => {
+  test("allows failed first-publication recovery only from phase-specific exact states", () => {
     const recoveryState = (overrides: Partial<Parameters<typeof classifyFailedFirstPublicationRecovery>[0]> = {}) => ({ target: first, live: null, targetRelease: null, repositoryReleases: [], ...overrides });
     const matchingDraft = release(first.tag, true);
     expect(classifyFailedFirstPublicationRecovery(recoveryState())).toEqual({ kind: "first-publication" });
     expect(classifyFailedFirstPublicationRecovery(recoveryState({ targetRelease: matchingDraft, repositoryReleases: [matchingDraft] }))).toEqual({ kind: "resume-draft" });
-    expect(() => classifyFailedFirstPublicationRecovery(recoveryState({ live: first }))).toThrow("no live Pages");
+    expect(classifyFailedFirstPublicationRecovery(recoveryState({ live: first, targetRelease: matchingDraft, repositoryReleases: [matchingDraft] }))).toEqual({ kind: "resume-live" });
     expect(() => classifyFailedFirstPublicationRecovery(recoveryState({ targetRelease: release(first.tag, false), repositoryReleases: [release(first.tag, false)] }))).toThrow("exact matching draft");
     expect(() => classifyFailedFirstPublicationRecovery(recoveryState({ repositoryReleases: [release("v0.0.9", true)] }))).toThrow("unexpected release state");
+  });
+
+  test("rejects state races at every recovery mutation boundary", () => {
+    const recoveryState = (phase: "pre-draft" | "pre-deploy" | "pre-publish", overrides: Partial<Parameters<typeof classifyFailedFirstPublicationRecovery>[0]> = {}) => ({ target: first, live: null, targetRelease: null, repositoryReleases: [], phase, ...overrides });
+    const matchingDraft = release(first.tag, true);
+    expect(() => classifyFailedFirstPublicationRecovery(recoveryState("pre-deploy"))).toThrow("sole exact matching draft");
+    expect(() => classifyFailedFirstPublicationRecovery(recoveryState("pre-draft", { repositoryReleases: [release("v0.0.9", true)] }))).toThrow("unexpected release state");
+    expect(() => classifyFailedFirstPublicationRecovery(recoveryState("pre-deploy", { targetRelease: matchingDraft, repositoryReleases: [matchingDraft, { ...release("v0.0.9", true), id: 2 }] }))).toThrow("sole exact matching draft");
+    expect(() => classifyFailedFirstPublicationRecovery(recoveryState("pre-publish", { targetRelease: matchingDraft, repositoryReleases: [matchingDraft] }))).toThrow("exact target Pages");
+    expect(() => classifyFailedFirstPublicationRecovery(recoveryState("pre-publish", { live: { ...first, commit: "a".repeat(40) }, targetRelease: matchingDraft, repositoryReleases: [matchingDraft] }))).toThrow("does not match");
+  });
+
+  test("resumes publication without redeploying after exact Pages deployment succeeded", () => {
+    const matchingDraft = release(first.tag, true);
+    expect(classifyFailedFirstPublicationRecovery({ target: first, live: first, targetRelease: matchingDraft, repositoryReleases: [matchingDraft], phase: "pre-deploy" })).toEqual({ kind: "resume-live" });
+    expect(classifyFailedFirstPublicationRecovery({ target: first, live: first, targetRelease: matchingDraft, repositoryReleases: [matchingDraft], phase: "pre-publish" })).toEqual({ kind: "resume-live" });
   });
 
   test("allows only a truly absent v0.1.0 first publication", () => {

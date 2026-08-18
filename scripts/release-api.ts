@@ -1,7 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fail, parseArguments, parseTag, readJsonc, requiredArgument, resolvedInside, sha256, sha256File, writeJsonAtomic } from "./common";
-import { classifyFailedFirstPublicationRecovery, classifyProductionState, parseReleaseManifest, parseRemoteRelease, type RemoteRelease } from "./release-state";
+import { classifyFailedFirstPublicationRecovery, classifyProductionState, parseReleaseManifest, parseRemoteRelease, type FailedFirstPublicationRecoveryPhase, type RemoteRelease } from "./release-state";
 
 type ReleaseAsset = Readonly<{ name: string; browser_download_url: string }>;
 type Release = RemoteRelease & Readonly<{ upload_url: string; assets: readonly ReleaseAsset[] }>;
@@ -151,6 +151,12 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
     await assertReleaseAssets(complete, assets, true);
   }
 
+  async function assertDraft(repository: string, tag: string, bundle: ReleaseBundle): Promise<void> {
+    const current = await getRelease(repository, tag);
+    if (!current || !current.draft) fail("Exact recovery draft does not exist.");
+    await assertReleaseAssets(current, await immutableBundleAssets(bundle), true);
+  }
+
   async function downloadRelease(repository: string, tag: string, destination: string): Promise<void> {
     const current = await getRelease(repository, tag);
     if (!current || current.draft) fail(`Requested published release ${tag} does not exist.`);
@@ -171,7 +177,7 @@ export function createGitHubReleaseClient(token: string, request: FetchLike = fe
     await requestApi(`/repos/${repository}/releases/${current.id}`, { method: "PATCH", body: JSON.stringify({ draft: false }) });
   }
 
-  return { listReleases, getRelease, ensureDraft, downloadRelease, publishRelease };
+  return { listReleases, getRelease, ensureDraft, assertDraft, downloadRelease, publishRelease };
 }
 
 async function inspect(values: Map<string, string>): Promise<void> {
@@ -196,13 +202,15 @@ async function inspectFailedFirstPublicationRecovery(values: Map<string, string>
   const targetTag = parseTag(requiredArgument(values, "--tag"));
   const expectedRelease = parseReleaseManifest(await readJsonc(requiredArgument(values, "--expected-release")));
   if (!expectedRelease || expectedRelease.tag !== targetTag) fail("Expected release manifest does not match the target tag.");
+  const phase = requiredArgument(values, "--phase") as FailedFirstPublicationRecoveryPhase;
+  if (!["pre-draft", "pre-deploy", "pre-publish"].includes(phase)) fail("Recovery inspection phase is invalid.");
   const client = createGitHubReleaseClient(requiredToken(values));
   const response = await fetch(`${requiredArgument(values, "--base-url").replace(/\/$/, "")}/release.json`);
   if (!response.ok && response.status !== 404) fail(`Live release.json lookup failed: ${response.status}.`);
   const live = response.status === 404 ? null : await response.json();
   const releases = await client.listReleases(repository);
   const targetRelease = selectRelease(releases, targetTag);
-  const decision = classifyFailedFirstPublicationRecovery({ target: expectedRelease, live, targetRelease: targetRelease ?? null, repositoryReleases: releases });
+  const decision = classifyFailedFirstPublicationRecovery({ target: expectedRelease, live, targetRelease: targetRelease ?? null, repositoryReleases: releases, phase });
   await writeJsonAtomic(requiredArgument(values, "--out"), { schemaVersion: 1, decision });
 }
 
@@ -211,9 +219,11 @@ async function main(): Promise<void> {
   const allowed = command === "inspect"
     ? ["--repository", "--base-url", "--tag", "--expected-release", "--out", "--token-env"]
     : command === "inspect-first-publication-recovery"
-      ? ["--repository", "--base-url", "--tag", "--expected-release", "--out", "--token-env"]
+      ? ["--repository", "--base-url", "--tag", "--expected-release", "--out", "--token-env", "--phase"]
       : command === "ensure-draft"
       ? ["--repository", "--tag", "--bundle", "--token-env"]
+      : command === "assert-draft"
+        ? ["--repository", "--tag", "--bundle", "--token-env"]
       : command === "download"
         ? ["--repository", "--tag", "--out-dir", "--token-env"]
         : command === "publish"
@@ -229,9 +239,13 @@ async function main(): Promise<void> {
     const bundlePath = requiredArgument(values, "--bundle");
     return client.ensureDraft(repository, tag, parseReleaseBundle(await readJsonc(bundlePath), tag, bundlePath));
   }
+  if (command === "assert-draft") {
+    const bundlePath = requiredArgument(values, "--bundle");
+    return client.assertDraft(repository, tag, parseReleaseBundle(await readJsonc(bundlePath), tag, bundlePath));
+  }
   if (command === "download") return client.downloadRelease(repository, tag, requiredArgument(values, "--out-dir"));
   if (command === "publish") return client.publishRelease(repository, tag);
-  fail("Expected release-api subcommand inspect, inspect-first-publication-recovery, ensure-draft, download, or publish.");
+  fail("Expected release-api subcommand inspect, inspect-first-publication-recovery, ensure-draft, assert-draft, download, or publish.");
 }
 
 if (import.meta.main) await main();

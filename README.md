@@ -71,10 +71,13 @@ curl --fail --show-error https://matthewmorek.github.io/ocx-workspace-profile/in
 
 Use this exceptional workflow only when the original immutable tag run produced and retained the release bundle but failed during its first publication. It is not a normal release mechanism or a rollback. The workflow accepts only a failed annotated tag run with no live release, or the sole exact matching draft; it verifies the retained bytes before deployment and publication.
 
-Dispatch it with the original release run ID:
+First query the immutable source identity read-only. Pass each value to bind recovery to the exact failed run attempt, artifact bytes, and annotated tag object:
 
 ```sh
-gh workflow run recover-release.yml --repo matthewmorek/ocx-workspace-profile -f tag=v0.1.0 -f source_run_id=32149931346 -f confirm=PUBLISH_EXACT
+gh api repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346 --jq '{id,run_attempt,status,conclusion,event,path,head_branch,head_sha}'
+gh api 'repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346/artifacts?per_page=100' --jq '.artifacts[] | {id,name,digest,expired}'
+gh api repos/matthewmorek/ocx-workspace-profile/git/ref/tags/v0.1.0 --jq '.object.sha'
+gh workflow run recover-release.yml --repo matthewmorek/ocx-workspace-profile -f tag=v0.1.0 -f source_run_id=32149931346 -f source_run_attempt=1 -f artifact_id=9329308619 -f artifact_digest=sha256:3ec81d4f5ab21b2d8eb006da56b484ba8e01c789267b51a515e4518ce86143aa -f tag_object_sha=f8d4cdf03fb7757732371b24cbb273d0a998d84d -f confirm=PUBLISH_EXACT
 ```
 
 Monitor the recovery run, then verify the published artifact and live Pages content:
@@ -88,7 +91,7 @@ bun run verify:release -- bundle --archive "$TMPDIR/v0.1.0/ocx-workspace-profile
 bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance "$TMPDIR/v0.1.0/provenance.json" --release "$TMPDIR/v0.1.0/pages/release.json" --expected-tag v0.1.0
 ```
 
-Never retag, rebuild, repack, overwrite assets, move a tag, or manually deploy Pages. If recovery fails live verification, retain the draft and diagnostics. There is no restoration path because first publication has no prior live release.
+The workflow rejects a successful run, wrong attempt, duplicate artifact name, mismatched/expired artifact digest, or any tag-object replacement—even one that still peels to the same commit. It rechecks production state and tag identity before draft creation, Pages deployment, and publication. A rerun after deployment succeeded but publication failed verifies the exact live bytes, skips redeployment, and publishes only the sole exact draft. Never retag, rebuild, repack, overwrite assets, move a tag, or manually deploy Pages.
 
 Roll back only a published, verified release:
 

@@ -44,17 +44,21 @@ The shared `pages-production` lock never cancels in-progress deployments. Initia
 Use `recover-release.yml` only when the original immutable tag run failed during its first publication. The agent maintainer must confirm all guards before dispatching it:
 
 - The tag is an existing annotated tag on `main`, and its version matches `registry.jsonc` in that tag.
-- The original release run is the `push` run for that exact tag and commit, and it retained `target-release-bundle`.
+- The original release run is `completed` with conclusion exactly `failure`, its attempt, workflow, repository, tag/ref, and commit match the annotated tag, and it retained exactly one non-expired `target-release-bundle` artifact with the supplied API digest.
+- The supplied annotated tag-object SHA still resolves remotely, points at the verified provenance commit, and has the provenance tagger epoch. This catches tag replacement even when the peeled commit is unchanged.
 - The live site has no release for the tag, or has no live release at all. The only other accepted state is the tag's sole exact matching draft release.
 - The retained bundle verifies before any production inspection or publication.
 
-Dispatch the workflow with the original release run ID and the exact confirmation string:
+Query the immutable recovery identity read-only, then dispatch with every value and the exact confirmation string. The artifact ID/digest select source bytes rather than a mutable artifact name; the run attempt and annotated tag object bind the source run and tag identity:
 
 ```sh
-gh workflow run recover-release.yml --repo matthewmorek/ocx-workspace-profile -f tag=v0.1.0 -f source_run_id=32149931346 -f confirm=PUBLISH_EXACT
+gh api repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346 --jq '{id,run_attempt,status,conclusion,event,path,head_branch,head_sha}'
+gh api 'repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346/artifacts?per_page=100' --jq '.artifacts[] | {id,name,digest,expired}'
+gh api repos/matthewmorek/ocx-workspace-profile/git/ref/tags/v0.1.0 --jq '.object.sha'
+gh workflow run recover-release.yml --repo matthewmorek/ocx-workspace-profile -f tag=v0.1.0 -f source_run_id=32149931346 -f source_run_attempt=1 -f artifact_id=9329308619 -f artifact_digest=sha256:3ec81d4f5ab21b2d8eb006da56b484ba8e01c789267b51a515e4518ce86143aa -f tag_object_sha=f8d4cdf03fb7757732371b24cbb273d0a998d84d -f confirm=PUBLISH_EXACT
 ```
 
-This is not the normal release path and is not rollback. It publishes only the bytes retained by the original tag run. Never retag, rebuild, repack, overwrite assets, move a tag, or manually deploy Pages. Recovery re-verifies the bundle, creates or reuses only the exact draft, deploys and live-verifies those bytes, then publishes the draft. If first-publication live verification fails, the workflow fails closed, retains the draft and diagnostics, and does not restore anything because no prior live release exists.
+This is not the normal release path and is not rollback. It publishes only the bytes retained by the original tag run. Never retag, rebuild, repack, overwrite assets, move a tag, or manually deploy Pages. Recovery re-verifies the bundle and tag before every mutation, creates or reuses only the exact draft, deploys and live-verifies those bytes, then publishes the draft. If Pages was already restored but publication failed, the sole exact draft plus exact live bytes skips deployment and safely resumes publication. If first-publication live verification fails, the workflow fails closed, retains the draft and diagnostics, and does not restore anything because no prior live release exists.
 
 ## Rollback and recovery
 
