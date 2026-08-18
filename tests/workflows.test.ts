@@ -56,6 +56,16 @@ function requiredJobs(job: YamlObject): string[] {
   const needs = job.needs;
   return typeof needs === "string" ? [needs] : Array.isArray(needs) && needs.every((value) => typeof value === "string") ? needs as string[] : [];
 }
+function jobsWithContentsWrite(jobs: YamlObject): string[] {
+  return Object.entries(jobs).flatMap(([name, value]) => {
+    const job = object(value, `recovery job ${name}`);
+    const permissions = object(job.permissions, `recovery job ${name} permissions`);
+    return permissions.contents === "write" ? [name] : [];
+  });
+}
+function recoveryInspectionPhases(job: YamlObject): string[] {
+  return steps(job).flatMap((step) => typeof step.run === "string" && step.run.includes("release:api -- inspect-first-publication-recovery") ? [...step.run.matchAll(/--phase ([a-z-]+)/g)].map((match) => match[1]!) : []);
+}
 function workflowReleaseApiCommands(jobs: YamlObject): string[] {
   return Object.values(jobs).flatMap((job) => steps(object(job, "workflow job")).flatMap((step) => typeof step.run === "string" ? [...step.run.matchAll(/\bbun\s+run\s+release:api\s+--\s+([a-z-]+)/g)].map((match) => match[1]!) : []));
 }
@@ -116,9 +126,18 @@ describe("workflow supply-chain and production guards", () => {
     expect(preflight.if).toBe("inputs.confirm == 'PUBLISH_EXACT'");
     expect(recovery.concurrency).toEqual({ group: "pages-production", "cancel-in-progress": false });
     expect(preflight.permissions).toEqual({ actions: "read", contents: "read" });
+    expect(object(preflight.outputs, "preflight-recovery.outputs")).toEqual({ source_commit: "${{ steps.identity.outputs.source_commit }}", tag_object_sha: "${{ steps.identity.outputs.tag_object_sha }}" });
     expect(prepared.permissions).toEqual({ actions: "read", contents: "write" });
-    expect(deployed.permissions).toEqual({ actions: "read", contents: "read", pages: "write", "id-token": "write" });
+    // GitHub only lists drafts to principals with push access. This pre-deploy
+    // job must re-list and hash that exact draft immediately before deployment.
+    // Its Pages authority remains the existing narrowly scoped permission.
+    expect(deployed.permissions).toEqual({ actions: "read", contents: "write", pages: "write", "id-token": "write" });
     expect(published.permissions).toEqual({ actions: "read", contents: "write" });
+    expect(jobsWithContentsWrite(jobs)).toEqual(["prepare-exact-draft", "deploy-exact-pages", "publish-exact-release"]);
+    expect(recoveryInspectionPhases(preflight)).toEqual([]);
+    expect(recoveryInspectionPhases(prepared)).toEqual(["pre-draft"]);
+    expect(recoveryInspectionPhases(deployed)).toEqual(["pre-deploy"]);
+    expect(recoveryInspectionPhases(published)).toEqual(["pre-publish"]);
     expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain('actions/runs/$SOURCE_RUN_ID');
     expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain('actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT');
     expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain("--source-run-attempt");
@@ -141,13 +160,14 @@ describe("workflow supply-chain and production guards", () => {
     expect(deployIndex).toBeGreaterThan(-1); expect(liveIndex).toBeGreaterThan(deployIndex);
     const preDeployStateIndex = steps(deployed).findIndex((step) => step.id === "decision"); const draftVerificationIndex = steps(deployed).findIndex((step) => step.name === "Reverify the sole exact draft immediately before Pages mutation");
     expect(draftVerificationIndex).toBeGreaterThan(preDeployStateIndex); expect(draftVerificationIndex).toBeLessThan(deployIndex);
+    expect(String(stepById(deployed, "decision").run)).toContain("resume-live) printf 'deploy=false\\n' >> \"$GITHUB_OUTPUT\"");
+    expect(stepById(deployed, "deploy-pages").if).toBe("steps.decision.outputs.deploy == 'true'");
+    expect(stepById(deployed, "live-verification").if).toBe("steps.decision.outputs.deploy == 'false' || steps.deploy-pages.outcome == 'success'");
     expect(stepByName(deployed, "Fail first-publication recovery without restoration").if).toBe("always() && steps.live-verification.outputs.verified != 'true'");
     expect(recoverySource).not.toContain("restore-");
     expect(String(stepByName(published, "Reassert tag, exact draft, live Pages, and pre-publish state").run)).toContain("release:api -- publish-exact");
     expect(String(stepByName(published, "Reassert tag, exact draft, live Pages, and pre-publish state").run)).toContain("--expected-release-id");
     expect(stepByName(published, "Verify exact live Pages bytes after publication")).toBeDefined();
-    for (const phase of ["pre-draft", "pre-deploy", "pre-publish"]) expect(recoverySource).toContain(`--phase ${phase}`);
-    expect(recoverySource).toContain("resume-live");
   });
 
   test("simulates success, failed deployment, failed live verification, and first-publication failure control flow", async () => {
