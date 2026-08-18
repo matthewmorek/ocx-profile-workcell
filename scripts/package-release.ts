@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fail, parseArguments, parseTag, parseVersion, readJsonc, requiredArgument, sha256, sha256File, sortedFiles, writeJsonAtomic, writeTextAtomic } from "./common";
 import { parseInstallEvidence } from "./evidence";
 
-export const expectedPagePaths = ["components/ws-overrides.json", "components/ws.json", "index.json", "release.json"] as const;
+export const expectedPagePaths = ["components/ws/profiles/ws/AGENTS.md", "components/ws/profiles/ws/ocx.jsonc", "components/ws-overrides.json", "components/ws.json", "index.json", "release.json"] as const;
 
 function writeOctal(buffer: Uint8Array, offset: number, length: number, value: number): void { buffer.set(Buffer.from(value.toString(8).padStart(length - 1, "0") + "\0"), offset); }
 function tarHeader(path: string, size: number, epoch: number): Uint8Array {
@@ -30,11 +30,10 @@ async function main(): Promise<void> {
   const arguments_ = parseArguments(Bun.argv.slice(2), ["--version", "--tag", "--commit", "--tagger-epoch", "--pages", "--evidence", "--out-dir"]);
   const version = parseVersion(requiredArgument(arguments_, "--version")); const tag = parseTag(requiredArgument(arguments_, "--tag")); if (tag.slice(1) !== version) fail("Tag and version differ.");
   const epoch = Number(requiredArgument(arguments_, "--tagger-epoch")); if (!Number.isSafeInteger(epoch) || epoch < 0) fail("tagger-epoch must be a non-negative integer.");
-  const pages = requiredArgument(arguments_, "--pages"); const output = requiredArgument(arguments_, "--out-dir"); await mkdir(output, { recursive: true });
-  const releasePath = join(pages, "release.json"); await writeJsonAtomic(releasePath, { schemaVersion: 1, tag, version, commit: requiredArgument(arguments_, "--commit"), releasedAt: new Date(epoch * 1000).toISOString() });
+  const pages = requiredArgument(arguments_, "--pages"); const output = requiredArgument(arguments_, "--out-dir"); const commit = requiredArgument(arguments_, "--commit"); await mkdir(output, { recursive: true });
+  const releasePath = join(pages, "release.json"); await writeJsonAtomic(releasePath, { schemaVersion: 1, tag, version, commit, releasedAt: new Date(epoch * 1000).toISOString() });
   const archive = join(output, `ocx-workspace-profile-${tag}.tar.gz`); await deterministicArchive(pages, archive, epoch);
   const provenance = join(output, "provenance.json"); const evidence = parseInstallEvidence(await readJsonc(requiredArgument(arguments_, "--evidence")));
-  const commit = requiredArgument(arguments_, "--commit");
   if (evidence.version !== version || evidence.commit !== commit) fail("Install evidence does not match the release version and commit.");
   const listed = await sortedFiles(pages); await writeJsonAtomic(provenance, { schemaVersion: 1, tag, version, commit, archiveSha256: await sha256File(archive), evidence, files: await Promise.all(listed.map(async (path) => ({ path, sha256: await sha256File(join(pages, path)), mode: 0o644 }))) });
   const receipt = join(output, "receipt.jsonc"); await writeJsonAtomic(receipt, evidence.receipt);

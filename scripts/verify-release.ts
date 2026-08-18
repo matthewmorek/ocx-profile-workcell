@@ -7,7 +7,7 @@ import { parseReleaseManifest } from "./release-state";
 type ArchiveEntry = Readonly<{ path: string; content: Uint8Array; mode: number }>;
 type ProvenanceFile = Readonly<{ path: string; sha256: string; mode: number }>;
 type Provenance = Readonly<{ archiveSha256: string; files: readonly ProvenanceFile[] }>;
-const expectedPagePaths = ["components/ws-overrides.json", "components/ws.json", "index.json", "release.json"];
+const expectedPagePaths = ["components/ws/profiles/ws/AGENTS.md", "components/ws/profiles/ws/ocx.jsonc", "components/ws-overrides.json", "components/ws.json", "index.json", "release.json"];
 
 function tarField(header: Uint8Array, start: number, length: number): string {
   return Buffer.from(header.slice(start, start + length)).toString().replace(/\0.*$/, "").trim();

@@ -103,8 +103,8 @@ describe("deterministic artifact contracts", () => {
   test("requires exact sorted Pages membership and reproduces the same gzip bytes", async () => {
     const root = await temporaryDirectory("artifact-contract"); const pages = join(root, "pages");
     try {
-      await mkdir(join(pages, "components"), { recursive: true });
-      for (const path of ["index.json", "release.json", "components/ws.json", "components/ws-overrides.json"]) await Bun.write(join(pages, path), path);
+      await mkdir(join(pages, "components", "ws", "profiles", "ws"), { recursive: true });
+      for (const path of ["index.json", "release.json", "components/ws.json", "components/ws-overrides.json", "components/ws/profiles/ws/AGENTS.md", "components/ws/profiles/ws/ocx.jsonc"]) await Bun.write(join(pages, path), path);
       await deterministicArchive(pages, join(root, "one.tar.gz"), 1_700_000_000);
       await deterministicArchive(pages, join(root, "two.tar.gz"), 1_700_000_000);
       expect(sha256(new Uint8Array(await Bun.file(join(root, "one.tar.gz")).arrayBuffer()))).toBe(sha256(new Uint8Array(await Bun.file(join(root, "two.tar.gz")).arrayBuffer())));
@@ -115,8 +115,8 @@ describe("deterministic artifact contracts", () => {
   test("packages complete release assets in stable digest order", async () => {
     const root = await temporaryDirectory("package-contract"); const pages = join(root, "pages"); const evidence = join(root, "evidence.json");
     try {
-      await mkdir(join(pages, "components"), { recursive: true });
-      for (const path of ["index.json", "components/ws.json", "components/ws-overrides.json"]) await Bun.write(join(pages, path), path);
+      await mkdir(join(pages, "components", "ws", "profiles", "ws"), { recursive: true });
+      for (const path of ["index.json", "components/ws.json", "components/ws-overrides.json", "components/ws/profiles/ws/AGENTS.md", "components/ws/profiles/ws/ocx.jsonc"]) await Bun.write(join(pages, path), path);
       await Bun.write(evidence, JSON.stringify(validEvidence()));
       const arguments_ = ["--version", "0.1.0", "--tag", "v0.1.0", "--commit", commit, "--tagger-epoch", "1700000000", "--pages", pages, "--evidence", evidence];
       await runScript("scripts/package-release.ts", [...arguments_, "--out-dir", join(root, "one")]);
@@ -134,8 +134,8 @@ describe("deterministic artifact contracts", () => {
   test("rejects every unsafe archive entry and provenance path drift before extraction", () => {
     for (const entry of [tarEntry("/absolute", "x"), tarEntry("../parent", "x"), tarEntry("link", "x", "2"), tarEntry("hard", "x", "1"), tarEntry("device", "x", "3"), tarEntry("other", "x", "7"), tarEntry("mode", "x", "0", 0o755)]) expect(() => parseTar(archive(entry))).toThrow();
     expect(() => parseTar(archive(tarEntry("same", "x"), tarEntry("same", "y")))).toThrow("Unsafe tar entry");
-    const base = { archiveSha256: "a".repeat(64), files: [{ path: "components/ws-overrides.json", sha256: "a".repeat(64), mode: 0o644 }, { path: "components/ws.json", sha256: "a".repeat(64), mode: 0o644 }, { path: "index.json", sha256: "a".repeat(64), mode: 0o644 }, { path: "release.json", sha256: "a".repeat(64), mode: 0o644 }] };
-    expect(parseProvenance(base).files).toHaveLength(4);
+    const base = { archiveSha256: "a".repeat(64), files: [{ path: "components/ws/profiles/ws/AGENTS.md", sha256: "a".repeat(64), mode: 0o644 }, { path: "components/ws/profiles/ws/ocx.jsonc", sha256: "a".repeat(64), mode: 0o644 }, { path: "components/ws-overrides.json", sha256: "a".repeat(64), mode: 0o644 }, { path: "components/ws.json", sha256: "a".repeat(64), mode: 0o644 }, { path: "index.json", sha256: "a".repeat(64), mode: 0o644 }, { path: "release.json", sha256: "a".repeat(64), mode: 0o644 }] };
+    expect(parseProvenance(base).files).toHaveLength(6);
     expect(() => parseProvenance({ ...base, files: base.files.slice(1) })).toThrow("missing, extra, or out of order");
     expect(() => parseProvenance({ ...base, files: [...base.files, { path: "extra", sha256: "a".repeat(64), mode: 0o644 }] })).toThrow("missing, extra, or out of order");
   });

@@ -240,6 +240,6 @@ export function assertInstalledConfiguration(generated: Record<string, unknown>,
 
 export function collectComponentKeys(receipt: unknown): string[] {
   const text = JSON.stringify(receipt);
-  return ["ws", "ws-overrides", "workspace"].filter((component) => text.includes(`\"${component}\"`));
+  return ["ws", ...["ws-overrides", "workspace"].filter((component) => text.includes(`\"${component}\"`))];
 }
 if (import.meta.main) await main();
