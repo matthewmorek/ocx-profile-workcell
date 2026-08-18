@@ -39,6 +39,28 @@ After a protected PR passes required `validate-pinned`, bump source `registry.js
 
 The shared `pages-production` lock never cancels in-progress deployments. Initial publication is only `v0.1.0` with no prior live release. Higher versions capture a verified recovery bundle before mutation. Equal exact content resumes a draft or is a verified published no-op; equal mismatch, lower tag, malformed state, missing recovery, or divergent assets fail closed. If deploy was attempted, live verification failed, and recovery exists, restore and verify old bytes. A failed first publication leaves the draft and requires explicit cleanup/recovery; never improvise restoration.
 
+## Failed first-publication recovery
+
+Use `recover-release.yml` only when the original immutable tag run failed during its first publication. The agent maintainer must confirm all guards before dispatching it:
+
+- The tag is an existing annotated tag on `main`, and its version matches `registry.jsonc` in that tag.
+- The original release run is `completed` with conclusion exactly `failure`, its requested attempt endpoint matches its workflow, repository, tag/ref, and commit, and the latest run endpoint still reports exactly that attempt. Any rerun fails recovery. It retained exactly one non-expired `target-release-bundle` artifact with the supplied immutable ID and API digest, matching workflow-run head/tag metadata and an artifact creation time inside that attempt window.
+- The current annotated tag-object SHA is pinned at dispatch, still resolves remotely, points at the verified provenance commit, and has the provenance tagger epoch. This detects tag replacement from dispatch onward even when the peeled commit is unchanged. The retained artifact did not record the original tag-object SHA, so it cannot retroactively prove historical tag-object identity; do not claim that it can.
+- The live site has no release for the tag, or has no live release at all. The only other accepted state is the tag's sole exact matching draft release.
+- The retained bundle verifies before any production inspection or publication.
+
+Query the immutable recovery identity read-only, then dispatch with every value and the exact confirmation string. Immutable artifact ID plus digest pin the source bytes rather than a mutable artifact name. Attempt provenance is established only while the latest run still equals the requested attempt; a later rerun is rejected. The current annotated tag object is pinned at dispatch and rechecked at each mutation boundary:
+
+```sh
+gh api repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346 --jq '{id,run_attempt,status,conclusion,event,path,head_branch,head_sha}'
+gh api repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346/attempts/1 --jq '{id,run_attempt,status,conclusion,event,path,head_branch,head_sha,run_started_at,updated_at}'
+gh api 'repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346/artifacts?per_page=100' --jq '.artifacts[] | {id,name,digest,expired,created_at,workflow_run}'
+gh api repos/matthewmorek/ocx-workspace-profile/git/ref/tags/v0.1.0 --jq '.object.sha'
+gh workflow run recover-release.yml --repo matthewmorek/ocx-workspace-profile -f tag=v0.1.0 -f source_run_id=32149931346 -f source_run_attempt=1 -f artifact_id=9329308619 -f artifact_digest=sha256:3ec81d4f5ab21b2d8eb006da56b484ba8e01c789267b51a515e4518ce86143aa -f tag_object_sha=f8d4cdf03fb7757732371b24cbb273d0a998d84d -f confirm=PUBLISH_EXACT
+```
+
+This is not the normal release path and is not rollback. It publishes only the bytes retained by the original tag run. Never retag, rebuild, repack, overwrite assets, move a tag, or manually deploy Pages. Recovery re-verifies the bundle and current tag identity before every mutation, creates or reuses only the exact draft, revalidates all four draft assets and hashes immediately before Pages mutation, deploys and live-verifies those bytes, then publishes through one command that freshly re-lists the expected sole draft ID and asset contract before PATCH and verifies the published assets afterward. GitHub does not provide a safe conditional PATCH through this client, so a residual admin/API TOCTOU remains only between the last re-list/hash verification and PATCH. If Pages was already restored but publication failed, the sole exact draft plus exact live bytes skips deployment and safely resumes publication. If first-publication live verification fails, the workflow fails closed, retains the draft and diagnostics, and does not restore anything because no prior live release exists.
+
 ## Rollback and recovery
 
 Run the manual rollback workflow with an existing release tag and explicit confirmation. It downloads that release, verifies checksums/provenance/receipt/archive before extraction, and redeploys exact bytes. It changes global `latest`; it neither moves tags nor pins future `kdco/workspace` resolution. If a release job fails, retain diagnostics and draft, inspect `release.json`, then rerun only after the state machine’s guards are satisfied.

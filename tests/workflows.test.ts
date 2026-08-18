@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { repositoryRoot } from "../scripts/common";
+import { releaseApiCommands } from "../scripts/release-api";
 import { shouldRestoreDeployment } from "../scripts/release-state";
 
 type YamlValue = string | number | boolean | null | YamlValue[] | { [key: string]: YamlValue };
@@ -51,6 +52,13 @@ function stepByName(job: YamlObject, name: string): YamlObject {
   if (!step) throw new Error(`Workflow step ${name} is missing.`);
   return step;
 }
+function requiredJobs(job: YamlObject): string[] {
+  const needs = job.needs;
+  return typeof needs === "string" ? [needs] : Array.isArray(needs) && needs.every((value) => typeof value === "string") ? needs as string[] : [];
+}
+function workflowReleaseApiCommands(jobs: YamlObject): string[] {
+  return Object.values(jobs).flatMap((job) => steps(object(job, "workflow job")).flatMap((step) => typeof step.run === "string" ? [...step.run.matchAll(/\bbun\s+run\s+release:api\s+--\s+([a-z-]+)/g)].map((match) => match[1]!) : []));
+}
 
 describe("workflow supply-chain and production guards", () => {
   test("Ruby Psych parses every workflow and composite action, safely restoring the YAML 1.1 on key", async () => {
@@ -60,6 +68,14 @@ describe("workflow supply-chain and production guards", () => {
       const parsed = await parseYaml(await readFile(path, "utf8"));
       expect(typeof parsed).toBe("object");
       if (path.includes("/workflows/")) expect(parsed.on).toBeDefined();
+    }
+  });
+
+  test("uses only implemented release API commands in normal and recovery workflows", async () => {
+    for (const name of ["release.yml", "recover-release.yml"]) {
+      const commands = workflowReleaseApiCommands(object((await parseYaml(await workflow(name))).jobs, `${name}.jobs`));
+      expect(commands.length).toBeGreaterThan(0);
+      for (const command of commands) expect(releaseApiCommands).toContain(command);
     }
   });
 
@@ -90,6 +106,50 @@ describe("workflow supply-chain and production guards", () => {
     expect(String(stepByName(rollbackJob, "Download and verify immutable release bytes").run)).toContain("--expected-tag \"$RELEASE_TAG\"");
   });
 
+  test("models failed-tag recovery as an exact cross-run first-publication state machine", async () => {
+    const recoverySource = await workflow("recover-release.yml");
+    const recovery = await parseYaml(recoverySource); const jobs = object(recovery.jobs, "recovery.jobs");
+    const preflight = object(jobs["preflight-recovery"], "preflight-recovery"); const prepared = object(jobs["prepare-exact-draft"], "prepare-exact-draft"); const deployed = object(jobs["deploy-exact-pages"], "deploy-exact-pages"); const published = object(jobs["publish-exact-release"], "publish-exact-release");
+    const inputs = object(object(recovery.on, "recovery.on")["workflow_dispatch"], "workflow_dispatch").inputs;
+    expect(object(inputs, "workflow_dispatch.inputs").confirm).toEqual({ description: "Type PUBLISH_EXACT", required: true, type: "string" });
+    for (const input of ["source_run_id", "source_run_attempt", "artifact_id", "artifact_digest", "tag_object_sha"]) expect(object(inputs, "workflow_dispatch.inputs")[input]).toMatchObject({ required: true, type: "string" });
+    expect(preflight.if).toBe("inputs.confirm == 'PUBLISH_EXACT'");
+    expect(recovery.concurrency).toEqual({ group: "pages-production", "cancel-in-progress": false });
+    expect(preflight.permissions).toEqual({ actions: "read", contents: "read" });
+    expect(prepared.permissions).toEqual({ actions: "read", contents: "write" });
+    expect(deployed.permissions).toEqual({ actions: "read", contents: "read", pages: "write", "id-token": "write" });
+    expect(published.permissions).toEqual({ actions: "read", contents: "write" });
+    expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain('actions/runs/$SOURCE_RUN_ID');
+    expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain('actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT');
+    expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain("--source-run-attempt");
+    expect(String(stepByName(preflight, "Bind immutable source identity to the failed release attempt").run)).toContain("--artifact-digest");
+    const downloads = [preflight, prepared, deployed, published].map((job) => steps(job).find((step) => step.uses === "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"));
+    expect(downloads).toHaveLength(4);
+    for (const download of downloads) {
+      const withValues = object(download?.with, "cross-run artifact input");
+      expect(withValues).toMatchObject({ "artifact-ids": "${{ inputs.artifact_id }}", path: "bundle", "github-token": "${{ github.token }}", repository: "${{ github.repository }}", "run-id": "${{ inputs.source_run_id }}" });
+      expect(withValues).not.toHaveProperty("name");
+    }
+    expect(recoverySource).not.toContain("bun run build");
+    expect(recoverySource).not.toContain("bun run package:release");
+    expect(prepared.needs).toBe("preflight-recovery"); expect(deployed.needs).toEqual(["preflight-recovery", "prepare-exact-draft"]); expect(published.needs).toEqual(["preflight-recovery", "prepare-exact-draft", "deploy-exact-pages"]);
+    for (const job of [preflight, prepared, deployed, published]) {
+      const dependencies = requiredJobs(job);
+      for (const match of JSON.stringify(job).matchAll(/needs\.([a-z0-9-]+)\.outputs/g)) expect(dependencies).toContain(match[1]);
+    }
+    const deployIndex = steps(deployed).findIndex((step) => step.id === "deploy-pages"); const liveIndex = steps(deployed).findIndex((step) => step.id === "live-verification");
+    expect(deployIndex).toBeGreaterThan(-1); expect(liveIndex).toBeGreaterThan(deployIndex);
+    const preDeployStateIndex = steps(deployed).findIndex((step) => step.id === "decision"); const draftVerificationIndex = steps(deployed).findIndex((step) => step.name === "Reverify the sole exact draft immediately before Pages mutation");
+    expect(draftVerificationIndex).toBeGreaterThan(preDeployStateIndex); expect(draftVerificationIndex).toBeLessThan(deployIndex);
+    expect(stepByName(deployed, "Fail first-publication recovery without restoration").if).toBe("always() && steps.live-verification.outputs.verified != 'true'");
+    expect(recoverySource).not.toContain("restore-");
+    expect(String(stepByName(published, "Reassert tag, exact draft, live Pages, and pre-publish state").run)).toContain("release:api -- publish-exact");
+    expect(String(stepByName(published, "Reassert tag, exact draft, live Pages, and pre-publish state").run)).toContain("--expected-release-id");
+    expect(stepByName(published, "Verify exact live Pages bytes after publication")).toBeDefined();
+    for (const phase of ["pre-draft", "pre-deploy", "pre-publish"]) expect(recoverySource).toContain(`--phase ${phase}`);
+    expect(recoverySource).toContain("resume-live");
+  });
+
   test("simulates success, failed deployment, failed live verification, and first-publication failure control flow", async () => {
     expect(shouldRestoreDeployment({ deploymentAttempted: true, liveVerified: true, recoveryAvailable: true })).toBe(false);
     expect(shouldRestoreDeployment({ deploymentAttempted: true, liveVerified: false, recoveryAvailable: true })).toBe(true);
@@ -101,7 +161,7 @@ describe("workflow supply-chain and production guards", () => {
   });
 
   test("requires SHA-pinned third-party actions and checksum-pinned bootstrap binaries", async () => {
-    const files = await Promise.all([workflow("ci.yml"), workflow("release.yml"), workflow("rollback.yml"), readFile(join(repositoryRoot, ".github/actions/bootstrap-pinned/action.yml"), "utf8")]);
+    const files = await Promise.all([workflow("ci.yml"), workflow("release.yml"), workflow("rollback.yml"), workflow("recover-release.yml"), readFile(join(repositoryRoot, ".github/actions/bootstrap-pinned/action.yml"), "utf8")]);
     for (const sha of actionShas) expect(files.join("\n")).toContain(sha);
     for (const checksum of ["db17588a4aea8804856825d4bead3f05e1f37276ca606f37e369b4f72f35d3fb", "1bdcb928da5d938fad787fc046e47068a87c8a2987466bba014294264efdc4b8", "9667289c143d1fbdd440055af4041bb432f44b07ddf0aef048a8c7f2f7c65e2d"]) expect(files.at(-1)).toContain(checksum);
   });

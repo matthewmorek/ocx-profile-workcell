@@ -67,6 +67,35 @@ curl --fail --show-error https://matthewmorek.github.io/ocx-workspace-profile/re
 curl --fail --show-error https://matthewmorek.github.io/ocx-workspace-profile/index.json
 ```
 
+### Recover a failed first publication
+
+Use this exceptional workflow only when the original immutable tag run produced and retained the release bundle but failed during its first publication. It is not a normal release mechanism or a rollback. The workflow accepts only a failed annotated tag run with no live release, or the sole exact matching draft; it verifies the retained bytes before deployment and publication.
+
+First query the immutable source identity read-only. Pass each value to pin exact bytes by immutable artifact ID plus digest and bind provenance to the failed attempt. The workflow reads both the requested attempt endpoint and the latest run endpoint; the latest attempt must still be the requested attempt (`1` here), so any later rerun fails recovery:
+
+```sh
+gh api repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346 --jq '{id,run_attempt,status,conclusion,event,path,head_branch,head_sha}'
+gh api repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346/attempts/1 --jq '{id,run_attempt,status,conclusion,event,path,head_branch,head_sha,run_started_at,updated_at}'
+gh api 'repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346/artifacts?per_page=100' --jq '.artifacts[] | {id,name,digest,expired,created_at,workflow_run}'
+gh api repos/matthewmorek/ocx-workspace-profile/git/ref/tags/v0.1.0 --jq '.object.sha'
+gh workflow run recover-release.yml --repo matthewmorek/ocx-workspace-profile -f tag=v0.1.0 -f source_run_id=32149931346 -f source_run_attempt=1 -f artifact_id=9329308619 -f artifact_digest=sha256:3ec81d4f5ab21b2d8eb006da56b484ba8e01c789267b51a515e4518ce86143aa -f tag_object_sha=f8d4cdf03fb7757732371b24cbb273d0a998d84d -f confirm=PUBLISH_EXACT
+```
+
+Monitor the recovery run, then verify the published artifact and live Pages content:
+
+```sh
+gh run list --repo matthewmorek/ocx-workspace-profile --workflow recover-release.yml --limit 5
+gh run watch RUN_ID --repo matthewmorek/ocx-workspace-profile --exit-status
+gh release download v0.1.0 --repo matthewmorek/ocx-workspace-profile --pattern "ocx-workspace-profile-v0.1.0.tar.gz" --pattern provenance.json --pattern receipt.jsonc --pattern SHA256SUMS --dir "$TMPDIR/v0.1.0"
+(cd "$TMPDIR/v0.1.0" && shasum -a 256 -c SHA256SUMS)
+bun run verify:release -- bundle --archive "$TMPDIR/v0.1.0/ocx-workspace-profile-v0.1.0.tar.gz" --provenance "$TMPDIR/v0.1.0/provenance.json" --receipt "$TMPDIR/v0.1.0/receipt.jsonc" --checksums "$TMPDIR/v0.1.0/SHA256SUMS" --expected-tag v0.1.0 --extract-to "$TMPDIR/v0.1.0/pages"
+bun run verify:release -- live --base-url https://matthewmorek.github.io/ocx-workspace-profile --provenance "$TMPDIR/v0.1.0/provenance.json" --release "$TMPDIR/v0.1.0/pages/release.json" --expected-tag v0.1.0
+```
+
+The workflow rejects a successful run, a requested-attempt mismatch, any later rerun, duplicate artifact name, mismatched/expired artifact digest, artifact metadata outside the attempt window, or any tag-object replacement after dispatch—even one that still peels to the same commit. It rechecks production state and tag identity before draft creation, Pages deployment, and publication; immediately before Pages mutation it rechecks the complete draft asset inventory and hashes. Publication freshly re-lists the sole expected draft ID, validates its four immutable bundle assets, publishes, and verifies the exact published assets; GitHub's REST client has no safe conditional PATCH used here, leaving only the minimized admin/API race between that verification and PATCH. A rerun after deployment succeeded but publication failed verifies the exact live bytes, skips redeployment, and publishes only the sole exact draft. Never retag, rebuild, repack, overwrite assets, move a tag, or manually deploy Pages.
+
+The retained v0.1.0 artifact records the commit and tagger epoch, not the original annotated tag-object SHA. Therefore it cannot retroactively prove the original tag object. Recovery pins the current annotated tag object at dispatch and detects tag changes from dispatch onward while retaining the bundle's commit/tagger-epoch checks; this historical limitation does not prevent publication of the immutable retained bytes.
+
 Roll back only a published, verified release:
 
 ```sh

@@ -20,6 +20,13 @@ export type ProductionDecision =
   | Readonly<{ kind: "resume-draft" }>
   | Readonly<{ kind: "published-noop" }>;
 
+export type FailedFirstPublicationRecoveryDecision =
+  | Readonly<{ kind: "first-publication" }>
+  | Readonly<{ kind: "resume-draft" }>
+  | Readonly<{ kind: "resume-live" }>;
+
+export type FailedFirstPublicationRecoveryPhase = "pre-draft" | "pre-deploy" | "pre-publish";
+
 export function shouldRestoreDeployment(input: Readonly<{ deploymentAttempted: boolean; liveVerified: boolean; recoveryAvailable: boolean }>): boolean {
   return input.deploymentAttempted && !input.liveVerified && input.recoveryAvailable;
 }
@@ -71,7 +78,42 @@ export function parseRemoteRelease(value: unknown): RemoteRelease | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Record<string, unknown>;
   if (!Number.isSafeInteger(candidate.id) || typeof candidate.draft !== "boolean" || typeof candidate.tag_name !== "string" || !Array.isArray(candidate.assets)) return undefined;
-  return { id: candidate.id, draft: candidate.draft, tag_name: candidate.tag_name };
+  return { id: candidate.id as number, draft: candidate.draft as boolean, tag_name: candidate.tag_name as string };
+}
+
+/** Allows each recovery mutation only from its exact, phase-specific first-publication state. */
+export function classifyFailedFirstPublicationRecovery(input: Readonly<{
+  target: ReleaseManifest;
+  live: unknown | null;
+  targetRelease: unknown | null;
+  repositoryReleases: readonly unknown[];
+  phase?: FailedFirstPublicationRecoveryPhase;
+}>): FailedFirstPublicationRecoveryDecision {
+  const target = parseReleaseManifest(input.target);
+  if (!target || target.version !== "0.1.0") fail("Failed first-publication recovery requires v0.1.0.");
+  const phase = input.phase ?? "pre-draft";
+  const live = input.live === null ? undefined : parseReleaseManifest(input.live);
+  if (input.live !== null && !live) fail("Live release.json is malformed.");
+  const targetRelease = input.targetRelease === null ? undefined : parseRemoteRelease(input.targetRelease);
+  if (input.targetRelease !== null && !targetRelease) fail("Target GitHub Release state is malformed.");
+  if (targetRelease && (targetRelease.tag_name !== target.tag || !targetRelease.draft)) fail("Recovery draft is not an exact matching draft.");
+  const releases = input.repositoryReleases.map((release) => {
+    const parsed = parseRemoteRelease(release);
+    if (!parsed) fail("Repository GitHub Release state is malformed.");
+    return parsed;
+  });
+  if (new Set(releases.map((release) => release.id)).size !== releases.length) fail("Repository GitHub Release state contains duplicate release IDs.");
+  const hasSoleExactDraft = Boolean(targetRelease && releases.length === 1 && releases[0].id === targetRelease.id);
+  if (!live) {
+    if (phase === "pre-publish") fail("Pre-publish recovery requires the exact target Pages release to be live.");
+    if (phase === "pre-deploy" && !hasSoleExactDraft) fail("Pre-deploy recovery requires the sole exact matching draft.");
+    if (!targetRelease && releases.length === 0 && phase === "pre-draft") return { kind: "first-publication" };
+    if (hasSoleExactDraft) return { kind: "resume-draft" };
+    fail("Failed first-publication recovery found an unexpected release state.");
+  }
+  if (!manifestsAreIdentical(live, target)) fail("Recovery live Pages release does not match verified provenance.");
+  if (!hasSoleExactDraft) fail("Recovery live Pages release requires the sole exact matching draft.");
+  return { kind: "resume-live" };
 }
 
 function manifestsAreIdentical(left: ReleaseManifest, right: ReleaseManifest): boolean {
