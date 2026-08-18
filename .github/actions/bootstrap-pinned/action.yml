@@ -26,6 +26,5 @@ runs:
         unzip -q "$RUNNER_TEMP/opencode.zip" -d "$RUNNER_TEMP/opencode"
         chmod +x "$RUNNER_TEMP/opencode/opencode"
         echo "$RUNNER_TEMP/bun/bun-darwin-aarch64" >> "$GITHUB_PATH"
-        echo "BUN_BIN=$RUNNER_TEMP/bun/bun-darwin-aarch64" >> "$GITHUB_ENV"
         echo "OCX_BIN=$RUNNER_TEMP/ocx" >> "$GITHUB_ENV"
         echo "OPENCODE_BIN=$RUNNER_TEMP/opencode/opencode" >> "$GITHUB_ENV"

@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { fail, parseArguments, parseVersion, pathExists, requiredArgument, sha256File, writeJsonAtomic } from "./common";
 
-const runtime = process.env.BUN_BIN ?? process.execPath;
+const runtime = process.execPath;
 async function invoke(command: string[]): Promise<void> { const child = Bun.spawn(command, { stdout: "inherit", stderr: "inherit" }); if ((await child.exited) !== 0) fail(`Command failed: ${command.join(" ")}`); }
 function validationArguments(mode: string, expectedOcxVersion: string | undefined, expectedOpenCodeVersion: string | undefined): string[] {
   if (mode === "advisory") {

@@ -39,7 +39,6 @@ jobs:
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bun"
           chmod +x "$RUNNER_TEMP/bun/bun-darwin-aarch64"
           echo "$RUNNER_TEMP/bun/bun-darwin-aarch64" >> "$GITHUB_PATH"
-          echo "BUN_BIN=$RUNNER_TEMP/bun/bun-darwin-aarch64" >> "$GITHUB_ENV"
           OCX_URL="$(/usr/bin/curl -fsSL https://api.github.com/repos/kdcokenny/ocx/releases/latest | jq -r '.assets[] | select(.name == "ocx-darwin-arm64") | .browser_download_url')"
           OPENCODE_URL="$(/usr/bin/curl -fsSL https://api.github.com/repos/anomalyco/opencode/releases/latest | jq -r '.assets[] | select(.name == "opencode-darwin-arm64.zip") | .browser_download_url')"
           test -n "$OCX_URL" && test "$OCX_URL" != null
