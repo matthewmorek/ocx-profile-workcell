@@ -1,16 +1,78 @@
-import { mkdir, readFile, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { cp, mkdir, readFile, rm } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { fail, parseArguments, parseVersion, readJsonc, repositoryRoot, requiredArgument, temporaryDirectory, writeJsonAtomic } from "./common";
-import { assertEvidenceIsSafe, sanitizeEvidenceValue, type InstallEvidence } from "./evidence";
+import { assertEvidenceIsSafe, sanitizeEvidenceValue, type InstallAttemptOutcome, type InstallEvidence } from "./evidence";
 
-export async function run(command: string[], environment: Record<string, string>, timeoutMs: number): Promise<string> {
+type StageRecord = {
+  name: string;
+  command: string[];
+  timeoutMs: number;
+  startedAt: string;
+  completedAt: string;
+  elapsedMs: number;
+  exitCode: number;
+  timedOut: boolean;
+  termination: ReadonlyArray<{ signal: "SIGTERM" | "SIGKILL"; at: string }>;
+  stdout: string;
+  stderr: string;
+};
+
+type RegistryRequest = { at: string; method: string; path: string; status: number };
+
+type DiagnosticContext = { registry: string; sandbox: string; stages: StageRecord[]; requests: RegistryRequest[] };
+type RegistrySource = { url: string; stop(): void };
+type RetryableFailure = "timeout" | "network";
+
+const stageTimeouts = {
+  toolVersion: 10_000,
+  initializeProfile: 20_000,
+  installProfile: 120_000,
+  verifyProfile: 30_000,
+  smokeOpenCode: 30_000,
+} as const;
+
+function elapsedMilliseconds(startedAt: number): number { return Math.round(performance.now() - startedAt); }
+
+function commandDescription(command: string[]): string { return command.join(" "); }
+
+async function execute(command: string[], environment: Record<string, string>, timeoutMs: number, name: string): Promise<StageRecord> {
+  const startedAt = performance.now();
+  const startedAtIso = new Date().toISOString();
   const child = Bun.spawn(command, { env: environment, stdout: "pipe", stderr: "pipe" });
   let timedOut = false;
-  const timeout = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
-  const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]).finally(() => clearTimeout(timeout));
-  if (timedOut) fail(`${command[0]} exceeded the ${timeoutMs}ms timeout: ${stderr || stdout || "no diagnostic output"}`);
-  if (code !== 0) fail(`${command[0]} failed: ${stderr || stdout}`);
-  return stdout;
+  const termination: Array<{ signal: "SIGTERM" | "SIGKILL"; at: string }> = [];
+  let forceKill: ReturnType<typeof setTimeout> | undefined;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    termination.push({ signal: "SIGTERM", at: new Date().toISOString() });
+    child.kill("SIGTERM");
+    forceKill = setTimeout(() => {
+      termination.push({ signal: "SIGKILL", at: new Date().toISOString() });
+      child.kill("SIGKILL");
+    }, 5_000);
+  }, timeoutMs);
+  const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]).finally(() => {
+    clearTimeout(timeout);
+    if (forceKill) clearTimeout(forceKill);
+  });
+  return { name, command, timeoutMs, startedAt: startedAtIso, completedAt: new Date().toISOString(), elapsedMs: elapsedMilliseconds(startedAt), exitCode, timedOut, termination, stdout, stderr };
+}
+
+class StageFailure extends Error {
+  constructor(readonly stage: StageRecord) {
+    const output = stage.stderr || stage.stdout || "no diagnostic output";
+    const reason = stage.timedOut ? `exceeded its ${stage.timeoutMs}ms timeout` : `failed with exit code ${stage.exitCode}`;
+    super(`Stage ${stage.name} ${reason} after ${stage.elapsedMs}ms while running ${commandDescription(stage.command)}: ${output}`);
+  }
+}
+
+function assertStageSucceeded(stage: StageRecord): string {
+  if (stage.timedOut || stage.exitCode !== 0) throw new StageFailure(stage);
+  return stage.stdout;
+}
+
+export async function run(command: string[], environment: Record<string, string>, timeoutMs: number): Promise<string> {
+  return assertStageSucceeded(await execute(command, environment, timeoutMs, command[0]));
 }
 
 export function createSandboxEnvironment(sandbox: string): Record<string, string> {
@@ -31,28 +93,56 @@ function assertPinnedVersion(tool: string, output: string, expected: string): vo
   if (!new RegExp(`(?:^|\\D)${expected.replaceAll(".", "\\.")}(?:$|\\D)`).test(output)) fail(`${tool} must report version ${expected}, received ${output}.`);
 }
 
-async function main(): Promise<void> {
-  const arguments_ = parseArguments(Bun.argv.slice(2), ["--registry", "--version", "--commit", "--evidence-out"]);
-  const registry = requiredArgument(arguments_, "--registry");
-  const version = parseVersion(requiredArgument(arguments_, "--version"));
-  const commit = requiredArgument(arguments_, "--commit");
-  const evidenceOut = resolve(requiredArgument(arguments_, "--evidence-out"));
+async function runStage(name: string, command: string[], environment: Record<string, string>, timeoutMs: number, stages: StageRecord[]): Promise<string> {
+  const stage = await execute(command, environment, timeoutMs, name);
+  stages.push(stage);
+  return assertStageSucceeded(stage);
+}
+
+async function retainDiagnostics(directory: string | undefined, context: DiagnosticContext): Promise<void> {
+  if (!directory) return;
+  await mkdir(directory, { recursive: true });
+  await writeJsonAtomic(join(directory, "stages.json"), context.stages);
+  await writeJsonAtomic(join(directory, "stage-timings.json"), context.stages.map(({ name, timeoutMs, startedAt, completedAt, elapsedMs, exitCode, timedOut }) => ({ name, timeoutMs, startedAt, completedAt, elapsedMs, exitCode, timedOut })));
+  await writeJsonAtomic(join(directory, "stdout-stderr.json"), context.stages.map(({ name, stdout, stderr }) => ({ name, stdout, stderr })));
+  await writeJsonAtomic(join(directory, "process-termination.json"), context.stages.map(({ name, timedOut, termination }) => ({ name, timedOut, termination })));
+  await writeJsonAtomic(join(directory, "registry-requests.json"), context.requests);
+  await writeJsonAtomic(join(directory, "context.json"), { registry: context.registry });
+  await cp(context.sandbox, join(directory, "sandbox"), { recursive: true, force: true, errorOnExist: false });
+}
+
+function retryableInstallFailure(error: unknown): RetryableFailure | undefined {
+  if (!(error instanceof StageFailure) || error.stage.name !== "install official KDCO workspace profile") return;
+  const output = `${error.stage.stderr}\n${error.stage.stdout}`;
+  if (/checksum|sha(?:256)?|schema|config(?:uration)?|validation|policy|assertion|deterministic|malformed|invalid|mismatch|signature/i.test(output)) return;
+  if (error.stage.timedOut) return "timeout";
+  if (/econnreset|econnrefused|etimedout|eai_again|enotfound|network|socket hang up|connection (?:reset|refused|closed|timed out)|tls handshake|fetch failed|service unavailable|bad gateway|gateway timeout|\b(?:502|503|504)\b/i.test(output)) return "network";
+}
+
+class InstallAttemptFailure extends Error {
+  constructor(readonly cause: unknown, readonly retryable: RetryableFailure | undefined) {
+    super(cause instanceof Error ? cause.message : "Install attempt failed.");
+  }
+}
+
+async function runInstallAttempt(registry: string, version: string, commit: string, ocx: string, opencode: string, diagnosticsDirectory: string): Promise<InstallEvidence> {
   const sandbox = await temporaryDirectory("ocx-install");
   const environment = createSandboxEnvironment(sandbox);
-  const ocx = process.env.OCX_BIN ?? "ocx";
-  const opencode = process.env.OPENCODE_BIN ?? "opencode";
-  let source: { url: string; stop(): void } | undefined;
+  let source: RegistrySource | undefined;
+  const stages: StageRecord[] = [];
+  const requests: RegistryRequest[] = [];
+  let succeeded = false;
   try {
     await Promise.all([environment.HOME, environment.XDG_CONFIG_HOME, environment.XDG_DATA_HOME, environment.XDG_CACHE_HOME, environment.XDG_STATE_HOME].map((directory) => mkdir(directory, { recursive: true })));
-    source = /^https?:\/\//.test(registry) ? { url: registry, stop: () => {} } : await serveRegistry(resolve(registry));
-    const ocxVersion = (await run([ocx, "--version"], environment, 10_000)).trim();
-    const opencodeVersion = (await run([opencode, "--version"], environment, 10_000)).trim();
+    source = /^https?:\/\//.test(registry) ? { url: registry, stop: () => {} } : await serveRegistry(resolve(registry), requests);
+    const ocxVersion = (await runStage("verify OCX version", [ocx, "--version"], environment, stageTimeouts.toolVersion, stages)).trim();
+    const opencodeVersion = (await runStage("verify OpenCode version", [opencode, "--version"], environment, stageTimeouts.toolVersion, stages)).trim();
     assertPinnedVersion("OCX", ocxVersion, "2.0.14");
     assertPinnedVersion("OpenCode", opencodeVersion, "1.17.15");
-    await run([ocx, "init", "--global", "--quiet"], environment, 20_000);
-    await run([ocx, "profile", "add", "ws", "--source", "matthewmorek/ws", "--from", source.url, "--global"], environment, 180_000);
-    await run([ocx, "verify", "--cwd", join(config, "opencode", "profiles", "ws")], environment, 30_000);
-    await run([ocx, "oc", "-p", "ws", "--help"], environment, 20_000);
+    await runStage("initialize disposable OCX profile root", [ocx, "init", "--global", "--quiet"], environment, stageTimeouts.initializeProfile, stages);
+    await runStage("install official KDCO workspace profile", [ocx, "profile", "add", "ws", "--source", "matthewmorek/ws", "--from", source.url, "--global"], environment, stageTimeouts.installProfile, stages);
+    await runStage("verify installed OCX profile", [ocx, "verify", "--cwd", join(environment.XDG_CONFIG_HOME, "opencode", "profiles", "ws")], environment, stageTimeouts.verifyProfile, stages);
+    await runStage("smoke OpenCode profile startup", [ocx, "oc", "-p", "ws", "--help"], environment, stageTimeouts.smokeOpenCode, stages);
     const profileRoot = join(environment.XDG_CONFIG_HOME, "opencode", "profiles", "ws");
     const generated = await readJsonc<Record<string, unknown>>(join(profileRoot, "opencode.jsonc"));
     const receipt = await readJsonc<unknown>(join(profileRoot, ".ocx", "receipt.jsonc"));
@@ -64,17 +154,73 @@ async function main(): Promise<void> {
     const sanitizedReceipt = sanitizeEvidenceValue(receipt);
     const evidence: InstallEvidence = { schemaVersion: 1, version, commit, installedComponents: collectComponentKeys(receipt), resolvedDependencies: sanitizedReceipt, assertions, receipt: sanitizedReceipt, toolVersions: { ocx: ocxVersion, opencode: opencodeVersion } };
     assertEvidenceIsSafe(evidence);
-    await writeJsonAtomic(evidenceOut, evidence);
-  } finally { source?.stop(); await rm(sandbox, { recursive: true, force: true }); }
+    succeeded = true;
+    return evidence;
+  } catch (error) {
+    source?.stop();
+    source = undefined;
+    await retainDiagnostics(diagnosticsDirectory, { registry, sandbox, stages, requests });
+    throw new InstallAttemptFailure(error, retryableInstallFailure(error));
+  } finally {
+    source?.stop();
+    await rm(sandbox, { recursive: true, force: true });
+    if (succeeded) await rm(diagnosticsDirectory, { recursive: true, force: true });
+  }
 }
 
-export async function serveRegistry(directory: string): Promise<{ url: string; stop(): void }> {
+async function main(): Promise<void> {
+  const arguments_ = parseArguments(Bun.argv.slice(2), ["--registry", "--version", "--commit", "--evidence-out", "--diagnostics-dir"]);
+  const registry = requiredArgument(arguments_, "--registry");
+  const version = parseVersion(requiredArgument(arguments_, "--version"));
+  const commit = requiredArgument(arguments_, "--commit");
+  const evidenceOut = resolve(requiredArgument(arguments_, "--evidence-out"));
+  const diagnosticsArgument = arguments_.get("--diagnostics-dir");
+  const diagnosticsDirectory = diagnosticsArgument ? resolve(diagnosticsArgument) : join(dirname(evidenceOut), "install-diagnostics");
+  const ocx = process.env.OCX_BIN ?? "ocx";
+  const opencode = process.env.OPENCODE_BIN ?? "opencode";
+  await rm(diagnosticsDirectory, { recursive: true, force: true });
+  await mkdir(diagnosticsDirectory, { recursive: true });
+  const attempts: InstallAttemptOutcome[] = [];
+  for (const number of [1, 2]) {
+    const attemptDiagnostics = join(diagnosticsDirectory, `attempt-${number}`);
+    await mkdir(attemptDiagnostics, { recursive: true });
+    try {
+      const evidence = await runInstallAttempt(registry, version, commit, ocx, opencode, attemptDiagnostics);
+      attempts.push({ number, outcome: "succeeded" });
+      const withAttempts: InstallEvidence = { ...evidence, attempts };
+      assertEvidenceIsSafe(withAttempts);
+      await writeJsonAtomic(evidenceOut, withAttempts);
+      return;
+    } catch (error) {
+      if (!(error instanceof InstallAttemptFailure)) throw error;
+      if (!error.retryable) throw error;
+      attempts.push({ number, outcome: "failed", failure: error.retryable });
+      if (number === 2) throw error;
+    }
+  }
+  fail("Install verification exhausted its bounded attempts.");
+}
+
+export async function serveRegistry(directory: string, requests: RegistryRequest[] = []): Promise<{ url: string; stop(): void }> {
   const server = Bun.serve({ port: 0, async fetch(request) {
     const pathname = new URL(request.url).pathname.replace(/^\/+/, "");
-    if (!pathname || pathname.includes("..") || pathname.includes("\\")) return new Response("Not found", { status: 404 });
+    if (!pathname || pathname.includes("..") || pathname.includes("\\")) {
+      requests.push({ at: new Date().toISOString(), method: request.method, path: pathname || "/", status: 404 });
+      return new Response("Not found", { status: 404 });
+    }
     const path = resolve(directory, pathname);
-    if (!path.startsWith(`${directory}/`)) return new Response("Not found", { status: 404 });
-    try { return new Response(await readFile(path)); } catch { return new Response("Not found", { status: 404 }); }
+    if (!path.startsWith(`${directory}/`)) {
+      requests.push({ at: new Date().toISOString(), method: request.method, path: pathname, status: 404 });
+      return new Response("Not found", { status: 404 });
+    }
+    try {
+      const content = await readFile(path);
+      requests.push({ at: new Date().toISOString(), method: request.method, path: pathname, status: 200 });
+      return new Response(content);
+    } catch {
+      requests.push({ at: new Date().toISOString(), method: request.method, path: pathname, status: 404 });
+      return new Response("Not found", { status: 404 });
+    }
   } });
   const response = await fetch(`http://127.0.0.1:${server.port}/index.json`, { signal: AbortSignal.timeout(5_000) });
   if (!response.ok) { server.stop(); fail("Local registry server did not become ready."); }

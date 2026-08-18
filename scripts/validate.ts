@@ -10,7 +10,7 @@ async function main(): Promise<void> {
   await mkdir(work, { recursive: true });
   await invoke([process.execPath, "run", "scripts/build-registry.ts", "--version", version, "--out", pages]);
   await invoke([process.execPath, "test", "tests"]);
-  await invoke([process.execPath, "run", "scripts/verify-install.ts", "--registry", pages, "--version", version, "--commit", commit, "--evidence-out", evidence]);
+  await invoke([process.execPath, "run", "scripts/verify-install.ts", "--registry", pages, "--version", version, "--commit", commit, "--evidence-out", evidence, "--diagnostics-dir", join(work, "install-diagnostics")]);
   if (!(await pathExists(evidence))) fail("Install verification did not create evidence.");
   await writeJsonAtomic(join(work, "validation-result.json"), { schemaVersion: 1, version, commit, pages, pagesHash: await sha256File(join(pages, "index.json")), evidence, evidenceHash: await sha256File(evidence) });
 }
