@@ -1,78 +1,49 @@
-# Maintainer automation runbook
+# Maintainer instructions
 
-This repository authors an OCX registry. `registry.jsonc`, `files/profiles/ws/ocx.jsonc`, and `files/profiles/ws/AGENTS.md` are authored inputs. `pages/`, `release-out/`, extracted registries, receipts, evidence, and diagnostics are generated and must never be committed. The payload contains only the two files in `files/profiles/ws`; repository-root `AGENTS.md` is not installed.
+This repository publishes a minimal OCX registry for the `ws` profile. The profile
+is an independent derivative of [KDCO Workspace](https://github.com/kdcokenny/opencode-workspace).
+Use the [canonical KDCO registry source](https://github.com/kdcokenny/ocx/tree/main/workers/kdco-registry)
+and [OCX documentation](https://ocx.kdco.dev/) as upstream references.
 
-## Invariants
+## Architecture invariants
 
-- Exactly two components exist: `ws` and fileless `ws-overrides`. `ws` must depend, in this order, on `kdco/workspace`, then `ws-overrides`. The tail supplies derivative metadata after KDCO; do not add a profile `opencode.jsonc`.
-- Keep the pinned model, agents, root permissions, four enabled remote MCPs, and only the two tail plugin pins exact. KDCO owns DCP/formatter. Do not add PostHog, Tuple, instructions, locks, state, secrets, absolute paths, or `@latest`.
-- OCX 2.0.14 strips direct `agent.reasoningEffort` and `agent.textVerbosity`. Their exact canonical values intentionally live under each recognized `agent.options` object; OpenCode 1.17.15 merges these options into runtime agent requests. Do not move or duplicate them as direct agent keys.
-- Never edit a published release asset, retag, manually deploy Pages, or rebuild downstream artifacts. Pages receives an archive verified from the immutable workflow bundle.
+- The public profile name is `ws`.
+- `ws` depends on `kdco/workspace`, then fileless `ws-overrides`, in that order.
+- `ws` explicitly targets `profiles/ws/ocx.jsonc` as `ocx.jsonc` and `profiles/ws/AGENTS.md` as `AGENTS.md`.
+- The profile payload contains those two files only. Do not add a profile `opencode.jsonc`.
+- Override options belong under each recognized agent's `agent.options` object. Do not duplicate them as direct agent keys.
+- Do not copy or fork KDCO source. Keep the derivative changes in `ws-overrides`.
 
-## Local preparation
+## Development
 
-Use the verified Bun 1.3.5 binary, not a system Bun. Keep OCX/OpenCode and all XDG roots disposable; never test against the real profile.
-
-Bootstrap downloaded Bun/OCX/OpenCode only after checking the checksum-pinned release assets recorded in `.github/actions/bootstrap-pinned/action.yml`. OpenAI authentication is `opencode auth login` (select OpenAI, complete browser OAuth, then `opencode auth list`); never place credentials in repository files or evidence.
+Use Bun 1.3.5 from the package manager declaration:
 
 ```sh
 bun install --frozen-lockfile
-bun test tests
-VERSION="$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')"
-COMMIT="$(git rev-parse HEAD)"
-bun run build -- --version "$VERSION" --out "$TMPDIR/pages"
- bun run validate -- --version "$VERSION" --commit "$COMMIT" --work-dir "$TMPDIR/validate" --validation-mode pinned --expected-ocx-version 2.0.14 --expected-opencode-version 1.17.15
+bun run build
+bun run test
+bun run smoke
 ```
 
-After an annotated tag exists, package and preflight only the validation output; never rebuild in a publish job:
+`build` runs `scripts/build-registry.ts`. `test` runs `bun test tests/registry.test.ts`. `smoke` runs `scripts/smoke-install.ts`.
 
-```sh
-TAG="$(git describe --exact-match --tags)"
-TAGGER_EPOCH="$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$TAG")"
-bun run package:release -- --version "$VERSION" --tag "$TAG" --commit "$COMMIT" --tagger-epoch "$TAGGER_EPOCH" --pages "$TMPDIR/validate/pages" --evidence "$TMPDIR/validate/install-evidence.json" --out-dir release-out
- bun run verify:release -- bundle --archive "release-out/ocx-workspace-profile-$TAG.tar.gz" --provenance release-out/provenance.json --receipt release-out/receipt.jsonc --checksums release-out/SHA256SUMS --expected-tag "$TAG" --extract-to "$TMPDIR/preflight-pages"
-```
+## Releases
 
-## Release state machine
+1. Bump the version in both `registry.jsonc` and `package.json`.
+2. Open a PR and wait for required `validate-pinned` to pass.
+3. Merge the PR.
+4. Create and push the annotated tag:
 
-After a protected PR passes required `validate-pinned`, bump source `registry.jsonc#/version` and `package.json` together. Re-run validation, merge, then create only an annotated tag: `git tag -a vX.Y.Z -m vX.Y.Z` and push it. Release accepts annotated tags on `main` only. It validates source before production inspection, creates/reuses only matching draft assets, verifies the exact archive before deployment, live-verifies Pages, then publishes the draft.
+   ```sh
+   git tag -a vX.Y.Z -m vX.Y.Z
+   git push origin vX.Y.Z
+   ```
 
-The shared `pages-production` lock never cancels in-progress deployments. Initial publication is only `v0.1.0` with no prior live release. Higher versions capture a verified recovery bundle before mutation. Equal exact content resumes a draft or is a verified published no-op; equal mismatch, lower tag, malformed state, missing recovery, or divergent assets fail closed. If deploy was attempted, live verification failed, and recovery exists, restore and verify old bytes. A failed first publication leaves the draft and requires explicit cleanup/recovery; never improvise restoration.
+Release automation builds and deploys GitHub Pages and creates the GitHub Release.
+Corrections use a new patch release.
 
-## Failed first-publication recovery
+## Caveats
 
-Use `recover-release.yml` only when the original immutable tag run failed during its first publication. The agent maintainer must confirm all guards before dispatching it:
-
-- The tag is an existing annotated tag on `main`, and its version matches `registry.jsonc` in that tag.
-- The original release run is `completed` with conclusion exactly `failure`, its requested attempt endpoint matches its workflow, repository, tag/ref, and commit, and the latest run endpoint still reports exactly that attempt. Any rerun fails recovery. It retained exactly one non-expired `target-release-bundle` artifact with the supplied immutable ID and API digest, matching workflow-run head/tag metadata and an artifact creation time inside that attempt window.
-- The current annotated tag-object SHA is pinned at dispatch, still resolves remotely, points at the verified provenance commit, and has the provenance tagger epoch. This detects tag replacement from dispatch onward even when the peeled commit is unchanged. The retained artifact did not record the original tag-object SHA, so it cannot retroactively prove historical tag-object identity; do not claim that it can.
-- The live site has no release for the tag, or has no live release at all. The only other accepted state is the tag's sole exact matching draft release.
-- The retained bundle verifies before any production inspection or publication.
-
-Query the immutable recovery identity read-only, then dispatch with every value and the exact confirmation string. Immutable artifact ID plus digest pin the source bytes rather than a mutable artifact name. Attempt provenance is established only while the latest run still equals the requested attempt; a later rerun is rejected. The current annotated tag object is pinned at dispatch and rechecked at each mutation boundary:
-
-```sh
-gh api repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346 --jq '{id,run_attempt,status,conclusion,event,path,head_branch,head_sha}'
-gh api repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346/attempts/1 --jq '{id,run_attempt,status,conclusion,event,path,head_branch,head_sha,run_started_at,updated_at}'
-gh api 'repos/matthewmorek/ocx-workspace-profile/actions/runs/32149931346/artifacts?per_page=100' --jq '.artifacts[] | {id,name,digest,expired,created_at,workflow_run}'
-gh api repos/matthewmorek/ocx-workspace-profile/git/ref/tags/v0.1.0 --jq '.object.sha'
-gh workflow run recover-release.yml --repo matthewmorek/ocx-workspace-profile -f tag=v0.1.0 -f source_run_id=32149931346 -f source_run_attempt=1 -f artifact_id=9329308619 -f artifact_digest=sha256:3ec81d4f5ab21b2d8eb006da56b484ba8e01c789267b51a515e4518ce86143aa -f tag_object_sha=f8d4cdf03fb7757732371b24cbb273d0a998d84d -f confirm=PUBLISH_EXACT
-```
-
-This is not the normal release path and is not rollback. It publishes only the bytes retained by the original tag run. Never retag, rebuild, repack, overwrite assets, move a tag, or manually deploy Pages. Recovery re-verifies the bundle and current tag identity before every mutation, creates or reuses only the exact draft, revalidates all four draft assets and hashes immediately before Pages mutation, deploys and live-verifies those bytes, then publishes through one command that freshly re-lists the expected sole draft ID and asset contract before PATCH and verifies the published assets afterward. GitHub does not provide a safe conditional PATCH through this client, so a residual admin/API TOCTOU remains only between the last re-list/hash verification and PATCH. If Pages was already restored but publication failed, the sole exact draft plus exact live bytes skips deployment and safely resumes publication. If first-publication live verification fails, the workflow fails closed, retains the draft and diagnostics, and does not restore anything because no prior live release exists.
-
-For draft visibility, only the recovery pre-deploy Pages job is newly broadened from `contents: read` to `contents: write`: GitHub lists draft releases only to principals with push access, and that job must re-list and hash the sole exact draft immediately before a Pages mutation. `prepare-exact-draft` and `publish-exact-release` retain their existing release-write authority. `pages: write` and `id-token: write` remain exclusive to the deploy job.
-
-## Rollback and recovery
-
-Run the manual rollback workflow with an existing release tag and explicit confirmation. It downloads that release, verifies checksums/provenance/receipt/archive before extraction, and redeploys exact bytes. It changes global `latest`; it neither moves tags nor pins future `kdco/workspace` resolution. If a release job fails, retain diagnostics and draft, inspect `release.json`, then rerun only after the state machine’s guards are satisfied.
-
-```sh
-gh workflow run rollback.yml --repo matthewmorek/ocx-workspace-profile -f tag=vX.Y.Z -f confirm=ROLLBACK
-```
-
-For first-publication live-verification failure, retain the draft and inspect Pages plus `release.json`; do not manually deploy. For later failure, the workflow restores only a verified recovery bundle; stop if restoration does not verify.
-
-## Supply chain and secrets
-
-Only update action SHAs or binary checksums in a reviewed PR after independently verifying upstream release provenance and compatibility. `GITHUB_TOKEN` belongs only in workflow environment; never print it, put it in evidence, or pass it to untrusted PR jobs. Linear is intentionally enabled and may require OAuth with read/write scope; OpenCode global configuration merges natively, so this package cannot promise behavioral isolation.
+Do not commit secrets or credentials. Linear may request OAuth with read/write access;
+OpenCode global configuration can still merge with the profile; upstream
+`kdco/workspace` floats to its latest version.

@@ -2,8 +2,6 @@
 .bun/
 .tmp/
 dist/
-pages/
-release-out/
 node_modules/
 coverage/
 *.tgz
