@@ -39,6 +39,7 @@ import {
   outputDirectory,
   promoteStagedOutput,
 } from "../scripts/build-registry";
+import { decideReleaseAction } from "../scripts/release-policy";
 import {
   cleanupSmokeSandbox,
   profileLaunchArguments,
@@ -2103,5 +2104,98 @@ describe("pinned automation", () => {
     expect(releaseWorkflow.indexOf(diagnostic)).toBeLessThan(
       releaseWorkflow.indexOf("bun install --frozen-lockfile"),
     );
+  });
+
+  test("treats an exact live release identity as an idempotent no-op", () => {
+    const release = {
+      version: "0.2.2",
+      tag: "v0.2.2",
+      commit: "a".repeat(40),
+    };
+    expect(decideReleaseAction(release, release)).toBe("noop");
+    expect(releaseWorkflow).toContain(
+      "if: steps.release-policy.outputs.should_deploy == 'true'",
+    );
+  });
+
+  test("rejects equal-version releases with conflicting immutable identities", () => {
+    const live = {
+      version: "0.2.2",
+      tag: "v0.2.2",
+      commit: "a".repeat(40),
+    };
+    expect(() =>
+      decideReleaseAction(live, { ...live, commit: "b".repeat(40) }),
+    ).toThrow("Release identity conflict: live version=0.2.2");
+  });
+
+  test("deploys newer releases and rejects older releases", () => {
+    const identity = { tag: "v0.2.2", commit: "a".repeat(40) };
+    expect(
+      decideReleaseAction(
+        { version: "0.2.2", ...identity },
+        { version: "0.2.3", tag: "v0.2.3", commit: "b".repeat(40) },
+      ),
+    ).toBe("deploy");
+    expect(() =>
+      decideReleaseAction(
+        { version: "0.2.2", ...identity },
+        { version: "0.2.1", tag: "v0.2.1", commit: "b".repeat(40) },
+      ),
+    ).toThrow("Target 0.2.1 is older than live 0.2.2");
+  });
+
+  test("rejects malformed requested metadata before deploying a newer version", () => {
+    const live = {
+      version: "0.2.2",
+      tag: "v0.2.2",
+      commit: "a".repeat(40),
+    };
+    expect(() =>
+      decideReleaseAction(live, {
+        version: "0.2.3",
+        tag: "v9.9.9",
+        commit: "b".repeat(40),
+      }),
+    ).toThrow("Invalid requested release metadata: tag must equal v0.2.3");
+    expect(() =>
+      decideReleaseAction(live, {
+        version: "0.2.3",
+        tag: "v0.2.3",
+        commit: "not-a-commit",
+      }),
+    ).toThrow(
+      "Invalid requested release metadata: commit must be a 40-character lowercase Git object ID",
+    );
+  });
+
+  test("rejects malformed live release metadata", () => {
+    expect(() =>
+      decideReleaseAction(
+        { version: "0.2.2", tag: "v0.2.2" },
+        {
+          version: "0.2.3",
+          tag: "v0.2.3",
+          commit: "b".repeat(40),
+        },
+      ),
+    ).toThrow("Invalid live release metadata: commit must be");
+  });
+
+  test("rejects an inconsistent live tag before deploying a newer version", () => {
+    expect(() =>
+      decideReleaseAction(
+        {
+          version: "0.2.2",
+          tag: "v9.9.9",
+          commit: "a".repeat(40),
+        },
+        {
+          version: "0.2.3",
+          tag: "v0.2.3",
+          commit: "b".repeat(40),
+        },
+      ),
+    ).toThrow("Invalid live release metadata: tag must equal v0.2.2");
   });
 });
