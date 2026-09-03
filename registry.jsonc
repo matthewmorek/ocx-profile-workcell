@@ -11,133 +11,215 @@
       "type": "plugin",
       "description": "Shared runtime primitives for local Workcell plugins.",
       "files": [
-        { "path": "plugins/kdco-primitives/index.ts", "target": "plugins/kdco-primitives/index.ts" },
-        { "path": "plugins/kdco-primitives/get-project-id.ts", "target": "plugins/kdco-primitives/get-project-id.ts" },
-        { "path": "plugins/kdco-primitives/log-warn.ts", "target": "plugins/kdco-primitives/log-warn.ts" },
-        { "path": "plugins/kdco-primitives/mutex.ts", "target": "plugins/kdco-primitives/mutex.ts" },
-        { "path": "plugins/kdco-primitives/shell.ts", "target": "plugins/kdco-primitives/shell.ts" },
-        { "path": "plugins/kdco-primitives/temp.ts", "target": "plugins/kdco-primitives/temp.ts" },
-        { "path": "plugins/kdco-primitives/terminal-detect.ts", "target": "plugins/kdco-primitives/terminal-detect.ts" },
-        { "path": "plugins/kdco-primitives/types.ts", "target": "plugins/kdco-primitives/types.ts" },
-        { "path": "plugins/kdco-primitives/with-timeout.ts", "target": "plugins/kdco-primitives/with-timeout.ts" }
-      ]
+        {
+          "path": "plugins/kdco-primitives/index.ts",
+          "target": "plugins/kdco-primitives/index.ts",
+        },
+        {
+          "path": "plugins/kdco-primitives/get-project-id.ts",
+          "target": "plugins/kdco-primitives/get-project-id.ts",
+        },
+        {
+          "path": "plugins/kdco-primitives/log-warn.ts",
+          "target": "plugins/kdco-primitives/log-warn.ts",
+        },
+        {
+          "path": "plugins/kdco-primitives/mutex.ts",
+          "target": "plugins/kdco-primitives/mutex.ts",
+        },
+        {
+          "path": "plugins/kdco-primitives/shell.ts",
+          "target": "plugins/kdco-primitives/shell.ts",
+        },
+        {
+          "path": "plugins/kdco-primitives/temp.ts",
+          "target": "plugins/kdco-primitives/temp.ts",
+        },
+        {
+          "path": "plugins/kdco-primitives/terminal-detect.ts",
+          "target": "plugins/kdco-primitives/terminal-detect.ts",
+        },
+        {
+          "path": "plugins/kdco-primitives/types.ts",
+          "target": "plugins/kdco-primitives/types.ts",
+        },
+        {
+          "path": "plugins/kdco-primitives/with-timeout.ts",
+          "target": "plugins/kdco-primitives/with-timeout.ts",
+        },
+      ],
     },
     {
       "name": "workcell-background-agents",
       "type": "plugin",
       "description": "Asynchronous delegation tools and background-agent lifecycle management.",
-      "files": [{ "path": "plugins/background-agents.ts", "target": "plugins/background-agents.ts" }],
+      "files": [
+        {
+          "path": "plugins/background-agents.ts",
+          "target": "plugins/background-agents.ts",
+        },
+      ],
       "dependencies": ["workcell-primitives"],
-      "npmDependencies": ["unique-names-generator@4.7.1"]
+      "npmDependencies": ["unique-names-generator@4.7.1"],
     },
     {
       "name": "workcell-workspace-plugin",
       "type": "plugin",
       "description": "Workspace orchestration, plan persistence, and routing tools.",
-      "files": [{ "path": "plugins/workspace-plugin.ts", "target": "plugins/workspace-plugin.ts" }],
+      "files": [
+        {
+          "path": "plugins/workspace-plugin.ts",
+          "target": "plugins/workspace-plugin.ts",
+        },
+      ],
       "dependencies": ["workcell-background-agents", "workcell-primitives"],
-      "npmDependencies": ["zod@4.3.5"]
+      "npmDependencies": ["zod@4.3.5"],
     },
     {
       "name": "workcell-agent-coder",
       "type": "agent",
       "description": "Implementation agent instructions.",
       "files": [{ "path": "agents/coder.md", "target": "agents/coder.md" }],
-      "dependencies": ["workcell-background-agents"]
+      "dependencies": ["workcell-background-agents"],
     },
     {
       "name": "workcell-agent-debugger",
       "type": "agent",
       "description": "Failure diagnosis and repair agent instructions.",
-      "files": [{ "path": "agents/debugger.md", "target": "agents/debugger.md" }]
+      "files": [
+        { "path": "agents/debugger.md", "target": "agents/debugger.md" },
+      ],
     },
     {
       "name": "workcell-agent-tester",
       "type": "agent",
       "description": "Independent verification agent instructions.",
-      "files": [{ "path": "agents/tester.md", "target": "agents/tester.md" }]
+      "files": [{ "path": "agents/tester.md", "target": "agents/tester.md" }],
     },
     {
       "name": "workcell-agent-explore",
       "type": "agent",
       "description": "Read-only repository exploration agent instructions.",
-      "files": [{ "path": "agents/explore.md", "target": "agents/explore.md" }]
+      "files": [{ "path": "agents/explore.md", "target": "agents/explore.md" }],
     },
     {
       "name": "workcell-agent-researcher",
       "type": "agent",
       "description": "External research agent instructions.",
-      "files": [{ "path": "agents/researcher.md", "target": "agents/researcher.md" }],
-      "dependencies": ["workcell-background-agents"]
+      "files": [
+        { "path": "agents/researcher.md", "target": "agents/researcher.md" },
+      ],
+      "dependencies": ["workcell-background-agents"],
     },
     {
       "name": "workcell-agent-scribe",
       "type": "agent",
       "description": "Documentation agent instructions.",
-      "files": [{ "path": "agents/scribe.md", "target": "agents/scribe.md" }]
+      "files": [{ "path": "agents/scribe.md", "target": "agents/scribe.md" }],
     },
     {
       "name": "workcell-agent-reviewer",
       "type": "agent",
       "description": "Evidence-based review agent instructions.",
-      "files": [{ "path": "agents/reviewer.md", "target": "agents/reviewer.md" }],
-      "dependencies": ["workcell-skill-code-review", "workcell-skill-plan-review"]
+      "files": [
+        { "path": "agents/reviewer.md", "target": "agents/reviewer.md" },
+      ],
+      "dependencies": [
+        "workcell-skill-code-review",
+        "workcell-skill-plan-review",
+      ],
     },
     {
       "name": "workcell-agent-committer",
       "type": "agent",
       "description": "Git commit and authorized pull-request agent instructions.",
-      "files": [{ "path": "agents/committer.md", "target": "agents/committer.md" }]
+      "files": [
+        { "path": "agents/committer.md", "target": "agents/committer.md" },
+      ],
     },
     {
       "name": "workcell-agent-metadata",
       "type": "agent",
       "description": "Delegation metadata agent instructions.",
-      "files": [{ "path": "agents/metadata.md", "target": "agents/metadata.md" }]
+      "files": [
+        { "path": "agents/metadata.md", "target": "agents/metadata.md" },
+      ],
     },
     {
       "name": "workcell-skill-plan-review",
       "type": "skill",
       "description": "Implementation-plan review criteria.",
-      "files": [{ "path": "skills/plan-review/SKILL.md", "target": "skills/plan-review/SKILL.md" }]
+      "files": [
+        {
+          "path": "skills/plan-review/SKILL.md",
+          "target": "skills/plan-review/SKILL.md",
+        },
+      ],
     },
     {
       "name": "workcell-skill-plan-protocol",
       "type": "skill",
       "description": "Plan persistence and citation protocol.",
-      "files": [{ "path": "skills/plan-protocol/SKILL.md", "target": "skills/plan-protocol/SKILL.md" }],
-      "dependencies": ["workcell-workspace-plugin"]
+      "files": [
+        {
+          "path": "skills/plan-protocol/SKILL.md",
+          "target": "skills/plan-protocol/SKILL.md",
+        },
+      ],
+      "dependencies": ["workcell-workspace-plugin"],
     },
     {
       "name": "workcell-skill-testing-philosophy",
       "type": "skill",
       "description": "Focused and durable test-design philosophy.",
-      "files": [{ "path": "skills/testing-philosophy/SKILL.md", "target": "skills/testing-philosophy/SKILL.md" }]
+      "files": [
+        {
+          "path": "skills/testing-philosophy/SKILL.md",
+          "target": "skills/testing-philosophy/SKILL.md",
+        },
+      ],
     },
     {
       "name": "workcell-skill-code-philosophy",
       "type": "skill",
       "description": "Internal logic and data-flow philosophy.",
-      "files": [{ "path": "skills/code-philosophy/SKILL.md", "target": "skills/code-philosophy/SKILL.md" }]
+      "files": [
+        {
+          "path": "skills/code-philosophy/SKILL.md",
+          "target": "skills/code-philosophy/SKILL.md",
+        },
+      ],
     },
     {
       "name": "workcell-skill-frontend-philosophy",
       "type": "skill",
       "description": "Intentional visual and interface philosophy.",
-      "files": [{ "path": "skills/frontend-philosophy/SKILL.md", "target": "skills/frontend-philosophy/SKILL.md" }]
+      "files": [
+        {
+          "path": "skills/frontend-philosophy/SKILL.md",
+          "target": "skills/frontend-philosophy/SKILL.md",
+        },
+      ],
     },
     {
       "name": "workcell-skill-code-review",
       "type": "skill",
       "description": "Evidence-based code-review methodology.",
-      "files": [{ "path": "skills/code-review/SKILL.md", "target": "skills/code-review/SKILL.md" }]
+      "files": [
+        {
+          "path": "skills/code-review/SKILL.md",
+          "target": "skills/code-review/SKILL.md",
+        },
+      ],
     },
     {
       "name": "workcell-review-command",
       "type": "command",
       "description": "Command for review against an accepted plan.",
-      "files": [{ "path": "commands/review.md", "target": "commands/review.md" }],
-      "dependencies": ["workcell-agent-reviewer"]
+      "files": [
+        { "path": "commands/review.md", "target": "commands/review.md" },
+      ],
+      "dependencies": ["workcell-agent-reviewer"],
     },
     {
       "name": "workcell-notify",
@@ -145,13 +227,25 @@
       "description": "Local terminal and desktop notification plugin.",
       "files": [
         { "path": "plugins/notify.ts", "target": "plugins/notify.ts" },
-        { "path": "plugins/notify/backend.ts", "target": "plugins/notify/backend.ts" },
-        { "path": "plugins/notify/cmux.ts", "target": "plugins/notify/cmux.ts" },
-        { "path": "plugins/notify/status.ts", "target": "plugins/notify/status.ts" },
-        { "path": "plugins/notify/title.ts", "target": "plugins/notify/title.ts" }
+        {
+          "path": "plugins/notify/backend.ts",
+          "target": "plugins/notify/backend.ts",
+        },
+        {
+          "path": "plugins/notify/cmux.ts",
+          "target": "plugins/notify/cmux.ts",
+        },
+        {
+          "path": "plugins/notify/status.ts",
+          "target": "plugins/notify/status.ts",
+        },
+        {
+          "path": "plugins/notify/title.ts",
+          "target": "plugins/notify/title.ts",
+        },
       ],
       "dependencies": ["workcell-primitives", "workcell-worktree"],
-      "npmDependencies": ["node-notifier@10.0.1", "detect-terminal@2.0.0"]
+      "npmDependencies": ["node-notifier@10.0.1", "detect-terminal@2.0.0"],
     },
     {
       "name": "workcell-worktree",
@@ -159,19 +253,33 @@
       "description": "Worktree lifecycle, terminal launch, and persisted state tools.",
       "files": [
         { "path": "plugins/worktree.ts", "target": "plugins/worktree.ts" },
-        { "path": "plugins/worktree/launch-context.ts", "target": "plugins/worktree/launch-context.ts" },
-        { "path": "plugins/worktree/state.ts", "target": "plugins/worktree/state.ts" },
-        { "path": "plugins/worktree/terminal.ts", "target": "plugins/worktree/terminal.ts" }
+        {
+          "path": "plugins/worktree/launch-context.ts",
+          "target": "plugins/worktree/launch-context.ts",
+        },
+        {
+          "path": "plugins/worktree/state.ts",
+          "target": "plugins/worktree/state.ts",
+        },
+        {
+          "path": "plugins/worktree/terminal.ts",
+          "target": "plugins/worktree/terminal.ts",
+        },
       ],
       "dependencies": ["workcell-primitives"],
-      "npmDependencies": ["zod@4.3.5", "jsonc-parser@3.3.1"]
+      "npmDependencies": ["zod@4.3.5", "jsonc-parser@3.3.1"],
     },
     {
       "name": "workcell-philosophy",
       "type": "tool",
       "description": "Harness-wide philosophy loading instructions.",
-      "files": [{ "path": "tools/philosophy.md", "target": "tools/philosophy.md" }],
-      "dependencies": ["workcell-skill-code-philosophy", "workcell-skill-frontend-philosophy"]
+      "files": [
+        { "path": "tools/philosophy.md", "target": "tools/philosophy.md" },
+      ],
+      "dependencies": [
+        "workcell-skill-code-philosophy",
+        "workcell-skill-frontend-philosophy",
+      ],
     },
     {
       "name": "workcell-bundle",
@@ -200,8 +308,8 @@
         "workcell-review-command",
         "workcell-notify",
         "workcell-worktree",
-        "workcell-philosophy"
-      ]
+        "workcell-philosophy",
+      ],
     },
     {
       "name": "workcell",
@@ -209,9 +317,13 @@
       "description": "Self-contained Workcell profile for Apple Silicon macOS.",
       "files": [
         { "path": "profiles/workcell/ocx.jsonc", "target": "ocx.jsonc" },
-        { "path": "profiles/workcell/opencode.jsonc", "target": "opencode.jsonc" }
+        {
+          "path": "profiles/workcell/opencode.jsonc",
+          "target": "opencode.jsonc",
+        },
+        { "path": "profiles/workcell/AGENTS.md", "target": "AGENTS.md" },
       ],
-      "dependencies": ["workcell-bundle"]
-    }
-  ]
+      "dependencies": ["workcell-bundle"],
+    },
+  ],
 }
