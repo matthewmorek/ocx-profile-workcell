@@ -1,4 +1,5 @@
 {
+  "embeddedLanguageFormatting": "auto",
   "objectWrap": "preserve",
   "printWidth": 80,
   "sortPackageJson": false,
