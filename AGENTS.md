@@ -32,7 +32,8 @@ local profile name is `workcell`; its OCX source is `matthewmorek/workcell`.
 
 ## Development
 
-Supported baseline: Apple Silicon macOS, Bun 1.3.5, OCX 2.0.14, and OpenCode 1.18.27.
+Supported baseline: Apple Silicon macOS, Bun 1.3.5, registry-target OCX 2.0.14,
+validation CLI OCX 2.0.15, and OpenCode 1.18.27.
 
 ```sh
 bun install --frozen-lockfile
@@ -49,7 +50,14 @@ bun run smoke
 1. Bump the version in both `registry.jsonc` and `package.json`.
 2. Open a PR and wait for required `validate-pinned` to pass.
 3. Merge the PR.
-4. As the only post-merge release action, create and push the annotated tag:
+4. Switch to the merged, current `main` commit:
+
+   ```sh
+   git switch main
+   git pull --ff-only origin main
+   ```
+
+5. As the only post-merge release action, create and push the annotated tag:
 
    ```sh
    git tag -a vX.Y.Z -m vX.Y.Z
@@ -58,7 +66,8 @@ bun run smoke
 
 The tag push automatically validates the tag and main ancestry, builds, tests,
 smoke-tests, deploys and verifies GitHub Pages, then creates the GitHub Release.
-An exact duplicate tag-and-commit event is a safe no-op. Corrections use a new patch
+An exact duplicate tag-and-commit event skips Pages redeployment but still compares
+live output and ensures the GitHub Release exists. Corrections use a new patch
 release. Existing users migrate side-by-side: install and validate `workcell` before
 removing their old `ws` profile. Rollback is launching or restoring `ws`.
 

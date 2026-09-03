@@ -2118,6 +2118,42 @@ describe("pinned automation", () => {
     );
   });
 
+  test("verifies and finalizes exact-live retries without redeploying Pages", () => {
+    const step = (marker: string): string => {
+      const start = releaseWorkflow.indexOf(marker);
+      expect(start, marker).toBeGreaterThanOrEqual(0);
+      const end = releaseWorkflow.indexOf("\n      - ", start + marker.length);
+      return releaseWorkflow.slice(start, end === -1 ? undefined : end);
+    };
+    const upload = step("uses: actions/upload-pages-artifact@");
+    const deploy = step("id: deploy-pages");
+    const compare = step("name: Compare the live registry with dist");
+    const finalize = step(
+      "name: Create the GitHub Release when it does not already exist",
+    );
+
+    for (const deploymentStep of [upload, deploy])
+      expect(deploymentStep).toContain(
+        "if: steps.release-policy.outputs.should_deploy == 'true'",
+      );
+    for (const retryStep of [compare, finalize])
+      expect(retryStep).not.toContain(
+        "if: steps.release-policy.outputs.should_deploy == 'true'",
+      );
+    expect(compare).toContain("BASE_URL: ${{ steps.pages.outputs.base_url }}");
+    expect(compare).not.toContain("steps.deploy-pages.outputs.page_url");
+    expect(finalize).toContain('STATUS="$(curl');
+    expect(finalize).toContain("https://api.github.com/repos/");
+    expect(finalize).toContain("200)");
+    expect(finalize).toContain(
+      '404) gh release create "$GITHUB_REF_NAME" --verify-tag',
+    );
+    expect(finalize.match(/gh release create/g)).toHaveLength(1);
+    expect(finalize).toContain(
+      '*) echo "Unable to look up GitHub Release $GITHUB_REF_NAME (HTTP $STATUS)."',
+    );
+  });
+
   test("rejects equal-version releases with conflicting immutable identities", () => {
     const live = {
       version: "0.2.2",

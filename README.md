@@ -1,13 +1,15 @@
 # Workcell
 
 Workcell is a self-contained OCX profile sourced from `matthewmorek/workcell`.
-The repository identity is `matthewmorek/ocx-profile-workcell`, with the private
-package name `ocx-profile-workcell` and Pages distribution URL
-`https://matthewmorek.github.io/ocx-profile-workcell`.
+Its registry is published at
+`https://matthewmorek.github.io/ocx-profile-workcell`. The repository identity is
+`matthewmorek/ocx-profile-workcell`; its private package name is
+`ocx-profile-workcell`.
 
-## Quickstart
+## Install and update
 
-Initialize OCX, then install the profile persistently for the current user:
+For a fresh global installation, initialize OCX if needed, add Workcell, then
+launch it:
 
 ```sh
 ocx init --global
@@ -15,60 +17,87 @@ ocx profile add workcell --source matthewmorek/workcell --from https://matthewmo
 ocx oc -p workcell
 ```
 
-For a non-persistent/direct install, omit `--global` from the profile command:
+To update an installed `workcell` profile, intentionally replace the current
+installation. OCX 2.0.15 has no in-place named-profile update command, and
+`profile add` has no `--force` or `--yes` option:
 
 ```sh
-ocx profile add workcell --source matthewmorek/workcell --from https://matthewmorek.github.io/ocx-profile-workcell
+ocx profile remove workcell --global
+ocx profile add workcell --source matthewmorek/workcell --from https://matthewmorek.github.io/ocx-profile-workcell --global
 ```
 
-## Architecture and contents
+Removal is immediate and replacement is not atomic. `profile remove` fails if
+`workcell` is the last global profile, so keep or add another profile first—for
+example, the existing `ws` rollback profile where applicable. These commands
+intentionally replace the current Workcell installation.
 
-Workcell is a self-contained fork of the installed harness snapshot at
-`.tmp/ws-gpt-snapshot/ws-gpt`, not a runtime dependency on an upstream workspace
-bundle. The local aggregate is `workcell-bundle`; leaf components use the
-`workcell-` prefix. The profile is laid out as:
+## Support baseline
 
-```text
-files/profiles/workcell/
-├── ocx.jsonc
-├── opencode.jsonc
-└── AGENTS.md
+The supported baseline is Apple Silicon macOS with Bun 1.3.5 and OpenCode
+1.18.27. The registry targets OCX 2.0.14; repository validation uses the OCX
+2.0.15 CLI. Configured MCP servers are limited to Context7, Exa, and GitHub
+Grep.
+
+## Maintainer releases
+
+Use a reusable version value; do not commit generated `dist` output.
+
+```sh
+export VERSION=X.Y.Z
+perl -0pi -e 's/("version"\s*:\s*")[^"]+/$1$ENV{VERSION}/' package.json registry.jsonc
+git diff -- package.json registry.jsonc
+git switch -c release/v$VERSION
+
+bun install --frozen-lockfile
+bunx oxfmt --check package.json registry.jsonc
+bun run typecheck
+bun run build
+REGISTRY_DIST=dist bun run test
+REGISTRY_DIST=dist bun run smoke
+
+git add package.json registry.jsonc
+git commit -m "chore: release v$VERSION"
+git push --set-upstream origin release/v$VERSION
+gh pr create --base main --head release/v$VERSION --title "Release v$VERSION" --body "Release v$VERSION"
 ```
 
-The bundle packages the intended agents, skills, command, local plugins, and support
-modules. Generic internal workspace/worktree names remain unchanged. Runtime plugins
-are exact-pinned: `opencode-vibeguard@0.1.0`, `@plannotator/opencode@0.27.12`,
-`@tarquinen/opencode-dcp@3.1.15`, and `@franlol/opencode-md-table-formatter@0.0.6`.
-Notifications use the local notify plugin; no external notifier is included.
+Update both `registry.jsonc` and `package.json`, open the PR, wait for the
+required `validate-pinned` check, and merge it. Then update local `main`, verify
+the release version and manifest values, and perform the only post-merge
+release action: create and push the annotated tag.
 
-## Supported baseline and integrations
+```sh
+set -eu
+export VERSION=X.Y.Z
+git switch main
+git pull --ff-only origin main
+test "$(git branch --show-current)" = main
+test "$(git rev-parse main)" = "$(git rev-parse origin/main)"
+perl -e 'my $v = $ENV{VERSION}; exit 1 unless $v =~ /\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z/'
+for file in package.json registry.jsonc; do
+  test "$(perl -0ne 'print $1 if /"version"\s*:\s*"([^"]+)"/' "$file")" = "$VERSION"
+done
+git tag -a "v$VERSION" -m "v$VERSION"
+git push origin "v$VERSION"
+```
 
-The supported baseline is Apple Silicon macOS with Bun 1.3.5, OCX 2.0.14, and
-OpenCode 1.18.27. The configured MCP servers are limited to Context7, Exa, and
-GitHub Grep.
+The pushed `v*` tag triggers validation of the annotated tag, main ancestry, and
+version equality, followed by build, tests, smoke tests, Pages deployment when
+needed, live-output verification, and GitHub Release creation. An exact
+duplicate tag-and-commit retry skips Pages redeployment but still compares live
+output and ensures the GitHub Release exists. Corrections use a new patch
+release.
 
-## Migration, rollback, and updates
+## Migration, rollback, provenance, and license
 
-Install `workcell` side-by-side with existing `ws` users' setup, validate it, and
-switch launch commands to `ocx oc -p workcell`. Rollback is launching or restoring
-`ws`; remove it only after the Workcell migration is confirmed.
-
-OCX 2.0.14 has no profile update command. To update Workcell, remove or move the
-existing `workcell` profile and rerun the install command above. To release, update
-the version in both `registry.jsonc` and `package.json`, merge that commit after
-the required `validate-pinned` check passes, then create and push one annotated
-`vX.Y.Z` tag. Automation performs all subsequent validation, build, test, smoke,
-Pages deployment, live verification, and GitHub Release creation. An exact duplicate
-tag-and-commit event is a safe no-op. See
-[AGENTS.md](AGENTS.md) for maintainer details.
-
-## Provenance and affiliation
+Install and validate `workcell` side-by-side with an existing `ws` setup before
+switching launch commands. Rollback is launching or restoring `ws`; remove it
+only after the Workcell migration is confirmed.
 
 Some Workcell material is copied and modified from [KDCO OCX](https://github.com/kdcokenny/ocx)
 and its Workspace material under the MIT terms described in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). DCP 3.1.15 is separately fetched
-AGPL-3.0-or-later software and is referenced, not vendored. Workcell is independent,
-not affiliated with, endorsed by, or sponsored by KDCO. The accepted Workcell name
-collision with unrelated projects does not imply affiliation.
-
-The project itself is MIT-licensed; see [LICENSE](LICENSE).
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which preserves the relevant
+copyright and license notices. DCP 3.1.15 is separately fetched
+AGPL-3.0-or-later software and is referenced, not vendored. Workcell is
+independent, not affiliated with, endorsed by, or sponsored by KDCO. The
+project itself is MIT-licensed; see [LICENSE](LICENSE).
