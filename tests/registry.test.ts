@@ -114,7 +114,7 @@ function declaredOutputFiles(): string[] {
 
 describe("self-contained Workcell registry", () => {
   test("declares the reviewed graph with one owner for every target", () => {
-    expect(registry.version).toBe("0.2.0");
+    expect(registry.version).toBe("0.2.1");
     expect(registry.opencode).toBe("1.18.27");
     expect(registry.ocx).toBe("2.0.14");
     expect(registry.components.map((component: any) => component.name)).toEqual([...expectedComponents]);
@@ -313,8 +313,8 @@ describe("self-contained Workcell registry", () => {
       expect(await outputFiles(output.directory)).toEqual(declaredOutputFiles());
       for (const name of expectedComponents) {
         const packument = JSON.parse(await Bun.file(join(output.directory, "components", `${name}.json`)).text());
-        expect(Object.keys(packument.versions)).toEqual(["0.2.0"]);
-        expect(packument["dist-tags"].latest).toBe("0.2.0");
+        expect(Object.keys(packument.versions)).toEqual(["0.2.1"]);
+        expect(packument["dist-tags"].latest).toBe("0.2.1");
       }
     } finally {
       if (output.remove) await rm(output.directory, { recursive: true, force: true });
@@ -1002,7 +1002,7 @@ describe("registry build output boundary", () => {
 
 describe("pinned automation", () => {
   test("pins package and launch identities and isolates inherited launch overrides", () => {
-    expect(packageManifest).toMatchObject({ name: "ocx-profile-workcell", version: "0.2.0", packageManager: "bun@1.3.5" });
+    expect(packageManifest).toMatchObject({ name: "ocx-profile-workcell", version: "0.2.1", packageManager: "bun@1.3.5" });
     expect(packageManifest.devDependencies).toMatchObject({ ocx: "2.0.14", "opencode-ai": "1.18.27", "@opencode-ai/plugin": "1.18.27", "@opencode-ai/sdk": "1.18.27" });
     expect(profileLaunchCommand).toBe("ocx");
     expect(profileLaunchArguments).toEqual(["oc", "-p", "workcell", "--", "--help"]);
@@ -1028,5 +1028,15 @@ describe("pinned automation", () => {
     expect(releaseWorkflow).toContain("find . -type f");
     expect(releaseWorkflow).toContain("cmp \"dist/$file\"");
     expect(releaseWorkflow).not.toContain("components/ws");
+  });
+
+  test("rejects non-annotated release tags with an actionable error before release work", () => {
+    const objectTypeCheck = 'if [ "$TAG_OBJECT_TYPE" != "tag" ]; then';
+    const diagnostic = "::error title=Annotated tag required::Release tags must be annotated tag objects. Create one with: git tag -a vX.Y.Z -m vX.Y.Z";
+    expect(releaseWorkflow).toContain('TAG_OBJECT_TYPE="$(git cat-file -t "$GITHUB_REF")"');
+    expect(releaseWorkflow).toContain(objectTypeCheck);
+    expect(releaseWorkflow).toContain(diagnostic);
+    expect(releaseWorkflow.indexOf(objectTypeCheck)).toBeLessThan(releaseWorkflow.indexOf('SOURCE_COMMIT="$(git rev-parse'));
+    expect(releaseWorkflow.indexOf(diagnostic)).toBeLessThan(releaseWorkflow.indexOf("bun install --frozen-lockfile"));
   });
 });

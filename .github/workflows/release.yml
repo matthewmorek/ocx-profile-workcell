@@ -27,7 +27,11 @@ jobs:
       - name: Validate the annotated tag, test, and build Pages
         run: |
           set -euo pipefail
-          test "$(git cat-file -t "$GITHUB_REF")" = tag
+          TAG_OBJECT_TYPE="$(git cat-file -t "$GITHUB_REF")"
+          if [ "$TAG_OBJECT_TYPE" != "tag" ]; then
+            echo "::error title=Annotated tag required::Release tags must be annotated tag objects. Create one with: git tag -a vX.Y.Z -m vX.Y.Z" >&2
+            exit 1
+          fi
           SOURCE_COMMIT="$(git rev-parse "$GITHUB_REF^{commit}")"
           git merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
           VERSION="${GITHUB_REF_NAME#v}"
