@@ -2,7 +2,6 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
-  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -73,6 +72,159 @@ function sha256(value: string | undefined): string | null {
   return value === undefined
     ? null
     : createHash("sha256").update(value).digest("hex");
+}
+
+const bareSemVerPattern =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const packageIdentityPattern =
+  /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+
+function parseExactPackagePin(value: unknown): {
+  name: string;
+  version: string;
+} {
+  if (typeof value !== "string")
+    throw new Error(`Package pin must be a string, received ${String(value)}`);
+
+  const versionSeparator = value.lastIndexOf("@");
+  const name = value.slice(0, versionSeparator);
+  const version = value.slice(versionSeparator + 1);
+  if (!packageIdentityPattern.test(name))
+    throw new Error(`Invalid package identity in pin: ${value}`);
+  if (!bareSemVerPattern.test(version))
+    throw new Error(
+      `Package ${name} must use exact bare SemVer, received ${version}`,
+    );
+  return { name, version };
+}
+
+function parseUniqueExactPackagePins(
+  values: unknown,
+  owner: string,
+): Array<{ name: string; version: string }> {
+  if (!Array.isArray(values))
+    throw new Error(`${owner} package pins must be an array`);
+
+  const pins = values.map(parseExactPackagePin);
+  const identities = new Set<string>();
+  for (const pin of pins) {
+    if (identities.has(pin.name))
+      throw new Error(`${owner} duplicates package identity ${pin.name}`);
+    identities.add(pin.name);
+  }
+  return pins;
+}
+
+function parseInventoryPath(value: unknown, description: string): string {
+  if (typeof value !== "string" || value.length === 0)
+    throw new Error(`${description} must be a non-empty string`);
+  if (
+    value.startsWith("/") ||
+    value.includes("\\") ||
+    value
+      .split("/")
+      .some((segment) => !segment || segment === "." || segment === "..")
+  )
+    throw new Error(
+      `${description} must be a normalized relative path: ${value}`,
+    );
+  return value;
+}
+
+function declaredShippableInventory(
+  components: any[],
+  physicalFiles?: string[],
+): { sourceFiles: string[]; targetOwners: Map<string, string> } {
+  const sourceOwners = new Map<string, string>();
+  const targetOwners = new Map<string, string>();
+
+  for (const component of components) {
+    if (!Array.isArray(component.files))
+      throw new Error(`Component ${component.name} must declare a file array`);
+    for (const declaration of component.files) {
+      const source = parseInventoryPath(
+        typeof declaration === "string" ? declaration : declaration?.path,
+        `Component ${component.name} source`,
+      );
+      const target = parseInventoryPath(
+        typeof declaration === "string" ? declaration : declaration?.target,
+        `Component ${component.name} target`,
+      );
+      if (sourceOwners.has(source))
+        throw new Error(
+          `Source ${source} is declared by both ${sourceOwners.get(source)} and ${component.name}`,
+        );
+      if (targetOwners.has(target))
+        throw new Error(
+          `Target ${target} is owned by both ${targetOwners.get(target)} and ${component.name}`,
+        );
+      sourceOwners.set(source, component.name);
+      targetOwners.set(target, component.name);
+    }
+  }
+
+  const sourceFiles = [...sourceOwners.keys()].sort();
+  if (
+    physicalFiles &&
+    JSON.stringify(sourceFiles) !== JSON.stringify([...physicalFiles].sort())
+  )
+    throw new Error("Physical files and registry declarations do not match");
+  return { sourceFiles, targetOwners };
+}
+
+function assertReviewedBundleCoverage(
+  components: any[],
+  bundleName: string,
+  profileName: string,
+  reviewedNames: readonly string[],
+): void {
+  const componentsByName = new Map<string, any>();
+  const dependenciesByName = new Map<string, string[]>();
+
+  for (const component of components) {
+    if (componentsByName.has(component.name))
+      throw new Error(`Registry duplicates component ${component.name}`);
+    componentsByName.set(component.name, component);
+  }
+  for (const component of components) {
+    const dependencies = component.dependencies ?? [];
+    if (!Array.isArray(dependencies))
+      throw new Error(
+        `Component ${component.name} dependencies must be an array`,
+      );
+    if (dependencies.some((name: unknown) => typeof name !== "string"))
+      throw new Error(`Component ${component.name} has an invalid dependency`);
+    if (new Set(dependencies).size !== dependencies.length)
+      throw new Error(`Component ${component.name} has duplicate dependencies`);
+    for (const dependency of dependencies) {
+      if (!componentsByName.has(dependency))
+        throw new Error(
+          `Component ${component.name} depends on missing component ${dependency}`,
+        );
+    }
+    dependenciesByName.set(component.name, dependencies);
+  }
+
+  const bundleDependencies = dependenciesByName.get(bundleName);
+  if (!bundleDependencies)
+    throw new Error(`Reviewed bundle ${bundleName} does not exist`);
+  const expectedLeaves = reviewedNames.filter(
+    (name) => name !== profileName && name !== bundleName,
+  );
+  const missingLeaves = expectedLeaves.filter(
+    (name) => !bundleDependencies.includes(name),
+  );
+  const unexpectedDependencies = bundleDependencies.filter(
+    (name) => !expectedLeaves.includes(name),
+  );
+  if (missingLeaves.length > 0)
+    throw new Error(
+      `Reviewed bundle is missing components: ${missingLeaves.join(", ")}`,
+    );
+  if (unexpectedDependencies.length > 0)
+    throw new Error(
+      `Reviewed bundle has unexpected dependencies: ${unexpectedDependencies.join(", ")}`,
+    );
 }
 
 function createWorktreeStateDatabase(): Database {
@@ -149,6 +301,14 @@ async function outputFiles(directory: string): Promise<string[]> {
     recursive: true,
     withFileTypes: true,
   });
+  for (const entry of entries) {
+    if (!entry.isSymbolicLink()) continue;
+    const path = relative(
+      directory,
+      join(entry.parentPath, entry.name),
+    ).replaceAll("\\", "/");
+    throw new Error(`Symbolic links are not shippable: ${path}`);
+  }
   return entries
     .filter((entry) => entry.isFile())
     .map((entry) =>
@@ -195,9 +355,112 @@ function declaredOutputFiles(): string[] {
   ].sort();
 }
 
+describe("dependency and inventory policy helpers", () => {
+  test("parses scoped and unscoped exact package pins", () => {
+    expect(parseExactPackagePin("example-package@1.2.3")).toEqual({
+      name: "example-package",
+      version: "1.2.3",
+    });
+    expect(parseExactPackagePin("@example/plugin@2.0.0-beta.1")).toEqual({
+      name: "@example/plugin",
+      version: "2.0.0-beta.1",
+    });
+  });
+
+  test("rejects malformed or floating package pins and duplicate identities", () => {
+    for (const invalidPin of [
+      "package@^1.2.3",
+      "package@latest",
+      "package@workspace:*",
+      "package@npm:other@1.2.3",
+      "package@git+https://example.invalid/repository.git",
+      "https://example.invalid/package.tgz",
+    ]) {
+      expect(() => parseExactPackagePin(invalidPin), invalidPin).toThrow();
+    }
+    expect(() =>
+      parseUniqueExactPackagePins(
+        ["@example/plugin@1.0.0", "@example/plugin@2.0.0"],
+        "Fixture",
+      ),
+    ).toThrow("duplicates package identity @example/plugin");
+  });
+
+  test("rejects duplicate and incomplete shippable inventories", () => {
+    expect(() =>
+      declaredShippableInventory([
+        {
+          name: "first",
+          files: [{ path: "one.ts", target: "shared.ts" }],
+        },
+        {
+          name: "second",
+          files: [{ path: "two.ts", target: "shared.ts" }],
+        },
+      ]),
+    ).toThrow("Target shared.ts is owned by both first and second");
+    expect(() =>
+      declaredShippableInventory(
+        [
+          {
+            name: "first",
+            files: [{ path: "one.ts", target: "one.ts" }],
+          },
+        ],
+        ["one.ts", "undeclared.ts"],
+      ),
+    ).toThrow("Physical files and registry declarations do not match");
+  });
+
+  test("rejects missing bundle edges and duplicate component dependencies", () => {
+    const missingBundleEdge = structuredClone(registry.components);
+    const bundle = missingBundleEdge.find(
+      (component: any) => component.name === "workcell-bundle",
+    );
+    bundle.dependencies = bundle.dependencies.filter(
+      (dependency: string) => dependency !== "workcell-notify",
+    );
+    expect(() =>
+      assertReviewedBundleCoverage(
+        missingBundleEdge,
+        "workcell-bundle",
+        "workcell",
+        expectedComponents,
+      ),
+    ).toThrow("Reviewed bundle is missing components: workcell-notify");
+
+    const duplicateDependency = structuredClone(registry.components);
+    const duplicateBundle = duplicateDependency.find(
+      (component: any) => component.name === "workcell-bundle",
+    );
+    duplicateBundle.dependencies.push(duplicateBundle.dependencies[0]);
+    expect(() =>
+      assertReviewedBundleCoverage(
+        duplicateDependency,
+        "workcell-bundle",
+        "workcell",
+        expectedComponents,
+      ),
+    ).toThrow("Component workcell-bundle has duplicate dependencies");
+  });
+
+  test("rejects symlinks before selecting regular shippable files", async () => {
+    const sandbox = await mkdtemp(join(tmpdir(), "workcell-file-inventory-"));
+    try {
+      await writeFile(join(sandbox, "payload.ts"), "export {};\n");
+      await symlink("payload.ts", join(sandbox, "linked.ts"));
+      await expect(outputFiles(sandbox)).rejects.toThrow(
+        "Symbolic links are not shippable: linked.ts",
+      );
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("self-contained Workcell registry", () => {
-  test("declares the reviewed graph with one owner for every target", () => {
-    expect(registry.version).toBe("0.2.1");
+  test("declares the reviewed graph and release identity", () => {
+    expect(registry.version).toBe(packageManifest.version);
     expect(registry.opencode).toBe("1.18.27");
     expect(registry.ocx).toBe("2.0.14");
     expect(registry.components.map((component: any) => component.name)).toEqual(
@@ -220,27 +483,15 @@ describe("self-contained Workcell registry", () => {
       { path: "profiles/workcell/opencode.jsonc", target: "opencode.jsonc" },
       { path: "profiles/workcell/AGENTS.md", target: "AGENTS.md" },
     ]);
-
-    const owners = new Map<string, string>();
-    for (const component of registry.components) {
-      for (const file of component.files) {
-        const target = typeof file === "string" ? file : file.target;
-        expect(owners.has(target)).toBe(false);
-        owners.set(target, component.name);
-      }
-      for (const dependency of component.dependencies ?? []) {
-        expect(dependency).not.toContain("/");
-        expect(
-          registry.components.some(
-            (candidate: any) => candidate.name === dependency,
-          ),
-        ).toBe(true);
-      }
-    }
-    expect(owners.size).toBe(40);
+    assertReviewedBundleCoverage(
+      registry.components,
+      "workcell-bundle",
+      "workcell",
+      expectedComponents,
+    );
   });
 
-  test("preserves required ownership dependencies and exact npm payload pins", () => {
+  test("preserves required ownership dependencies and validates each component's npm pins", () => {
     const component = (name: string) =>
       registry.components.find((candidate: any) => candidate.name === name);
     expect(component("workcell-background-agents").dependencies).toEqual([
@@ -271,17 +522,13 @@ describe("self-contained Workcell registry", () => {
       "workcell-skill-frontend-philosophy",
     ]);
 
-    const npmPins = registry.components
-      .flatMap((candidate: any) => candidate.npmDependencies ?? [])
-      .sort();
-    expect(npmPins).toEqual([
-      "detect-terminal@2.0.0",
-      "jsonc-parser@3.3.1",
-      "node-notifier@10.0.1",
-      "unique-names-generator@4.7.1",
-      "zod@4.3.5",
-      "zod@4.3.5",
-    ]);
+    for (const candidate of registry.components) {
+      if (candidate.npmDependencies === undefined) continue;
+      parseUniqueExactPackagePins(
+        candidate.npmDependencies,
+        `Component ${candidate.name}`,
+      );
+    }
   });
 
   test("publishes the canonical profile configuration with all identities and nested options", () => {
@@ -490,24 +737,39 @@ describe("self-contained Workcell registry", () => {
       },
       gh_grep: { type: "remote", url: "https://mcp.grep.app", enabled: true },
     });
-    expect(profileConfig.plugin).toEqual([
-      "opencode-vibeguard@0.1.0",
-      "@plannotator/opencode@0.27.11",
-      "@tarquinen/opencode-dcp@3.1.15",
-      "@franlol/opencode-md-table-formatter@0.0.6",
-      "@plannotator/opencode@0.27.12",
+    const runtimePlugins = parseUniqueExactPackagePins(
+      profileConfig.plugin,
+      "Profile runtime plugins",
+    );
+    expect(runtimePlugins.map(({ name }) => name)).toEqual([
+      "opencode-vibeguard",
+      "@plannotator/opencode",
+      "@tarquinen/opencode-dcp",
+      "@franlol/opencode-md-table-formatter",
     ]);
+    expect(
+      runtimePlugins.find(({ name }) => name === "@tarquinen/opencode-dcp")
+        ?.version,
+    ).toBe("3.1.15");
+    expect(
+      runtimePlugins.some(({ name }) => /notif(?:y|ier)/i.test(name)),
+    ).toBe(false);
+  });
+
+  test("declares every physical shippable file exactly once with one owner per target", async () => {
+    const physicalFiles = await outputFiles(join(repositoryRoot, "files"));
+    const inventory = declaredShippableInventory(
+      registry.components,
+      physicalFiles,
+    );
+    expect(inventory.sourceFiles).toEqual(physicalFiles);
+    expect(inventory.targetOwners.size).toBe(inventory.sourceFiles.length);
   });
 
   test("contains no forbidden runtime dependency, integration, artifact, secret, symlink, or machine path", async () => {
-    const sourceFiles = (await outputFiles(join(repositoryRoot, "files"))).map(
-      (path) => `files/${path}`,
-    );
-    expect(sourceFiles).toHaveLength(40);
-    for (const path of sourceFiles) {
-      expect((await lstat(join(repositoryRoot, path))).isSymbolicLink()).toBe(
-        false,
-      );
+    const sourceFiles = await outputFiles(join(repositoryRoot, "files"));
+    for (const sourcePath of sourceFiles) {
+      const path = `files/${sourcePath}`;
       expect(path).not.toMatch(
         /(?:\.DS_Store|node_modules|\.ocx\/|receipt|cache|lock)/i,
       );
@@ -630,8 +892,8 @@ describe("self-contained Workcell registry", () => {
             join(output.directory, "components", `${name}.json`),
           ).text(),
         );
-        expect(Object.keys(packument.versions)).toEqual(["0.2.1"]);
-        expect(packument["dist-tags"].latest).toBe("0.2.1");
+        expect(Object.keys(packument.versions)).toEqual([registry.version]);
+        expect(packument["dist-tags"].latest).toBe(registry.version);
       }
     } finally {
       if (output.remove)
@@ -1753,18 +2015,40 @@ describe("registry build output boundary", () => {
 });
 
 describe("pinned automation", () => {
-  test("pins package and launch identities and isolates inherited launch overrides", () => {
-    expect(packageManifest).toMatchObject({
-      name: "ocx-profile-workcell",
-      version: "0.2.1",
-      packageManager: "bun@1.3.5",
-    });
-    expect(packageManifest.devDependencies).toMatchObject({
-      ocx: "2.0.14",
-      "opencode-ai": "1.18.27",
-      "@opencode-ai/plugin": "1.18.27",
-      "@opencode-ai/sdk": "1.18.27",
-    });
+  test("pins manifest dependencies without duplicating their versions", () => {
+    expect(packageManifest.name).toBe("ocx-profile-workcell");
+    expect(packageManifest.version).toMatch(bareSemVerPattern);
+
+    const packageManager = parseExactPackagePin(packageManifest.packageManager);
+    expect(packageManager.name).toBe("bun");
+    expect(packageManifest.devDependencies["@types/bun"]).toBe(
+      packageManager.version,
+    );
+
+    const dependencySections = [
+      packageManifest.dependencies ?? {},
+      packageManifest.devDependencies ?? {},
+    ];
+    for (const dependencies of dependencySections) {
+      for (const [name, version] of Object.entries(dependencies)) {
+        expect(name).toMatch(packageIdentityPattern);
+        expect(version, name).toMatch(bareSemVerPattern);
+      }
+    }
+    const manifestDependencies = Object.assign({}, ...dependencySections);
+    for (const requiredPackage of [
+      "ocx",
+      "opencode-ai",
+      "@opencode-ai/plugin",
+      "@opencode-ai/sdk",
+    ]) {
+      expect(manifestDependencies, requiredPackage).toHaveProperty(
+        requiredPackage,
+      );
+    }
+  });
+
+  test("pins launch identities and isolates inherited launch overrides", () => {
     expect(profileLaunchCommand).toBe("ocx");
     expect(profileLaunchArguments).toEqual([
       "oc",
