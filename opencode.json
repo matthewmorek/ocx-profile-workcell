@@ -1,0 +1,48 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "formatter": {
+    "oxfmt": {
+      "command": ["pnpm", "exec", "oxfmt", "--stdin-filepath", "$FILE"]
+    }
+  },
+  "lsp": {
+    "eslint": {
+      "disabled": true
+    },
+    "prettier": {
+      "disabled": true
+    },
+    "oxlint": {
+      "command": ["pnpm", "exec", "oxlint", "--lsp"],
+      "extensions": [
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".jsx",
+        ".ts",
+        ".mts",
+        ".cts",
+        ".tsx",
+        ".yaml",
+        ".toml"
+      ]
+    },
+    "oxfmt": {
+      "command": ["pnpm", "exec", "oxfmt", "--lsp"],
+      "extensions": [
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".jsx",
+        ".ts",
+        ".mts",
+        ".cts",
+        ".tsx",
+        ".md",
+        ".yaml",
+        ".toml",
+        ".sql"
+      ]
+    }
+  }
+}

@@ -8,7 +8,9 @@
     "test": "bun test tests/registry.test.ts",
     "typecheck": "tsc --noEmit",
     "format": "oxfmt .",
-    "format:check": "oxfmt --check ."
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix ."
   },
   "devDependencies": {
     "@opencode-ai/plugin": "1.18.27",
@@ -20,6 +22,7 @@
     "ocx": "2.0.15",
     "opencode-ai": "1.18.27",
     "oxfmt": "0.63.0",
+    "oxlint": "1.78.0",
     "typescript": "5.9.2",
     "unique-names-generator": "4.7.1",
     "zod": "4.3.5"
