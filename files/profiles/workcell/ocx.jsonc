@@ -5,8 +5,9 @@
       "url": "https://matthewmorek.github.io/ocx-profile-workcell",
     },
   },
-  "exclude": ["**/CLAUDE.md", "**/CONTEXT.md", "**/.opencode/**"],
+  "exclude": ["**/CONTEXT.md", "**/.opencode/**"],
   "include": [
+    "**/CLAUDE.md", // Override: allow project CLAUDE.md files
     "**/AGENTS.md", // Override: allow project AGENTS.md files
     "**/opencode.json",
   ],
