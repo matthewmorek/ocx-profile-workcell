@@ -1,22 +1,38 @@
 # Maintainer instructions
 
-This repository publishes a minimal OCX registry for the `ws` profile. The profile
-is an independent derivative of [KDCO Workspace](https://github.com/kdcokenny/opencode-workspace).
-Use the [canonical KDCO registry source](https://github.com/kdcokenny/ocx/tree/main/workers/kdco-registry)
-and [OCX documentation](https://ocx.kdco.dev/) as upstream references.
+This repository publishes Workcell, a self-contained OCX profile derived from the
+installed harness snapshot at `.tmp/ws-gpt-snapshot/ws-gpt`. The public profile and
+local profile name is `workcell`; its OCX source is `matthewmorek/workcell`.
 
-## Architecture invariants
+## Architecture and identity invariants
 
-- The public profile name is `ws`.
-- `ws` depends on `kdco/workspace`, then fileless `ws-overrides`, in that order.
-- `ws` explicitly targets `profiles/ws/ocx.jsonc` as `ocx.jsonc` and `profiles/ws/AGENTS.md` as `AGENTS.md`.
-- The profile payload contains those two files only. Do not add a profile `opencode.jsonc`.
-- Override options belong under each recognized agent's `agent.options` object. Do not duplicate them as direct agent keys.
-- Do not copy or fork KDCO source. Keep the derivative changes in `ws-overrides`.
+- The aggregate component is `workcell-bundle`; leaf components use the `workcell-` prefix.
+- The profile layout is `files/profiles/workcell/{ocx.jsonc,opencode.jsonc,AGENTS.md}`.
+- The profile depends only on the local `workcell-bundle`; it is not a thin derivative
+  and must not depend on an upstream workspace bundle at runtime.
+- All intended agents, skills, commands, local plugins, and support modules are
+  packaged locally. Generic internal workspace/worktree names remain unchanged.
+- Override options belong under each recognized agent's `agent.options` object. Do
+  not duplicate them as direct agent keys.
+- Keep public identity consistent: Workcell, `workcell`, `workcell-bundle`,
+  `workcell-*`, `matthewmorek/workcell`, and the repository/package identity
+  `matthewmorek/ocx-profile-workcell` / `ocx-profile-workcell`.
+
+## Source, provenance, and dependency boundaries
+
+- The source snapshot is the installed `.tmp/ws-gpt-snapshot/ws-gpt` harness. Copy
+  and modify the required material locally rather than restoring a floating runtime
+  dependency or silently forking unrelated upstream changes.
+- Preserve KDCO OCX/Workspace copyright and MIT notices. Record immutable upstream
+  revisions for every copied import in the third-party notices before importing it.
+- DCP 3.1.15 is separately fetched AGPL-3.0-or-later software: reference it as an
+  external dependency when required, but do not vendor its package or source.
+- Runtime plugins are exact-pinned. Use the local notify plugin; do not add an
+  external notifier.
 
 ## Development
 
-Use Bun 1.3.5 from the package manager declaration:
+Supported baseline: Apple Silicon macOS, Bun 1.3.5, OCX 2.0.14, and OpenCode 1.18.27.
 
 ```sh
 bun install --frozen-lockfile
@@ -25,9 +41,10 @@ bun run test
 bun run smoke
 ```
 
-`build` runs `scripts/build-registry.ts`. `test` runs `bun test tests/registry.test.ts`. `smoke` runs `scripts/smoke-install.ts`.
+`build` runs `scripts/build-registry.ts`; `test` runs
+`bun test tests/registry.test.ts`; `smoke` runs `scripts/smoke-install.ts`.
 
-## Releases
+## Releases and migration
 
 1. Bump the version in both `registry.jsonc` and `package.json`.
 2. Open a PR and wait for required `validate-pinned` to pass.
@@ -40,10 +57,13 @@ bun run smoke
    ```
 
 Release automation builds and deploys GitHub Pages and creates the GitHub Release.
-Corrections use a new patch release.
+Corrections use a new patch release. Existing users migrate side-by-side: install
+and validate `workcell` before removing their old `ws` profile. Rollback is launching
+or restoring `ws`.
 
-## Caveats
+## Repository safety
 
-Do not commit secrets or credentials. Linear may request OAuth with read/write access;
-OpenCode global configuration can still merge with the profile; upstream
-`kdco/workspace` floats to its latest version.
+Do not commit secrets or credentials, raw research receipts, machine-specific paths,
+generated state, or vendored npm artifacts. Keep generated registry output out of
+hand-edited documentation and review changes for accidental identity, provenance,
+or pin drift. OpenCode global configuration may still merge with the profile.
