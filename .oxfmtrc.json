@@ -1,0 +1,23 @@
+{
+  "embeddedLanguageFormatting": "auto",
+  "objectWrap": "preserve",
+  "printWidth": 80,
+  "sortPackageJson": false,
+  "sortImports": {
+    "newlinesBetween": true,
+    "sortSideEffects": false
+  },
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "pnpm-lock.yaml",
+    "**/dist/**",
+    "**/coverage/**",
+    "**/test-results/**",
+    ".env",
+    "**/.env",
+    ".env.*",
+    "**/.env.*",
+    "**/*.sql",
+    "**/*.{png,jpg,jpeg,gif,webp,avif,ico,woff,woff2,ttf,eot,pdf,zip,gz}"
+  ]
+}

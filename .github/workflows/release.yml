@@ -38,7 +38,7 @@ jobs:
           test "$(bun -e 'import {parse} from "jsonc-parser"; console.log(parse(await Bun.file("registry.jsonc").text()).version)')" = "$VERSION"
           test "$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')" = "$VERSION"
           bun install --frozen-lockfile
-          test "$(./node_modules/.bin/ocx --version)" = 2.0.14
+          test "$(./node_modules/.bin/ocx --version)" = 2.0.15
           test "$(./node_modules/.bin/opencode --version)" = 1.18.27
           bun run typecheck
           bun run build

@@ -37,7 +37,7 @@ files/profiles/workcell/
 
 The bundle packages the intended agents, skills, command, local plugins, and support
 modules. Generic internal workspace/worktree names remain unchanged. Runtime plugins
-are exact-pinned: `opencode-vibeguard@0.1.0`, `@plannotator/opencode@0.27.11`,
+are exact-pinned: `opencode-vibeguard@0.1.0`, `@plannotator/opencode@0.27.12`,
 `@tarquinen/opencode-dcp@3.1.15`, and `@franlol/opencode-md-table-formatter@0.0.6`.
 Notifications use the local notify plugin; no external notifier is included.
 
