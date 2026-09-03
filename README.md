@@ -54,9 +54,12 @@ switch launch commands to `ocx oc -p workcell`. Rollback is launching or restori
 `ws`; remove it only after the Workcell migration is confirmed.
 
 OCX 2.0.14 has no profile update command. To update Workcell, remove or move the
-existing `workcell` profile and rerun the install command above. Releases bump the
-registry and package versions, pass the required checks, then publish an annotated
-tag; automation builds and deploys Pages and creates the GitHub Release. See
+existing `workcell` profile and rerun the install command above. To release, update
+the version in both `registry.jsonc` and `package.json`, merge that commit after
+the required `validate-pinned` check passes, then create and push one annotated
+`vX.Y.Z` tag. Automation performs all subsequent validation, build, test, smoke,
+Pages deployment, live verification, and GitHub Release creation. An exact duplicate
+tag-and-commit event is a safe no-op. See
 [AGENTS.md](AGENTS.md) for maintainer details.
 
 ## Provenance and affiliation

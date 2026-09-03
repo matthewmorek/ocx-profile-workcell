@@ -49,17 +49,18 @@ bun run smoke
 1. Bump the version in both `registry.jsonc` and `package.json`.
 2. Open a PR and wait for required `validate-pinned` to pass.
 3. Merge the PR.
-4. Create and push the annotated tag:
+4. As the only post-merge release action, create and push the annotated tag:
 
    ```sh
    git tag -a vX.Y.Z -m vX.Y.Z
    git push origin vX.Y.Z
    ```
 
-Release automation builds and deploys GitHub Pages and creates the GitHub Release.
-Corrections use a new patch release. Existing users migrate side-by-side: install
-and validate `workcell` before removing their old `ws` profile. Rollback is launching
-or restoring `ws`.
+The tag push automatically validates the tag and main ancestry, builds, tests,
+smoke-tests, deploys and verifies GitHub Pages, then creates the GitHub Release.
+An exact duplicate tag-and-commit event is a safe no-op. Corrections use a new patch
+release. Existing users migrate side-by-side: install and validate `workcell` before
+removing their old `ws` profile. Rollback is launching or restoring `ws`.
 
 ## Repository safety
 
