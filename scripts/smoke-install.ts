@@ -6,7 +6,7 @@ const repositoryRoot = resolve(import.meta.dir, "..");
 const commandTimeoutMilliseconds = 60_000;
 const localBinaryDirectory = join(repositoryRoot, "node_modules", ".bin");
 export const profileLaunchCommand = "ocx";
-export const profileLaunchArguments = ["oc", "-p", "ws", "--", "--help"];
+export const profileLaunchArguments = ["oc", "-p", "workcell", "--", "--help"];
 type SmokeServer = Pick<ReturnType<typeof Bun.serve>, "stop">;
 
 function fail(message: string): never { throw new Error(message); }
@@ -73,7 +73,7 @@ async function main(): Promise<void> {
   if (!(await Bun.file(join(registryDirectory, "index.json")).exists())) fail(`Built registry not found at ${registryDirectory}. Run bun run build first.`);
 
   const sandbox = await mkdtemp(join(tmpdir(), "ocx-registry-smoke-"));
-  let server: SmokeServer | undefined;
+  let server: ReturnType<typeof Bun.serve> | undefined;
 
   try {
     const home = join(sandbox, "home");
@@ -84,13 +84,18 @@ async function main(): Promise<void> {
       fetch: async (request) => {
         const file = registryFile(registryDirectory, request.url);
         if (!file || !(await Bun.file(file).exists())) return new Response("Not found", { status: 404 });
+        if (file.endsWith(join("components", "workcell", "profiles", "workcell", "ocx.jsonc"))) {
+          if (!server) return new Response("Smoke registry is not ready", { status: 503 });
+          const canonicalProfile = await Bun.file(file).text();
+          return new Response(canonicalProfile.replace("https://matthewmorek.github.io/ocx-profile-workcell", server.url.toString()));
+        }
         return new Response(Bun.file(file));
       },
     });
     const environment = smokeEnvironment(process.env, sandbox);
     await run(profileLaunchCommand, ["init", "--global"], environment, home);
-    await run(profileLaunchCommand, ["profile", "add", "ws", "--source", "matthewmorek/ws", "--from", server.url.toString(), "--global"], environment, home);
-    await run(profileLaunchCommand, ["verify"], environment, join(sandbox, "config", "opencode", "profiles", "ws"));
+    await run(profileLaunchCommand, ["profile", "add", "workcell", "--source", "matthewmorek/workcell", "--from", server.url.toString(), "--global"], environment, home);
+    await run(profileLaunchCommand, ["verify"], environment, join(sandbox, "config", "opencode", "profiles", "workcell"));
     await run(profileLaunchCommand, profileLaunchArguments, environment, home);
   } finally {
     await cleanupSmokeSandbox(sandbox, server);
