@@ -19,11 +19,13 @@ jobs:
           test "$(bun --version)" = 1.3.5
           test "$(uname -m)" = arm64
           test "$(sw_vers -productVersion | cut -d. -f1)" -ge 14
-      - name: Build, test, and smoke-test the minimal registry
+      - name: Typecheck, build, test, and smoke-test the Workcell registry
         run: |
           set -euo pipefail
           bun install --frozen-lockfile
           test "$(./node_modules/.bin/ocx --version)" = 2.0.14
+          test "$(./node_modules/.bin/opencode --version)" = 1.18.27
+          bun run typecheck
           bun run build
           REGISTRY_DIST=dist bun run test
           REGISTRY_DIST=dist bun run smoke

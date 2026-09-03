@@ -35,6 +35,8 @@ jobs:
           test "$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')" = "$VERSION"
           bun install --frozen-lockfile
           test "$(./node_modules/.bin/ocx --version)" = 2.0.14
+          test "$(./node_modules/.bin/opencode --version)" = 1.18.27
+          bun run typecheck
           bun run build
           REGISTRY_DIST=dist bun run test
           REGISTRY_DIST=dist bun run smoke
@@ -88,19 +90,11 @@ jobs:
           BASE_URL: ${{ steps.deploy-pages.outputs.page_url }}
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/live/components/ws/profiles/ws"
-          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/release.json" > "$RUNNER_TEMP/live/release.json"
-          cmp "dist/release.json" "$RUNNER_TEMP/live/release.json"
-          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/index.json" > "$RUNNER_TEMP/live/index.json"
-          cmp "dist/index.json" "$RUNNER_TEMP/live/index.json"
-          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/components/ws.json" > "$RUNNER_TEMP/live/components/ws.json"
-          cmp "dist/components/ws.json" "$RUNNER_TEMP/live/components/ws.json"
-          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/components/ws-overrides.json" > "$RUNNER_TEMP/live/components/ws-overrides.json"
-          cmp "dist/components/ws-overrides.json" "$RUNNER_TEMP/live/components/ws-overrides.json"
-          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/components/ws/profiles/ws/AGENTS.md" > "$RUNNER_TEMP/live/components/ws/profiles/ws/AGENTS.md"
-          cmp "dist/components/ws/profiles/ws/AGENTS.md" "$RUNNER_TEMP/live/components/ws/profiles/ws/AGENTS.md"
-          curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/components/ws/profiles/ws/ocx.jsonc" > "$RUNNER_TEMP/live/components/ws/profiles/ws/ocx.jsonc"
-          cmp "dist/components/ws/profiles/ws/ocx.jsonc" "$RUNNER_TEMP/live/components/ws/profiles/ws/ocx.jsonc"
+          while IFS= read -r file; do
+            mkdir -p "$RUNNER_TEMP/live/$(dirname "$file")"
+            curl --fail --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error "$BASE_URL/$file" > "$RUNNER_TEMP/live/$file"
+            cmp "dist/$file" "$RUNNER_TEMP/live/$file"
+          done < <(cd dist && find . -type f -print | sed 's#^./##' | sort)
       - name: Create the GitHub Release when it does not already exist
         env:
           GITHUB_TOKEN: ${{ github.token }}

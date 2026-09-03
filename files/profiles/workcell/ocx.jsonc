@@ -1,0 +1,13 @@
+{
+  "$schema": "https://ocx.kdco.dev/schemas/profile.json",
+  "registries": {
+    "matthewmorek": {
+      "url": "https://matthewmorek.github.io/ocx-profile-workcell",
+    },
+  },
+  "exclude": ["**/CLAUDE.md", "**/CONTEXT.md", "**/.opencode/**"],
+  "include": [
+    "**/AGENTS.md", // Override: allow project AGENTS.md files
+    "**/opencode.json",
+  ],
+}

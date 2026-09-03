@@ -3,8 +3,35 @@ import { basename, dirname, isAbsolute, join, parse as parsePath, relative, reso
 import { randomUUID } from "node:crypto";
 import { parse, printParseErrorCode, type ParseError } from "jsonc-parser";
 
+type ComponentFile = string | { path?: unknown };
+type Component = { name?: unknown; files?: unknown };
 type Registry = { version?: unknown; components?: unknown[] };
-export const expectedComponents = ["ws", "ws-overrides"] as const;
+export const expectedComponents = [
+  "workcell-primitives",
+  "workcell-background-agents",
+  "workcell-workspace-plugin",
+  "workcell-agent-coder",
+  "workcell-agent-debugger",
+  "workcell-agent-tester",
+  "workcell-agent-explore",
+  "workcell-agent-researcher",
+  "workcell-agent-scribe",
+  "workcell-agent-reviewer",
+  "workcell-agent-committer",
+  "workcell-agent-metadata",
+  "workcell-skill-plan-review",
+  "workcell-skill-plan-protocol",
+  "workcell-skill-testing-philosophy",
+  "workcell-skill-code-philosophy",
+  "workcell-skill-frontend-philosophy",
+  "workcell-skill-code-review",
+  "workcell-review-command",
+  "workcell-notify",
+  "workcell-worktree",
+  "workcell-philosophy",
+  "workcell-bundle",
+  "workcell",
+] as const;
 const repositoryRoot = resolve(import.meta.dir, "..");
 
 function fail(message: string): never { throw new Error(message); }
@@ -85,8 +112,10 @@ async function main(): Promise<void> {
   const registry = await readJsonc<Registry>(join(repositoryRoot, "registry.jsonc"));
   const version = parseVersion(registry.version);
   if (!Array.isArray(registry.components)) fail("registry.jsonc components must be an array.");
-  const components = registry.components.map((component) => (component as { name?: unknown }).name).sort();
-  if (JSON.stringify(components) !== JSON.stringify(expectedComponents)) fail("Registry source must contain exactly ws and ws-overrides.");
+  const components = parseComponents(registry.components);
+  const componentNames = components.map(({ name }) => name).sort();
+  const reviewedNames = [...expectedComponents].sort();
+  if (JSON.stringify(componentNames) !== JSON.stringify(reviewedNames)) fail(`Registry source must contain exactly the reviewed component set: ${reviewedNames.join(", ")}.`);
   const ocx = Bun.which("ocx");
   if (!ocx) fail("OCX 2.0.14 is not installed. Run bun install --frozen-lockfile.");
   await mkdir(dirname(output), { recursive: true });
@@ -97,9 +126,24 @@ async function main(): Promise<void> {
     if ((await child.exited) !== 0) fail("OCX registry build failed.");
     await rm(join(stagedOutput, ".well-known"), { recursive: true, force: true });
     await normalizeOcxOutput(stagedOutput, version);
-    await validateOutput(stagedOutput, version);
+    await validateOutput(stagedOutput, version, components);
     await promoteStagedOutput(stagedOutput, output);
   } finally { await rm(stagedParent, { recursive: true, force: true }); }
+}
+
+function parseComponents(values: unknown[]): Array<{ name: string; files: string[] }> {
+  return values.map((value, componentIndex) => {
+    if (!value || typeof value !== "object") fail(`Registry component ${componentIndex} must be an object.`);
+    const component = value as Component;
+    if (typeof component.name !== "string" || !component.name) fail(`Registry component ${componentIndex} must have a name.`);
+    if (!Array.isArray(component.files)) fail(`Registry component ${component.name} must declare files.`);
+    const files = component.files.map((file: ComponentFile, fileIndex: number) => {
+      const path = typeof file === "string" ? file : file?.path;
+      if (typeof path !== "string" || !path) fail(`Registry component ${component.name} file ${fileIndex} must have a path.`);
+      return path;
+    });
+    return { name: component.name, files };
+  });
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -144,7 +188,7 @@ export async function normalizeOcxOutput(directory: string, version: string): Pr
   if (index.version !== version) fail("OCX 2.0.14 output index.json must declare the requested registry version before normalization.");
   const names = (await readdir(join(directory, "components"), { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
   const expectedNames = expectedComponents.map((component) => `${component}.json`).sort();
-  if (JSON.stringify(names) !== JSON.stringify(expectedNames)) fail("OCX output must contain exactly ws and ws-overrides packuments.");
+  if (JSON.stringify(names) !== JSON.stringify(expectedNames)) fail("OCX output must contain exactly the reviewed component packuments.");
   for (const component of expectedComponents) {
     const path = join(directory, "components", `${component}.json`);
     const packument = await readJsonc<{ versions?: Record<string, unknown>; "dist-tags"?: Record<string, unknown> }>(path);
@@ -158,7 +202,19 @@ export async function normalizeOcxOutput(directory: string, version: string): Pr
   }
 }
 
-export async function validateOutput(directory: string, version: string): Promise<void> {
+async function emittedFiles(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { recursive: true, withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => relative(directory, join(entry.parentPath, entry.name)).replaceAll("\\", "/"))
+    .sort();
+}
+
+export async function validateOutput(
+  directory: string,
+  version: string,
+  components?: Array<{ name: string; files: string[] }>,
+): Promise<void> {
   const index = await readJsonc<{ version?: unknown }>(join(directory, "index.json"));
   if (index.version !== version) fail("Normalized index version is incorrect.");
   for (const component of expectedComponents) {
@@ -166,6 +222,18 @@ export async function validateOutput(directory: string, version: string): Promis
     if (JSON.stringify(Object.keys(packument.versions ?? {})) !== JSON.stringify([version])) fail(`Normalized ${component} versions are incorrect.`);
     if (packument["dist-tags"]?.latest !== version) fail(`Normalized ${component} latest tag is incorrect.`);
     if (Object.values(packument.versions ?? {}).some((manifest) => !manifest || typeof manifest !== "object" || Object.hasOwn(manifest as object, "version"))) fail(`Normalized ${component} manifest contains an embedded version.`);
+  }
+  if (!components) return;
+  const expectedFiles = [
+    "index.json",
+    ...components.flatMap(({ name, files }) => [
+      `components/${name}.json`,
+      ...files.map((path) => `components/${name}/${path}`),
+    ]),
+  ].sort();
+  const actualFiles = await emittedFiles(directory);
+  if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
+    fail("OCX output inventory does not exactly match registry declarations.");
   }
 }
 
