@@ -4,6 +4,7 @@
   "workspaces": {
     "": {
       "name": "ocx-profile-workcell",
+      "version": "0.2.1",
       "devDependencies": {
         "@opencode-ai/plugin": "1.18.27",
         "@opencode-ai/sdk": "1.18.27",
