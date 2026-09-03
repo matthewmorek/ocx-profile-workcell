@@ -209,8 +209,7 @@
       "description": "Self-contained Workcell profile for Apple Silicon macOS.",
       "files": [
         { "path": "profiles/workcell/ocx.jsonc", "target": "ocx.jsonc" },
-        { "path": "profiles/workcell/opencode.jsonc", "target": "opencode.jsonc" },
-        { "path": "profiles/workcell/AGENTS.md", "target": "AGENTS.md" }
+        { "path": "profiles/workcell/opencode.jsonc", "target": "opencode.jsonc" }
       ],
       "dependencies": ["workcell-bundle"]
     }

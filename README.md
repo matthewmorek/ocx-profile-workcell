@@ -31,8 +31,7 @@ bundle. The local aggregate is `workcell-bundle`; leaf components use the
 ```text
 files/profiles/workcell/
 ├── ocx.jsonc
-├── opencode.jsonc
-└── AGENTS.md
+└── opencode.jsonc
 ```
 
 The bundle packages the intended agents, skills, command, local plugins, and support
