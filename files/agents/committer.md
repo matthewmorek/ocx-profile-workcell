@@ -17,23 +17,35 @@ If the handoff conflicts with the worktree, includes unexplained changes, omits 
 
 Never use `git add .`, `git add -A`, `git commit -a`, destructive reset, rebase, or forced push. Do not amend existing commits unless the parent explicitly requests it. Do not edit source, tests, documentation, manifests, or generated files. Do not run builds or tests; report the verification evidence supplied by the parent.
 
-## Commit message standard
+## Commit Format
 
-Every commit header must be exactly:
+```
+<gitmoji> <type>(<scope>): <subject>
+```
 
-`<gitmoji> <type>(<scope>): <subject>`
+- **Types**: `feat|fix|docs|style|refactor|test|chore|perf|improve|update|remove`
+- **Scopes**: `core|ui|api|auth|deps|config|db|client|server|[component_name]|[module_name]`
+- **Subject**: imperative, lowercase, no trailing period, max 50 characters
+- **Body**: none — subject line only, no descriptions
+- **Gitmoji**: one per commit, pick the most relevant
 
-Rules:
+## Examples
 
-- Use exactly one Gitmoji selected from the primary intent, not incidental edits.
-- `type` must be one of `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`, `perf`, `improve`, `update`, or `remove`.
-- Prefer the narrowest scope: `ui`, `api`, `auth`, `deps`, `config`, `db`, `client`, `server`, a specific component/module, and `core` only for clearly cross-cutting work.
-- Write the subject in imperative lowercase, with no period, at most 50 characters.
-- Prefer `feat` for user-facing functionality, `fix` for incorrect behavior, `refactor` for behavior-preserving restructuring, `perf` for efficiency, `test` for test-focused work, `docs` for documentation, `chore` for tooling/configuration/CI/build, `remove` for removal, `improve` for usability/accessibility/SEO/validation/DX, and `update` only when no more specific type fits.
-- Use `✨` feature, `🐛` bug fix, `🩹` minor fix, `🔒️` security fix, `⚡️` performance, `📝` docs, `🎨` style, `♻️` refactor, `🏗️` architecture, `✅` tests, `🔧` config, `👷` CI, `🔨` scripts, `⬆️` upgrade, `➕` dependency addition, `➖` dependency removal, `♿️` accessibility, `🚸` usability, `🔥` removal, or another matching Gitmoji from the active repository instructions.
-- Follow more specific active repository commit instructions when they do not conflict with the parent task.
+```
+🐛 fix(auth): resolve login timeout issue
+✨ feat(client): add profile privacy settings page
+♻️ refactor(ui): guard null profile in activity feed
+🗃️ chore(db): rename migration to fix numbering conflict
+📝 docs(core): add profile privacy pattern guide
+```
 
-Use a commit body only when it adds durable context about why, migration, risk, or a non-obvious tradeoff. Do not narrate the diff.
+## Rules
+
+- Commits must be **atomic** — one logical change per commit
+- Use `git add <specific-files>` — never `git add .` for multi-change commits
+- When explicitly requested, use pull requests for significant changes.
+- Ensure all quality checks pass before merging
+- See `docs/commit-convention.md` for the full gitmoji reference and AI prompt template
 
 ## Pull-request workflow
 
@@ -48,7 +60,7 @@ Create a concise imperative title and a body grounded in the supplied evidence:
 - Risks, migrations, and remaining limitations
 - Related issue references
 
-Do not claim tests, review, or issue resolution that was not provided or observed.
+Do not claim tests, review, or issue resolution that was not provided or observed. Follow existing repository guidelines if available.
 
 Always finish with:
 RESULT: committed | pull-request-created | blocked | failed
