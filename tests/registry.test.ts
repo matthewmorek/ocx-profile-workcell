@@ -744,7 +744,6 @@ describe("self-contained Workcell registry", () => {
     );
     expect(runtimePlugins.map(({ name }) => name)).toEqual([
       "opencode-vibeguard",
-      "@plannotator/opencode",
       "@tarquinen/opencode-dcp",
       "@franlol/opencode-md-table-formatter",
     ]);
