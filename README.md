@@ -38,61 +38,26 @@ The supported baseline is Apple Silicon macOS with Bun 1.3.5 and OpenCode
 2.0.15 CLI. Configured MCP servers are limited to Context7, Exa, and GitHub
 Grep.
 
-## Maintainer releases
+## Releases and migration
 
-Use a reusable version value; do not commit generated `dist` output.
+1. Bump the version in both `registry.jsonc` and `package.json`.
+2. Open a PR and wait for required `validate-pinned` to pass.
+3. Merge the PR.
+4. Switch to the merged, current `main` commit:
 
-```sh
-export VERSION=X.Y.Z
-perl -0pi -e 's/("version"\s*:\s*")[^"]+/$1$ENV{VERSION}/' package.json registry.jsonc
-git diff -- package.json registry.jsonc
-git switch -c release/v$VERSION
+   ```sh
+   git switch main
+   git pull --ff-only origin main
+   ```
 
-bun install --frozen-lockfile
-bunx oxfmt --check package.json registry.jsonc
-bun run typecheck
-bun run build
-REGISTRY_DIST=dist bun run test
-REGISTRY_DIST=dist bun run smoke
+5. As the only post-merge release action, create and push the annotated tag:
 
-git add package.json registry.jsonc
-git commit -m "chore: release v$VERSION"
-git push --set-upstream origin release/v$VERSION
-gh pr create --base main --head release/v$VERSION --title "Release v$VERSION" --body "Release v$VERSION"
-```
+   ```sh
+   git tag -a vX.Y.Z -m vX.Y.Z
+   git push origin vX.Y.Z
+   ```
 
-Update both `registry.jsonc` and `package.json`, open the PR, wait for the
-required `validate-pinned` check, and merge it. Then update local `main`, verify
-the release version and manifest values, and perform the only post-merge
-release action: create and push the annotated tag.
-
-```sh
-set -eu
-export VERSION=X.Y.Z
-git switch main
-git pull --ff-only origin main
-test "$(git branch --show-current)" = main
-test "$(git rev-parse main)" = "$(git rev-parse origin/main)"
-perl -e 'my $v = $ENV{VERSION}; exit 1 unless $v =~ /\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z/'
-for file in package.json registry.jsonc; do
-  test "$(perl -0ne 'print $1 if /"version"\s*:\s*"([^"]+)"/' "$file")" = "$VERSION"
-done
-git tag -a "v$VERSION" -m "v$VERSION"
-git push origin "v$VERSION"
-```
-
-The pushed `v*` tag triggers validation of the annotated tag, main ancestry, and
-version equality, followed by build, tests, smoke tests, Pages deployment when
-needed, live-output verification, and GitHub Release creation. An exact
-duplicate tag-and-commit retry skips Pages redeployment but still compares live
-output and ensures the GitHub Release exists. Corrections use a new patch
-release.
-
-## Migration, rollback, provenance, and license
-
-Install and validate `workcell` side-by-side with an existing `ws` setup before
-switching launch commands. Rollback is launching or restoring `ws`; remove it
-only after the Workcell migration is confirmed.
+## Notes
 
 Some Workcell material is copied and modified from [KDCO OCX](https://github.com/kdcokenny/ocx)
 and its Workspace material under the MIT terms described in
