@@ -2,8 +2,8 @@
   "$schema": "https://ocx.kdco.dev/schemas/v2/registry.json",
   "name": "matthewmorek",
   "author": "Matthew Morek",
-  "version": "0.2.7",
-  "opencode": "1.18.27",
+  "version": "0.2.8",
+  "opencode": "1.18.25",
   "ocx": "2.0.14",
   "components": [
     {
@@ -60,7 +60,10 @@
         },
       ],
       "dependencies": ["workcell-primitives"],
-      "npmDependencies": ["unique-names-generator@4.7.1"],
+      "npmDependencies": [
+        "@opencode-ai/plugin@1.18.25",
+        "unique-names-generator@4.7.1",
+      ],
     },
     {
       "name": "workcell-workspace-plugin",
@@ -73,7 +76,7 @@
         },
       ],
       "dependencies": ["workcell-background-agents", "workcell-primitives"],
-      "npmDependencies": ["zod@4.3.5"],
+      "npmDependencies": ["@opencode-ai/plugin@1.18.25", "zod@4.3.5"],
     },
     {
       "name": "workcell-agent-coder",
@@ -267,7 +270,11 @@
         },
       ],
       "dependencies": ["workcell-primitives"],
-      "npmDependencies": ["zod@4.3.5", "jsonc-parser@3.3.1"],
+      "npmDependencies": [
+        "@opencode-ai/plugin@1.18.25",
+        "zod@4.3.5",
+        "jsonc-parser@3.3.1",
+      ],
     },
     {
       "name": "workcell-philosophy",
@@ -321,6 +328,7 @@
           "path": "profiles/workcell/opencode.jsonc",
           "target": "opencode.jsonc",
         },
+        { "path": "profiles/workcell/tui.jsonc", "target": "tui.jsonc" },
         { "path": "profiles/workcell/AGENTS.md", "target": "AGENTS.md" },
       ],
       "dependencies": ["workcell-bundle"],
