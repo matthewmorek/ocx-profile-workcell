@@ -33,10 +33,30 @@ intentionally replace the current Workcell installation.
 
 ## Support baseline
 
-The supported baseline is Apple Silicon macOS with Bun 1.3.5 and OpenCode
-1.18.27. The registry targets OCX 2.0.14; repository validation uses the OCX
+Workcell 0.2.8 supports Apple Silicon macOS with Bun 1.4.1 and OpenCode
+1.18.25. The registry targets OCX 2.0.14. Repository validation uses the OCX
 2.0.15 CLI. Configured MCP servers are limited to Context7, Exa, and GitHub
 Grep.
+
+## DCP configuration and smoke verification
+
+Workcell owns the profile-root `tui.jsonc`. It pins external AGPL-3.0-or-later
+DCP 3.1.15 in both the server and TUI configuration.
+
+Smoke verification uses production plugin metadata to prove that the exact DCP
+spec was requested and version 3.1.15 resolved from npm at the exact scoped
+package target. It does not prove plugin import, activation, `/dcp`
+registration, rendering, or interaction.
+
+## Migration and rollback
+
+For a repository-only migration, install and validate Workcell 0.2.8 first. If
+DCP should be Workcell-only, optionally remove a duplicate user-global DCP TUI
+declaration after validation. Do not make these machine-level changes as part
+of repository changes.
+
+If the global declaration was removed, restore it to roll back. Then launch or
+reinstall the prior Workcell profile, or launch the existing `ws` profile.
 
 ## Releases and migration
 
@@ -56,6 +76,18 @@ Grep.
    git tag -a vX.Y.Z -m vX.Y.Z
    git push origin vX.Y.Z
    ```
+
+## Troubleshooting
+
+Installing or updating Workcell does not change the profile of an already
+running session. Launch a fresh session with `ocx oc -p workcell` to use the
+installed profile.
+
+If `delegate` is missing, check the resolved Workcell `plan` identity first. A
+wrong or stale Workcell plan can look like a tool failure. If
+`delegate`, `delegation_read`, and `delegation_list` are all missing, suspect a
+plugin bootstrap or import failure. If `delegate` exists but rejects a request,
+the requested child route may not be supported by the registered delegate.
 
 ## Notes
 
