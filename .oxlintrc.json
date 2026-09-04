@@ -118,6 +118,12 @@
         "prefer-rest-params": "error",
         "prefer-spread": "error"
       }
+    },
+    {
+      "files": ["tests/registry.test.ts"],
+      "rules": {
+        "typescript/no-explicit-any": "off"
+      }
     }
   ]
 }

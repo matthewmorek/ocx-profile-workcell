@@ -41,12 +41,26 @@ import {
 } from "../scripts/build-registry";
 import { decideReleaseAction } from "../scripts/release-policy";
 import {
+  agentBodyByteLimit,
   assertBuiltRegistryVersion,
   assertInstalledTools,
+  assertInstalledProfileContracts,
+  boundSmokeDiagnostics,
+  classifyTuiResolverFailure,
+  cleanupTuiProcess,
   cleanupSmokeSandbox,
+  createSmokeRedactionContext,
+  effectivePermissionAction,
   establishToolAcceptanceAtLivenessBoundary,
+  expectedDcpSpec,
+  globalDcpConflictSpec,
   httpBodyByteLimit,
+  isInheritedSmokeVariable,
+  npmPolicyContent,
+  parseDcpMetadataReceipt,
   parseToolIds,
+  parseWorkcellPlanFingerprint,
+  probeAgents,
   probeToolIds,
   probeToolIdsHandshake,
   type InstalledToolsLaunchAttempt,
@@ -54,8 +68,20 @@ import {
   profileLaunchArguments,
   profileLaunchCommand,
   requiredToolIds,
+  readGlobalTuiConflictImmediatelyBeforeLaunch,
+  redactSmokeDiagnostics,
+  requireExactlyOneMergedConfigDirectory,
+  seedGlobalTuiConflict,
   smokeEnvironment,
+  validateGlobalTuiConflict,
+  waitForFreshDcpMetadata,
+  writeSandboxNpmPolicy,
 } from "../scripts/smoke-install";
+
+const verifiedAgentEvidence = {
+  verified: true,
+  failureReason: undefined,
+} as const;
 
 const repositoryRoot = join(import.meta.dir, "..");
 const registry = parse(
@@ -64,6 +90,12 @@ const registry = parse(
 const profileConfig = parse(
   await readFile(
     join(repositoryRoot, "files/profiles/workcell/opencode.jsonc"),
+    "utf8",
+  ),
+) as any;
+const profileTuiConfig = parse(
+  await readFile(
+    join(repositoryRoot, "files/profiles/workcell/tui.jsonc"),
     "utf8",
   ),
 ) as any;
@@ -472,7 +504,8 @@ describe("dependency and inventory policy helpers", () => {
 describe("self-contained Workcell registry", () => {
   test("declares the reviewed graph and release identity", () => {
     expect(registry.version).toBe(packageManifest.version);
-    expect(registry.opencode).toBe("1.18.27");
+    expect(registry.version).toBe("0.2.8");
+    expect(registry.opencode).toBe("1.18.25");
     expect(registry.ocx).toBe("2.0.14");
     expect(registry.components.map((component: any) => component.name)).toEqual(
       [...expectedComponents],
@@ -492,6 +525,7 @@ describe("self-contained Workcell registry", () => {
     expect(profile.files).toEqual([
       { path: "profiles/workcell/ocx.jsonc", target: "ocx.jsonc" },
       { path: "profiles/workcell/opencode.jsonc", target: "opencode.jsonc" },
+      { path: "profiles/workcell/tui.jsonc", target: "tui.jsonc" },
       { path: "profiles/workcell/AGENTS.md", target: "AGENTS.md" },
     ]);
     assertReviewedBundleCoverage(
@@ -540,6 +574,47 @@ describe("self-contained Workcell registry", () => {
         `Component ${candidate.name}`,
       );
     }
+
+    const expectedRuntimeDependencies: Record<string, string[]> = {
+      "workcell-background-agents": [
+        "@opencode-ai/plugin@1.18.25",
+        "unique-names-generator@4.7.1",
+      ],
+      "workcell-workspace-plugin": ["@opencode-ai/plugin@1.18.25", "zod@4.3.5"],
+      "workcell-notify": ["node-notifier@10.0.1", "detect-terminal@2.0.0"],
+      "workcell-worktree": [
+        "@opencode-ai/plugin@1.18.25",
+        "zod@4.3.5",
+        "jsonc-parser@3.3.1",
+      ],
+    };
+    for (const [name, dependencies] of Object.entries(
+      expectedRuntimeDependencies,
+    ))
+      expect(component(name).npmDependencies).toEqual(dependencies);
+    for (const candidate of registry.components) {
+      if (candidate.name in expectedRuntimeDependencies) continue;
+      expect(candidate.npmDependencies).toBeUndefined();
+    }
+    const pluginOwners = registry.components
+      .filter((candidate: any) =>
+        candidate.npmDependencies?.some((pin: string) =>
+          pin.startsWith("@opencode-ai/plugin@"),
+        ),
+      )
+      .map((candidate: any) => candidate.name);
+    expect(pluginOwners).toEqual([
+      "workcell-background-agents",
+      "workcell-workspace-plugin",
+      "workcell-worktree",
+    ]);
+    expect(
+      registry.components.some((candidate: any) =>
+        candidate.npmDependencies?.some((pin: string) =>
+          pin.startsWith("@opencode-ai/sdk@"),
+        ),
+      ),
+    ).toBe(false);
   });
 
   test("publishes the canonical profile configuration with all identities and nested options", () => {
@@ -761,9 +836,28 @@ describe("self-contained Workcell registry", () => {
       runtimePlugins.find(({ name }) => name === "@tarquinen/opencode-dcp")
         ?.version,
     ).toBe("3.1.15");
+    expect(profileTuiConfig).toEqual({
+      $schema: "https://opencode.ai/tui.json",
+      plugin: [expectedDcpSpec],
+    });
+    expect(
+      runtimePlugins.filter(({ name }) => name === "@tarquinen/opencode-dcp"),
+    ).toHaveLength(1);
     expect(
       runtimePlugins.some(({ name }) => /notif(?:y|ier)/i.test(name)),
     ).toBe(false);
+    for (const agentName of ["plan", "build"]) {
+      expect(profileConfig.agent[agentName].permission).toMatchObject({
+        delegate: "allow",
+        delegation_read: "allow",
+        delegation_list: "allow",
+      });
+    }
+    expect(profileConfig.agent.plan.permission).toMatchObject({
+      plan_save: "allow",
+      plan_read: "allow",
+      task: "deny",
+    });
   });
 
   test("declares every physical shippable file exactly once with one owner per target", async () => {
@@ -2031,6 +2125,7 @@ describe("pinned automation", () => {
 
     const packageManager = parseExactPackagePin(packageManifest.packageManager);
     expect(packageManager.name).toBe("bun");
+    expect(packageManager.version).toBe("1.4.1");
     expect(packageManifest.devDependencies["@types/bun"]).toBe(
       packageManager.version,
     );
@@ -2056,6 +2151,13 @@ describe("pinned automation", () => {
         requiredPackage,
       );
     }
+    expect(packageManifest.devDependencies).toMatchObject({
+      "@opencode-ai/plugin": "1.18.25",
+      "@opencode-ai/sdk": "1.18.25",
+      "@types/bun": "1.4.1",
+      "opencode-ai": "1.18.25",
+      ocx: "2.0.15",
+    });
   });
 
   test("pins launch identities and isolates inherited launch overrides", () => {
@@ -2084,12 +2186,452 @@ describe("pinned automation", () => {
       "worktree_delete",
     ]);
     const environment = smokeEnvironment(
-      { PATH: "/usr/bin:/bin", OPENCODE_CONFIG: "bad", OCX_PROFILE: "bad" },
+      {
+        PATH: "/usr/bin:/bin",
+        OPENCODE_CONFIG: "bad",
+        OCX_PROFILE: "bad",
+        npm_config_registry: "bad",
+        NpM_ToKeN: "secret",
+        Bun_Auth_Token: "secret",
+      },
       "/tmp/ocx-smoke",
     );
     expect(environment.HOME).toBe("/tmp/ocx-smoke/home");
     expect(environment.OPENCODE_CONFIG).toBeUndefined();
     expect(environment.OCX_PROFILE).toBeUndefined();
+    expect(environment.npm_config_registry).toBeUndefined();
+    expect(environment.NpM_ToKeN).toBeUndefined();
+    expect(environment.Bun_Auth_Token).toBeUndefined();
+    expect(environment.NPM_CONFIG_USERCONFIG).toBe(
+      "/tmp/ocx-smoke/home/.npmrc",
+    );
+    for (const inheritedName of [
+      "NPM_CONFIG_REGISTRY",
+      "npm_config_userconfig",
+      "NPM_TOKEN",
+      "npm_auth_token",
+      "node_auth_token",
+      "BUN_AUTH_TOKEN",
+      "bun_token",
+      "bun_config_token",
+      "bunfig_token",
+      "opencode_config",
+      "ocx_profile",
+    ])
+      expect(isInheritedSmokeVariable(inheritedName), inheritedName).toBe(true);
+    expect(isInheritedSmokeVariable("PATH")).toBe(false);
+  });
+
+  test("creates an exact sandbox npm policy and lower-precedence global DCP conflict", async () => {
+    const sandbox = await mkdtemp(join(tmpdir(), "workcell-smoke-policy-"));
+    try {
+      const policyPath = await writeSandboxNpmPolicy(sandbox);
+      const globalTuiPath = await seedGlobalTuiConflict(sandbox);
+      expect(await readFile(policyPath, "utf8")).toBe(npmPolicyContent);
+      expect((await readFile(policyPath, "utf8")).split("\n")).toEqual([
+        "min-release-age=7",
+        "engine-strict=false",
+        "",
+      ]);
+      expect(JSON.parse(await readFile(globalTuiPath, "utf8"))).toEqual({
+        plugin: [globalDcpConflictSpec],
+      });
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  test("parses the installed profile and deduplicated runtime API manifest", async () => {
+    const sandbox = await mkdtemp(
+      join(tmpdir(), "workcell-installed-profile-"),
+    );
+    try {
+      await writeFile(
+        join(sandbox, "tui.jsonc"),
+        `{ "plugin": ["${expectedDcpSpec}"] }`,
+      );
+      await writeFile(
+        join(sandbox, "package.json"),
+        JSON.stringify({ dependencies: { "@opencode-ai/plugin": "1.18.25" } }),
+      );
+      await expect(
+        assertInstalledProfileContracts(sandbox),
+      ).resolves.toBeUndefined();
+      await writeFile(
+        join(sandbox, "package.json"),
+        JSON.stringify({
+          dependencies: {
+            "@opencode-ai/plugin": "1.18.25",
+            "@opencode-ai/sdk": "1.18.25",
+          },
+        }),
+      );
+      await expect(assertInstalledProfileContracts(sandbox)).rejects.toThrow(
+        "must not declare @opencode-ai/sdk",
+      );
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  test("evaluates last-matching permission rules and selects the Workcell plan fingerprint", () => {
+    const permission = [
+      { permission: "delegate", pattern: "*", action: "deny" },
+      { permission: "delegate", pattern: "*", action: "allow" },
+      { permission: "delegation_read", pattern: "*", action: "allow" },
+      { permission: "delegation_list", pattern: "*", action: "allow" },
+      { permission: "plan_save", pattern: "*", action: "allow" },
+      { permission: "plan_read", pattern: "*", action: "allow" },
+      { permission: "task", pattern: "*", action: "deny" },
+    ] as const;
+    expect(effectivePermissionAction(permission, "delegate")).toBe("allow");
+    expect(
+      effectivePermissionAction(
+        [
+          { permission: "delegation_*", pattern: "*", action: "allow" },
+          { permission: "delegation_read", pattern: "*", action: "deny" },
+        ],
+        "delegation_read",
+      ),
+    ).toBe("deny");
+    expect(
+      effectivePermissionAction(
+        [
+          { permission: "delegate", pattern: "child-*", action: "allow" },
+          { permission: "*", pattern: "child-secret", action: "deny" },
+        ],
+        "delegate",
+        "child-secret",
+      ),
+    ).toBe("deny");
+    expect(
+      effectivePermissionAction(
+        [
+          { permission: "*", pattern: "*", action: "allow" },
+          { permission: "deleg*", pattern: "child-*", action: "deny" },
+        ],
+        "delegate",
+        "child-coder",
+      ),
+    ).toBe("deny");
+    const body = JSON.stringify([
+      {
+        name: "plan",
+        mode: "primary",
+        model: { providerID: "openai", modelID: "gpt-5.6-sol" },
+        description:
+          "Designs implementation-ready plans using delegated repository and external research.",
+        permission,
+      },
+    ]);
+    expect(parseWorkcellPlanFingerprint(body)).toMatchObject({
+      name: "plan",
+      permissions: { delegate: "allow", task: "deny" },
+    });
+
+    const shadowed = JSON.parse(body);
+    shadowed[0].permission.push({
+      permission: "delegate",
+      pattern: "*",
+      action: "deny",
+    });
+    expect(() =>
+      parseWorkcellPlanFingerprint(JSON.stringify(shadowed)),
+    ).toThrow("delegate resolved to deny; expected allow");
+
+    for (const [field, value, expectedCause] of [
+      ["mode", "subagent", "Workcell plan mode mismatch"],
+      [
+        "model",
+        { providerID: "anthropic", modelID: "claude" },
+        "Workcell plan provider/model mismatch",
+      ],
+      [
+        "description",
+        "Generic plan agent",
+        "Workcell plan description mismatch",
+      ],
+    ] as const) {
+      const mismatched = JSON.parse(body);
+      mismatched[0][field] = value;
+      expect(() =>
+        parseWorkcellPlanFingerprint(JSON.stringify(mismatched)),
+      ).toThrow(expectedCause);
+    }
+  });
+
+  test("bounds and authenticates the separate agent probe", async () => {
+    let observedAuthorization: string | null = null;
+    const probe = await probeAgents(
+      4005,
+      "Basic redacted",
+      async (_input, init) => {
+        observedAuthorization = new Headers(init?.headers).get("Authorization");
+        return Response.json([]);
+      },
+    );
+    expect(String(observedAuthorization)).toBe("Basic redacted");
+    expect(probe).toMatchObject({
+      status: 200,
+      body: "[]",
+      bodyTruncated: false,
+      requestError: undefined,
+    });
+
+    let streamCancelled = false;
+    const oversizedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(agentBodyByteLimit + 1));
+      },
+      cancel() {
+        streamCancelled = true;
+      },
+    });
+    const oversizedProbe = await probeAgents(
+      4005,
+      "Basic redacted",
+      async () => new Response(oversizedBody, { status: 200 }),
+    );
+    expect(oversizedProbe.bodyTruncated).toBe(true);
+    expect(streamCancelled).toBe(true);
+  });
+
+  test("validates one exact DCP metadata receipt and rejects source mismatch", () => {
+    const metadataRecord = {
+      id: "opencode-dcp",
+      spec: expectedDcpSpec,
+      requested: "3.1.15",
+      version: "3.1.15",
+      source: "npm",
+      target:
+        "/private/var/folders/x/installation/node_modules/@tarquinen/opencode-dcp",
+      first_time: 100,
+    };
+    const receipt = parseDcpMetadataReceipt(
+      JSON.stringify({ "opencode-dcp": metadataRecord }),
+      100,
+    );
+    expect(receipt.spec).toBe(expectedDcpSpec);
+    expect(receipt.requested).toBe("3.1.15");
+    expect(receipt.version).toBe("3.1.15");
+    expect(receipt.source).toBe("npm");
+    expect(receipt.firstTime).toBe(100);
+    expect(() =>
+      parseDcpMetadataReceipt(
+        `${JSON.stringify(metadataRecord)}\n${JSON.stringify(metadataRecord)}`,
+      ),
+    ).toThrow("exactly one DCP record");
+    expect(() =>
+      parseDcpMetadataReceipt(JSON.stringify(metadataRecord), 101),
+    ).toThrow("record is stale");
+    for (const [changes, expectedCause] of [
+      [{ requested: "latest" }, "requested version must equal 3.1.15"],
+      [{ version: "3.1.16" }, "resolved version must equal 3.1.15"],
+      [{ source: "config" }, "source must equal npm"],
+      [
+        {
+          target:
+            "/cache/node_modules/@tarquinen/opencode-dcp-lookalike/node_modules-marker/@tarquinen/opencode-dcp-lookalike",
+        },
+        "canonical path ending in node_modules/@tarquinen/opencode-dcp",
+      ],
+      [{ requested: 3.1 }, "requested version must equal 3.1.15"],
+      [{ version: null }, "resolved version must equal 3.1.15"],
+      [{ target: 42 }, "target must be a string"],
+      [{ first_time: "100" }, "first_time must be a finite number"],
+    ] as const) {
+      expect(() =>
+        parseDcpMetadataReceipt(
+          JSON.stringify({ ...metadataRecord, ...changes }),
+        ),
+      ).toThrow(expectedCause);
+    }
+    expect(classifyTuiResolverFailure(true, undefined, false)).toBe("timeout");
+    expect(classifyTuiResolverFailure(false, 1, false)).toBe("early-exit");
+    expect(classifyTuiResolverFailure(false, undefined, false)).toBe(
+      "missing-metadata",
+    );
+    expect(classifyTuiResolverFailure(false, undefined, true)).toBeUndefined();
+  });
+
+  test("polls until fresh complete metadata while the direct child remains live", async () => {
+    const metadataRecord = JSON.stringify({
+      id: "opencode-dcp",
+      spec: expectedDcpSpec,
+      requested: "3.1.15",
+      version: "3.1.15",
+      source: "npm",
+      target: "/cache/node_modules/@tarquinen/opencode-dcp",
+      first_time: 100,
+    });
+    const poll = async (
+      reads: Array<string | undefined>,
+      exitCode: () => number | undefined = () => undefined,
+      timeout = 1_000,
+    ) => {
+      let now = 100;
+      return waitForFreshDcpMetadata(100, timeout, {
+        readMetadata: async () => reads.shift(),
+        childExitCode: exitCode,
+        now: () => now,
+        sleep: async (milliseconds) => {
+          now += milliseconds;
+        },
+      });
+    };
+
+    await expect(poll([undefined, "", metadataRecord])).resolves.toMatchObject({
+      spec: expectedDcpSpec,
+    });
+    await expect(
+      poll(['{"id":"opencode-', metadataRecord]),
+    ).resolves.toMatchObject({ spec: expectedDcpSpec });
+
+    let malformedExitChecks = 0;
+    await expect(
+      poll(["{malformed}\n"], () => (malformedExitChecks++ === 0 ? 9 : 9)),
+    ).rejects.toThrow("malformed JSON");
+    await expect(poll([metadataRecord], () => 7)).rejects.toThrow(
+      "exited with code 7 before metadata acceptance",
+    );
+    await expect(poll([], () => undefined, 200)).rejects.toThrow(
+      "timed out before metadata acceptance",
+    );
+  });
+
+  test("validates the global fixture and isolated merged-directory cardinality", async () => {
+    expect(() => validateGlobalTuiConflict('{"plugin":[]}')).toThrow(
+      "must contain only",
+    );
+    expect(() => validateGlobalTuiConflict("{changed")).toThrow(
+      "invalid JSON/JSONC",
+    );
+    expect(
+      requireExactlyOneMergedConfigDirectory([], "before-launch"),
+    ).toBeUndefined();
+    expect(() =>
+      requireExactlyOneMergedConfigDirectory([], "acceptance"),
+    ).toThrow("received 0");
+    expect(() =>
+      requireExactlyOneMergedConfigDirectory(["one", "two"], "acceptance"),
+    ).toThrow("received 2");
+    expect(requireExactlyOneMergedConfigDirectory(["one"], "acceptance")).toBe(
+      "one",
+    );
+
+    const sandbox = await mkdtemp(join(tmpdir(), "workcell-tui-fixture-"));
+    try {
+      await expect(
+        readGlobalTuiConflictImmediatelyBeforeLaunch(
+          join(sandbox, "missing.json"),
+        ),
+      ).rejects.toThrow("missing immediately before launch");
+      const changedFixture = join(sandbox, "tui.json");
+      await writeFile(changedFixture, '{"plugin":[]}');
+      await expect(
+        readGlobalTuiConflictImmediatelyBeforeLaunch(changedFixture),
+      ).rejects.toThrow("must contain only");
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  test("redacts credentials, tokens, repository paths, and temporary paths from diagnostics", () => {
+    const credentials = {
+      username: "generated-user",
+      password: "generated-password",
+    };
+    const encoded = Buffer.from(
+      `${credentials.username}:${credentials.password}`,
+    ).toString("base64");
+    const context = createSmokeRedactionContext(
+      "/tmp/private-smoke",
+      credentials,
+      {
+        NPM_TOKEN: "npm-secret",
+        npm_config_foo_authToken: "scoped-secret",
+        OPENCODE_AUTH_TOKEN: "config-secret",
+      },
+      ["/tmp/private-smoke-sibling"],
+    );
+    const concreteRepositoryFile = join(
+      repositoryRoot,
+      "scripts",
+      "smoke-install.ts",
+    );
+    const concreteCommandPath = join(
+      repositoryRoot,
+      "node_modules",
+      ".bin",
+      "ocx",
+    );
+    const diagnostic = redactSmokeDiagnostics(
+      `generated-user generated-password generated-user:generated-password Basic ${encoded} NPM_TOKEN=npm-secret //registry.example/:_authToken=scoped-secret OPENCODE_AUTH_TOKEN=config-secret /tmp/private-smoke/file /tmp/private-smoke-sibling/file ${concreteRepositoryFile} ${concreteCommandPath} verify`,
+      context,
+    );
+    for (const secret of [
+      credentials.username,
+      credentials.password,
+      encoded,
+      "npm-secret",
+      "scoped-secret",
+      "config-secret",
+    ])
+      expect(diagnostic).not.toContain(secret);
+    expect(diagnostic).not.toContain("/tmp/private-smoke");
+    expect(diagnostic).not.toContain(repositoryRoot);
+    expect(diagnostic).not.toContain(concreteCommandPath);
+    expect(diagnostic).toContain("<redacted>");
+    expect(diagnostic).toContain("<temporary-path>");
+    expect(diagnostic).toContain("<repository-path>/scripts/smoke-install.ts");
+    expect(diagnostic).toContain("<repository-binary-path>/ocx verify");
+    const bounded = boundSmokeDiagnostics("x".repeat(70_000));
+    expect(bounded.length).toBeLessThan(70_000);
+    expect(bounded).toContain("characters omitted");
+  });
+
+  test("cleans detached TUI process groups with bounded fallback and unconditional terminal close", async () => {
+    const signals: string[] = [];
+    let terminalClosed = false;
+    let alive = true;
+    await expect(
+      cleanupTuiProcess(
+        {
+          writeInterrupt: () => {
+            throw new Error("write failed");
+          },
+          closeTerminal: () => {
+            terminalClosed = true;
+          },
+          isGroupAlive: () => alive,
+          signalGroup: (signal) => {
+            signals.push(signal);
+            if (signal === "SIGKILL") alive = false;
+          },
+          exited: Promise.resolve(0),
+          sleep: async () => {},
+        },
+        1,
+      ),
+    ).rejects.toThrow("Ctrl-C write failed");
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(terminalClosed).toBe(true);
+
+    await expect(
+      cleanupTuiProcess(
+        {
+          writeInterrupt: () => {},
+          closeTerminal: () => {
+            throw new Error("close failed");
+          },
+          isGroupAlive: () => false,
+          signalGroup: () => {},
+          exited: Promise.resolve(0),
+          sleep: async () => {},
+        },
+        1,
+      ),
+    ).rejects.toThrow("terminal close failed");
   });
 
   test("refuses a stale built registry before launching Workcell", async () => {
@@ -2243,7 +2785,9 @@ describe("pinned automation", () => {
         successfulProbe,
         true,
         () => undefined,
+        verifiedAgentEvidence,
       ),
+      agentProbe: successfulProbe,
       exitCode: 0,
       stdout: "",
       stderr: "",
@@ -2254,6 +2798,7 @@ describe("pinned automation", () => {
         successfulProbe,
         true,
         () => 1,
+        verifiedAgentEvidence,
       ),
       exitCode: 1,
       stderr: "listen EADDRINUSE: address already in use 127.0.0.1:4101",
@@ -2299,11 +2844,22 @@ describe("pinned automation", () => {
       probe,
       true,
       () => 17,
+      verifiedAgentEvidence,
     );
     const liveAtAcceptance = establishToolAcceptanceAtLivenessBoundary(
       probe,
       true,
       () => undefined,
+      verifiedAgentEvidence,
+    );
+    const missingAgentEvidence = establishToolAcceptanceAtLivenessBoundary(
+      probe,
+      true,
+      () => undefined,
+      {
+        verified: false,
+        failureReason: "bounded Workcell fingerprint mismatch",
+      },
     );
 
     expect(exitedBeforeAcceptance.acceptedWhileChildLive).toBe(false);
@@ -2317,6 +2873,7 @@ describe("pinned automation", () => {
         reservePort: () => 4251,
         launchProbeAndCleanup: async () => ({
           probe,
+          agentProbe: probe,
           ...exitedBeforeAcceptance,
           exitCode: 17,
           stdout: "",
@@ -2326,10 +2883,41 @@ describe("pinned automation", () => {
     ).rejects.toThrow("Child exit code at acceptance: 17");
 
     expect(liveAtAcceptance.acceptedWhileChildLive).toBe(true);
+    expect(missingAgentEvidence.acceptedWhileChildLive).toBe(false);
+    expect(missingAgentEvidence.planFingerprintFailureReason).toBe(
+      "bounded Workcell fingerprint mismatch",
+    );
+    await expect(
+      assertInstalledTools(3, {}, "/unused", {
+        reservePort: () => 4253,
+        launchProbeAndCleanup: async () => ({
+          probe,
+          agentProbe: { ...probe, body: "FULL_AGENT_BODY_MUST_NOT_LEAK" },
+          ...missingAgentEvidence,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        }),
+      }),
+    ).rejects.toThrow("bounded Workcell fingerprint mismatch");
+    await expect(
+      assertInstalledTools(3, {}, "/unused", {
+        reservePort: () => 4254,
+        launchProbeAndCleanup: async () => ({
+          probe,
+          agentProbe: { ...probe, body: "FULL_AGENT_BODY_MUST_NOT_LEAK" },
+          ...missingAgentEvidence,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        }),
+      }),
+    ).rejects.not.toThrow("FULL_AGENT_BODY_MUST_NOT_LEAK");
     await assertInstalledTools(2, {}, "/unused", {
       reservePort: () => 4252,
       launchProbeAndCleanup: async () => ({
         probe,
+        agentProbe: probe,
         ...liveAtAcceptance,
         exitCode: 143,
         stdout: "",
@@ -2353,7 +2941,9 @@ describe("pinned automation", () => {
         probe,
         false,
         () => undefined,
+        verifiedAgentEvidence,
       ),
+      agentProbe: probe,
       exitCode: 0,
       stdout: "",
       stderr: "",
@@ -2388,7 +2978,9 @@ describe("pinned automation", () => {
         probe,
         true,
         () => undefined,
+        verifiedAgentEvidence,
       ),
+      agentProbe: probe,
       exitCode: 0,
       stdout: "",
       stderr: "",
@@ -2413,7 +3005,13 @@ describe("pinned automation", () => {
     };
     const unrelatedCollision: InstalledToolsLaunchAttempt = {
       probe,
-      ...establishToolAcceptanceAtLivenessBoundary(probe, false, () => 1),
+      ...establishToolAcceptanceAtLivenessBoundary(
+        probe,
+        false,
+        () => 1,
+        verifiedAgentEvidence,
+      ),
+      agentProbe: probe,
       exitCode: 1,
       stdout: "",
       stderr: "listen EADDRINUSE: address already in use 127.0.0.1:4402",
@@ -2442,7 +3040,12 @@ describe("pinned automation", () => {
     expect(stopped).toBe(true);
     expect(await Bun.file(sandbox).exists()).toBe(false);
     for (const workflow of [continuousIntegration, releaseWorkflow]) {
+      expect(workflow).toContain("npm install --global bun@1.4.1");
+      expect(workflow).toContain('test "$(bun --version)" = 1.4.1');
       expect(workflow).toContain("bun install --frozen-lockfile");
+      expect(workflow).toContain(
+        'test "$(./node_modules/.bin/opencode --version)" = 1.18.25',
+      );
       expect(workflow).toContain("bun run typecheck");
       expect(workflow).toContain("bun run build");
       expect(workflow).toContain("REGISTRY_DIST=dist bun run test");
