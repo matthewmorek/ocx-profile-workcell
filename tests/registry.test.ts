@@ -41,9 +41,19 @@ import {
 } from "../scripts/build-registry";
 import { decideReleaseAction } from "../scripts/release-policy";
 import {
+  assertBuiltRegistryVersion,
+  assertInstalledTools,
   cleanupSmokeSandbox,
+  establishToolAcceptanceAtLivenessBoundary,
+  httpBodyByteLimit,
+  parseToolIds,
+  probeToolIds,
+  probeToolIdsHandshake,
+  type InstalledToolsLaunchAttempt,
+  type ProbeFetch,
   profileLaunchArguments,
   profileLaunchCommand,
+  requiredToolIds,
   smokeEnvironment,
 } from "../scripts/smoke-install";
 
@@ -2050,12 +2060,28 @@ describe("pinned automation", () => {
 
   test("pins launch identities and isolates inherited launch overrides", () => {
     expect(profileLaunchCommand).toBe("ocx");
-    expect(profileLaunchArguments).toEqual([
+    expect(profileLaunchArguments(4096)).toEqual([
       "oc",
       "-p",
       "workcell",
       "--",
-      "--help",
+      "--print-logs",
+      "--log-level",
+      "DEBUG",
+      "serve",
+      "--hostname",
+      "127.0.0.1",
+      "--port",
+      "4096",
+    ]);
+    expect(requiredToolIds).toEqual([
+      "plan_save",
+      "plan_read",
+      "delegate",
+      "delegation_read",
+      "delegation_list",
+      "worktree_create",
+      "worktree_delete",
     ]);
     const environment = smokeEnvironment(
       { PATH: "/usr/bin:/bin", OPENCODE_CONFIG: "bad", OCX_PROFILE: "bad" },
@@ -2064,6 +2090,345 @@ describe("pinned automation", () => {
     expect(environment.HOME).toBe("/tmp/ocx-smoke/home");
     expect(environment.OPENCODE_CONFIG).toBeUndefined();
     expect(environment.OCX_PROFILE).toBeUndefined();
+  });
+
+  test("refuses a stale built registry before launching Workcell", async () => {
+    const registryDirectory = await mkdtemp(
+      join(tmpdir(), "workcell-stale-registry-"),
+    );
+    try {
+      await writeFile(
+        join(registryDirectory, "index.json"),
+        JSON.stringify({ version: "0.2.5" }),
+      );
+      await expect(
+        assertBuiltRegistryVersion(registryDirectory, "0.2.6"),
+      ).rejects.toThrow("Built registry is stale: source version is 0.2.6");
+    } finally {
+      await rm(registryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("requires OpenCode's WWW-Authenticate challenge before sending credentials", async () => {
+    let requestCount = 0;
+    const fetcher: ProbeFetch = async () => {
+      requestCount += 1;
+      return new Response("Unauthorized", { status: 401 });
+    };
+
+    const handshake = await probeToolIdsHandshake(
+      4001,
+      { username: "expected-user", password: "expected-password" },
+      fetcher,
+    );
+
+    expect(handshake.ownershipVerified).toBe(false);
+    expect(handshake.probe.wwwAuthenticate).toBeNull();
+    expect(requestCount).toBe(1);
+  });
+
+  test("rejects the wrong authentication scheme or Basic realm", async () => {
+    for (const challenge of [
+      'Bearer realm="Secure Area"',
+      'Basic realm="Other Area"',
+    ]) {
+      let requestCount = 0;
+      const fetcher: ProbeFetch = async () => {
+        requestCount += 1;
+        return new Response("Unauthorized", {
+          status: 401,
+          headers: { "WWW-Authenticate": challenge },
+        });
+      };
+
+      const handshake = await probeToolIdsHandshake(
+        4002,
+        { username: "expected-user", password: "expected-password" },
+        fetcher,
+      );
+
+      expect(handshake.ownershipVerified, challenge).toBe(false);
+      expect(requestCount, challenge).toBe(1);
+    }
+  });
+
+  test("accepts legal Basic challenge casing and whitespace only with the configured credentials", async () => {
+    const correctCredentials = {
+      username: "expected-user",
+      password: "expected-password",
+    };
+    const expectedAuthorization = `Basic ${Buffer.from(
+      `${correctCredentials.username}:${correctCredentials.password}`,
+    ).toString("base64")}`;
+
+    for (const challenge of [
+      'Basic realm="Secure Area"',
+      'bAsIc\tReAlM = "Secure Area"  ',
+    ]) {
+      const observedAuthorizations: Array<string | null> = [];
+      const fetcher: ProbeFetch = async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("Authorization");
+        observedAuthorizations.push(authorization);
+        if (!authorization) {
+          return new Response("Unauthorized", {
+            status: 401,
+            headers: { "WWW-Authenticate": challenge },
+          });
+        }
+        if (authorization !== expectedAuthorization) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        return Response.json(requiredToolIds);
+      };
+
+      const validHandshake = await probeToolIdsHandshake(
+        4003,
+        correctCredentials,
+        fetcher,
+      );
+      expect(validHandshake.ownershipVerified, challenge).toBe(true);
+      expect(parseToolIds(validHandshake.probe), challenge).toEqual([
+        ...requiredToolIds,
+      ]);
+      expect(observedAuthorizations, challenge).toEqual([
+        null,
+        expectedAuthorization,
+      ]);
+
+      const invalidHandshake = await probeToolIdsHandshake(
+        4003,
+        { ...correctCredentials, password: "wrong-password" },
+        fetcher,
+      );
+      expect(invalidHandshake.ownershipVerified, challenge).toBe(false);
+      expect(invalidHandshake.probe.status, challenge).toBe(403);
+    }
+  });
+
+  test("cancels oversized chunked tool responses before parsing the retained prefix", async () => {
+    const validJsonPrefix = JSON.stringify(requiredToolIds);
+    let streamCancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(validJsonPrefix));
+        controller.enqueue(new Uint8Array(httpBodyByteLimit));
+      },
+      cancel() {
+        streamCancelled = true;
+      },
+    });
+    const fetcher: ProbeFetch = async () => new Response(body, { status: 200 });
+
+    const probe = await probeToolIds(4004, "Basic redacted", fetcher);
+
+    expect(probe.body).toBe(validJsonPrefix);
+    expect(probe.bodyTruncated).toBe(true);
+    expect(streamCancelled).toBe(true);
+    expect(parseToolIds(probe)).toEqual([]);
+  });
+
+  test("retries an exited EADDRINUSE launch instead of accepting an unrelated responder", async () => {
+    const ports = [4101, 4102, 4103];
+    const attemptedPorts: number[] = [];
+    const successfulProbe = {
+      status: 200,
+      body: JSON.stringify(requiredToolIds),
+      bodyTruncated: false,
+      wwwAuthenticate: null,
+      requestError: undefined,
+    };
+    const successfulAttempt: InstalledToolsLaunchAttempt = {
+      probe: successfulProbe,
+      ...establishToolAcceptanceAtLivenessBoundary(
+        successfulProbe,
+        true,
+        () => undefined,
+      ),
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    };
+    const collisionAttempt: InstalledToolsLaunchAttempt = {
+      ...successfulAttempt,
+      ...establishToolAcceptanceAtLivenessBoundary(
+        successfulProbe,
+        true,
+        () => 1,
+      ),
+      exitCode: 1,
+      stderr: "listen EADDRINUSE: address already in use 127.0.0.1:4101",
+    };
+    const attempts = [collisionAttempt, successfulAttempt];
+
+    await assertInstalledTools(1, {}, "/unused", {
+      reservePort: () => ports.shift()!,
+      launchProbeAndCleanup: async (port) => {
+        attemptedPorts.push(port);
+        return attempts.shift()!;
+      },
+    });
+
+    expect(attemptedPorts).toEqual([4101, 4102]);
+    expect(attempts).toHaveLength(0);
+
+    let boundedAttemptCount = 0;
+    await expect(
+      assertInstalledTools(1, {}, "/unused", {
+        reservePort: () => 4200 + boundedAttemptCount,
+        launchProbeAndCleanup: async (port) => {
+          boundedAttemptCount += 1;
+          return {
+            ...collisionAttempt,
+            stderr: `listen EADDRINUSE: address already in use 127.0.0.1:${port}`,
+          };
+        },
+      }),
+    ).rejects.toThrow("Launch attempt: 3 of 3");
+    expect(boundedAttemptCount).toBe(3);
+  });
+
+  test("establishes tool acceptance atomically before intentional cleanup", async () => {
+    const probe = {
+      status: 200,
+      body: JSON.stringify(requiredToolIds),
+      bodyTruncated: false,
+      wwwAuthenticate: null,
+      requestError: undefined,
+    };
+    const exitedBeforeAcceptance = establishToolAcceptanceAtLivenessBoundary(
+      probe,
+      true,
+      () => 17,
+    );
+    const liveAtAcceptance = establishToolAcceptanceAtLivenessBoundary(
+      probe,
+      true,
+      () => undefined,
+    );
+
+    expect(exitedBeforeAcceptance.acceptedWhileChildLive).toBe(false);
+    expect(exitedBeforeAcceptance.childExitCodeAtAcceptance).toBe(17);
+    expect(exitedBeforeAcceptance.toolIds).toEqual([...requiredToolIds]);
+    expect(exitedBeforeAcceptance.missingToolIds).toEqual([]);
+    expect(Object.isFrozen(exitedBeforeAcceptance)).toBe(true);
+    expect(Object.isFrozen(exitedBeforeAcceptance.toolIds)).toBe(true);
+    await expect(
+      assertInstalledTools(1, {}, "/unused", {
+        reservePort: () => 4251,
+        launchProbeAndCleanup: async () => ({
+          probe,
+          ...exitedBeforeAcceptance,
+          exitCode: 17,
+          stdout: "",
+          stderr: "",
+        }),
+      }),
+    ).rejects.toThrow("Child exit code at acceptance: 17");
+
+    expect(liveAtAcceptance.acceptedWhileChildLive).toBe(true);
+    await assertInstalledTools(2, {}, "/unused", {
+      reservePort: () => 4252,
+      launchProbeAndCleanup: async () => ({
+        probe,
+        ...liveAtAcceptance,
+        exitCode: 143,
+        stdout: "",
+        stderr: "",
+      }),
+    });
+  });
+
+  test("rejects valid tool IDs when endpoint ownership was not proven", async () => {
+    let attemptCount = 0;
+    const probe = {
+      status: 200,
+      body: JSON.stringify(requiredToolIds),
+      bodyTruncated: false,
+      wwwAuthenticate: null,
+      requestError: undefined,
+    };
+    const unownedAttempt: InstalledToolsLaunchAttempt = {
+      probe,
+      ...establishToolAcceptanceAtLivenessBoundary(
+        probe,
+        false,
+        () => undefined,
+      ),
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    };
+
+    await expect(
+      assertInstalledTools(1, {}, "/unused", {
+        reservePort: () => 4301,
+        launchProbeAndCleanup: async () => {
+          attemptCount += 1;
+          return unownedAttempt;
+        },
+      }),
+    ).rejects.toThrow("Endpoint ownership verified: false");
+    expect(attemptCount).toBe(1);
+  });
+
+  test("rejects an owned endpoint missing a required tool ID", async () => {
+    const missingToolId = "worktree_delete";
+    const probe = {
+      status: 200,
+      body: JSON.stringify(
+        requiredToolIds.filter((toolId) => toolId !== missingToolId),
+      ),
+      bodyTruncated: false,
+      wwwAuthenticate: null,
+      requestError: undefined,
+    };
+    const incompleteAttempt: InstalledToolsLaunchAttempt = {
+      probe,
+      ...establishToolAcceptanceAtLivenessBoundary(
+        probe,
+        true,
+        () => undefined,
+      ),
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    };
+
+    await expect(
+      assertInstalledTools(1, {}, "/unused", {
+        reservePort: () => 4351,
+        launchProbeAndCleanup: async () => incompleteAttempt,
+      }),
+    ).rejects.toThrow(`Missing required tool IDs: ${missingToolId}`);
+  });
+
+  test("does not retry EADDRINUSE for a different listener port", async () => {
+    let attemptCount = 0;
+    const probe = {
+      status: undefined,
+      body: "",
+      bodyTruncated: false,
+      wwwAuthenticate: null,
+      requestError: "Server did not accept a connection.",
+    };
+    const unrelatedCollision: InstalledToolsLaunchAttempt = {
+      probe,
+      ...establishToolAcceptanceAtLivenessBoundary(probe, false, () => 1),
+      exitCode: 1,
+      stdout: "",
+      stderr: "listen EADDRINUSE: address already in use 127.0.0.1:4402",
+    };
+
+    await expect(
+      assertInstalledTools(1, {}, "/unused", {
+        reservePort: () => 4401,
+        launchProbeAndCleanup: async () => {
+          attemptCount += 1;
+          return unrelatedCollision;
+        },
+      }),
+    ).rejects.toThrow(unrelatedCollision.stderr);
+    expect(attemptCount).toBe(1);
   });
 
   test("cleans a smoke sandbox and runs all release gates with data-driven live comparison", async () => {
