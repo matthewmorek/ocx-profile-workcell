@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -41,47 +42,20 @@ import {
 } from "../scripts/build-registry";
 import { decideReleaseAction } from "../scripts/release-policy";
 import {
-  agentBodyByteLimit,
   assertBuiltRegistryVersion,
-  assertInstalledTools,
-  assertInstalledProfileContracts,
+  assertInstalledLayout,
+  assertRemovedLayout,
   boundSmokeDiagnostics,
-  classifyTuiResolverFailure,
-  cleanupTuiProcess,
   cleanupSmokeSandbox,
   createSmokeRedactionContext,
-  effectivePermissionAction,
-  establishToolAcceptanceAtLivenessBoundary,
-  expectedDcpSpec,
-  globalDcpConflictSpec,
-  httpBodyByteLimit,
+  expectedDirectNpmDependencies,
   isInheritedSmokeVariable,
   npmPolicyContent,
-  parseDcpMetadataReceipt,
-  parseToolIds,
-  parseWorkcellPlanFingerprint,
-  probeAgents,
-  probeToolIds,
-  probeToolIdsHandshake,
-  type InstalledToolsLaunchAttempt,
-  type ProbeFetch,
-  profileLaunchArguments,
-  profileLaunchCommand,
-  requiredToolIds,
-  readGlobalTuiConflictImmediatelyBeforeLaunch,
   redactSmokeDiagnostics,
-  requireExactlyOneMergedConfigDirectory,
-  seedGlobalTuiConflict,
+  runSmokeCommand,
   smokeEnvironment,
-  validateGlobalTuiConflict,
-  waitForFreshDcpMetadata,
   writeSandboxNpmPolicy,
 } from "../scripts/smoke-install";
-
-const verifiedAgentEvidence = {
-  verified: true,
-  failureReason: undefined,
-} as const;
 
 const repositoryRoot = join(import.meta.dir, "..");
 const registry = parse(
@@ -837,7 +811,7 @@ describe("self-contained Workcell registry", () => {
     ).toBe("3.1.15");
     expect(profileTuiConfig).toEqual({
       $schema: "https://opencode.ai/tui.json",
-      plugin: [expectedDcpSpec],
+      plugin: ["@tarquinen/opencode-dcp@3.1.15"],
     });
     expect(
       runtimePlugins.filter(({ name }) => name === "@tarquinen/opencode-dcp"),
@@ -2159,481 +2133,374 @@ describe("pinned automation", () => {
     });
   });
 
-  test("pins launch identities and isolates inherited launch overrides", () => {
-    expect(profileLaunchCommand).toBe("ocx");
-    expect(profileLaunchArguments(4096)).toEqual([
-      "oc",
-      "-p",
-      "workcell",
-      "--",
-      "--print-logs",
-      "--log-level",
-      "DEBUG",
-      "serve",
-      "--hostname",
-      "127.0.0.1",
-      "--port",
-      "4096",
-    ]);
-    expect(requiredToolIds).toEqual([
-      "plan_save",
-      "plan_read",
-      "delegate",
-      "delegation_read",
-      "delegation_list",
-      "worktree_create",
-      "worktree_delete",
-    ]);
-    const environment = smokeEnvironment(
-      {
-        PATH: "/usr/bin:/bin",
-        OPENCODE_CONFIG: "bad",
-        OCX_PROFILE: "bad",
-        npm_config_registry: "bad",
-        NpM_ToKeN: "secret",
-        Bun_Auth_Token: "secret",
-      },
-      "/tmp/ocx-smoke",
-    );
-    expect(environment.HOME).toBe("/tmp/ocx-smoke/home");
-    expect(environment.OPENCODE_CONFIG).toBeUndefined();
-    expect(environment.OCX_PROFILE).toBeUndefined();
-    expect(environment.npm_config_registry).toBeUndefined();
-    expect(environment.NpM_ToKeN).toBeUndefined();
-    expect(environment.Bun_Auth_Token).toBeUndefined();
-    expect(environment.NPM_CONFIG_USERCONFIG).toBe(
-      "/tmp/ocx-smoke/home/.npmrc",
-    );
-    for (const inheritedName of [
-      "NPM_CONFIG_REGISTRY",
-      "npm_config_userconfig",
-      "NPM_TOKEN",
-      "npm_auth_token",
-      "node_auth_token",
-      "BUN_AUTH_TOKEN",
-      "bun_token",
-      "bun_config_token",
-      "bunfig_token",
-      "opencode_config",
-      "ocx_profile",
+  const receiptComponentNames = expectedComponents.filter(
+    (name) => name !== "workcell",
+  );
+
+  async function createInstalledLayout(root: string): Promise<void> {
+    await mkdir(join(root, ".ocx"), { recursive: true });
+    for (const target of [
+      "ocx.jsonc",
+      "opencode.jsonc",
+      "tui.jsonc",
+      "AGENTS.md",
     ])
-      expect(isInheritedSmokeVariable(inheritedName), inheritedName).toBe(true);
-    expect(isInheritedSmokeVariable("PATH")).toBe(false);
+      await writeFile(join(root, target), "{}\n");
+    const installed = Object.fromEntries(
+      receiptComponentNames.map((name, index) => [
+        `component-${index}`,
+        { registryName: "matthewmorek", name },
+      ]),
+    );
+    await writeFile(
+      join(root, ".ocx", "receipt.jsonc"),
+      JSON.stringify({ version: 1, installed }),
+    );
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({
+        dependencies: expectedDirectNpmDependencies,
+        devDependencies: {},
+        optionalDependencies: {},
+        peerDependencies: {},
+      }),
+    );
+    for (const [name, version] of Object.entries(
+      expectedDirectNpmDependencies,
+    )) {
+      const packageDirectory = join(root, "node_modules", name);
+      await mkdir(packageDirectory, { recursive: true });
+      await writeFile(
+        join(packageDirectory, "package.json"),
+        JSON.stringify({ name, version }),
+      );
+    }
+  }
+
+  async function withInstalledLayout(
+    action: (root: string) => Promise<void>,
+  ): Promise<void> {
+    const root = await mkdtemp(join(tmpdir(), "workcell-installed-layout-"));
+    try {
+      await createInstalledLayout(root);
+      await action(root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  test("accepts the exact installed profile contract", async () => {
+    expect(receiptComponentNames).toHaveLength(23);
+    expect(Object.keys(expectedDirectNpmDependencies)).toHaveLength(6);
+    await withInstalledLayout(async (root) => {
+      await expect(assertInstalledLayout(root)).resolves.toBeUndefined();
+    });
   });
 
-  test("creates an exact sandbox npm policy and lower-precedence global DCP conflict", async () => {
+  test.each([
+    ["missing", async (root: string) => rm(join(root, "tui.jsonc"))],
+    [
+      "non-regular",
+      async (root: string) => {
+        await rm(join(root, "tui.jsonc"));
+        await mkdir(join(root, "tui.jsonc"));
+      },
+    ],
+  ])("rejects a %s profile target", async (_case, mutate) => {
+    await withInstalledLayout(async (root) => {
+      await mutate(root);
+      await expect(assertInstalledLayout(root)).rejects.toThrow(
+        "profile target tui.jsonc must be a regular file",
+      );
+    });
+  });
+
+  test.each([
+    [
+      "malformed receipt JSONC",
+      async (root: string) =>
+        writeFile(join(root, ".ocx", "receipt.jsonc"), "{ malformed"),
+      "invalid JSON/JSONC",
+    ],
+    [
+      "missing receipt identity",
+      async (root: string) => {
+        const path = join(root, ".ocx", "receipt.jsonc");
+        const receipt = JSON.parse(await readFile(path, "utf8"));
+        delete receipt.installed["component-22"];
+        await writeFile(path, JSON.stringify(receipt));
+      },
+      "exactly 23 entries",
+    ],
+    [
+      "duplicate receipt identity",
+      async (root: string) => {
+        const path = join(root, ".ocx", "receipt.jsonc");
+        const receipt = JSON.parse(await readFile(path, "utf8"));
+        receipt.installed["component-22"] = receipt.installed["component-0"];
+        await writeFile(path, JSON.stringify(receipt));
+      },
+      "duplicates identity",
+    ],
+    [
+      "unexpected receipt identity",
+      async (root: string) => {
+        const path = join(root, ".ocx", "receipt.jsonc");
+        const receipt = JSON.parse(await readFile(path, "utf8"));
+        receipt.installed["component-22"].name = "workcell-unreviewed";
+        await writeFile(path, JSON.stringify(receipt));
+      },
+      "component set is incorrect",
+    ],
+    [
+      "wrong receipt registry",
+      async (root: string) => {
+        const path = join(root, ".ocx", "receipt.jsonc");
+        const receipt = JSON.parse(await readFile(path, "utf8"));
+        receipt.installed["component-0"].registryName = "other";
+        await writeFile(path, JSON.stringify(receipt));
+      },
+      "expected matthewmorek",
+    ],
+    [
+      "malformed root manifest",
+      async (root: string) => writeFile(join(root, "package.json"), "["),
+      "invalid JSON/JSONC",
+    ],
+    [
+      "missing direct dependency",
+      async (root: string) => {
+        const dependencies = { ...expectedDirectNpmDependencies } as Record<
+          string,
+          string
+        >;
+        delete dependencies.zod;
+        await writeFile(
+          join(root, "package.json"),
+          JSON.stringify({ dependencies }),
+        );
+      },
+      "missing: zod",
+    ],
+    [
+      "unexpected direct dependency",
+      async (root: string) =>
+        writeFile(
+          join(root, "package.json"),
+          JSON.stringify({
+            dependencies: {
+              ...expectedDirectNpmDependencies,
+              unexpected: "1.0.0",
+            },
+          }),
+        ),
+      "unexpected: unexpected",
+    ],
+    [
+      "root direct dependency version mismatch",
+      async (root: string) =>
+        writeFile(
+          join(root, "package.json"),
+          JSON.stringify({
+            dependencies: {
+              ...expectedDirectNpmDependencies,
+              zod: "4.3.4",
+            },
+          }),
+        ),
+      "expected 4.3.5",
+    ],
+    [
+      "missing direct package manifest",
+      async (root: string) =>
+        rm(join(root, "node_modules", "zod", "package.json")),
+      "direct package zod manifest must be a regular file",
+    ],
+    [
+      "malformed direct package manifest",
+      async (root: string) =>
+        writeFile(join(root, "node_modules", "zod", "package.json"), "{"),
+      "invalid JSON/JSONC",
+    ],
+    [
+      "installed direct package version mismatch",
+      async (root: string) =>
+        writeFile(
+          join(root, "node_modules", "zod", "package.json"),
+          JSON.stringify({ name: "zod", version: "4.3.4" }),
+        ),
+      "expected 4.3.5",
+    ],
+  ])("rejects %s", async (_case, mutate, diagnostic) => {
+    await withInstalledLayout(async (root) => {
+      await mutate(root);
+      await expect(assertInstalledLayout(root)).rejects.toThrow(diagnostic);
+    });
+  });
+
+  test.each([
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+  ] as const)("rejects non-empty %s", async (section) => {
+    await withInstalledLayout(async (root) => {
+      const manifestPath = join(root, "package.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest[section] = { unexpected: "1.0.0" };
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      await expect(assertInstalledLayout(root)).rejects.toThrow(
+        `${section} must be empty; received: unexpected`,
+      );
+    });
+  });
+
+  test.each([
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+  ] as const)("rejects malformed %s", async (section) => {
+    await withInstalledLayout(async (root) => {
+      const manifestPath = join(root, "package.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest[section] = [];
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      await expect(assertInstalledLayout(root)).rejects.toThrow(
+        `${section} must be an object`,
+      );
+    });
+  });
+
+  test.each(["directory", "symlink", "file"])(
+    "rejects a surviving Workcell %s",
+    async (kind) => {
+      const root = await mkdtemp(join(tmpdir(), "workcell-removal-"));
+      const workcell = join(root, "workcell");
+      const defaultProfile = join(root, "default");
+      try {
+        await mkdir(defaultProfile);
+        if (kind === "directory") await mkdir(workcell);
+        if (kind === "file") await writeFile(workcell, "survived");
+        if (kind === "symlink") await symlink(defaultProfile, workcell);
+        await expect(
+          assertRemovedLayout(workcell, defaultProfile),
+        ).rejects.toThrow("Workcell profile root still exists");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each(["missing", "file", "symlink"])(
+    "rejects a %s default profile after Workcell removal",
+    async (kind) => {
+      const root = await mkdtemp(join(tmpdir(), "workcell-removal-"));
+      const defaultProfile = join(root, "default");
+      try {
+        if (kind === "file") await writeFile(defaultProfile, "not a directory");
+        if (kind === "symlink") {
+          await mkdir(join(root, "target"));
+          await symlink(join(root, "target"), defaultProfile);
+        }
+        await expect(
+          assertRemovedLayout(join(root, "workcell"), defaultProfile),
+        ).rejects.toThrow("default profile must remain a directory");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("accepts Workcell ENOENT while retaining the default directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "workcell-removal-"));
+    try {
+      await mkdir(join(root, "default"));
+      await expect(
+        assertRemovedLayout(join(root, "workcell"), join(root, "default")),
+      ).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("isolates inherited launch overrides and writes the exact npm policy", async () => {
     const sandbox = await mkdtemp(join(tmpdir(), "workcell-smoke-policy-"));
     try {
-      const policyPath = await writeSandboxNpmPolicy(sandbox);
-      const globalTuiPath = await seedGlobalTuiConflict(sandbox);
-      expect(await readFile(policyPath, "utf8")).toBe(npmPolicyContent);
-      expect((await readFile(policyPath, "utf8")).split("\n")).toEqual([
-        "min-release-age=7",
-        "engine-strict=false",
-        "",
-      ]);
-      expect(JSON.parse(await readFile(globalTuiPath, "utf8"))).toEqual({
-        plugin: [globalDcpConflictSpec],
-      });
-    } finally {
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
-
-  test("parses the installed profile and deduplicated runtime API manifest", async () => {
-    const sandbox = await mkdtemp(
-      join(tmpdir(), "workcell-installed-profile-"),
-    );
-    try {
-      await writeFile(
-        join(sandbox, "tui.jsonc"),
-        `{ "plugin": ["${expectedDcpSpec}"] }`,
-      );
-      await writeFile(
-        join(sandbox, "package.json"),
-        JSON.stringify({ dependencies: { "@opencode-ai/plugin": "1.18.25" } }),
-      );
-      await expect(
-        assertInstalledProfileContracts(sandbox),
-      ).resolves.toBeUndefined();
-      await writeFile(
-        join(sandbox, "package.json"),
-        JSON.stringify({
-          dependencies: {
-            "@opencode-ai/plugin": "1.18.25",
-            "@opencode-ai/sdk": "1.18.25",
-          },
-        }),
-      );
-      await expect(assertInstalledProfileContracts(sandbox)).rejects.toThrow(
-        "must not declare @opencode-ai/sdk",
-      );
-    } finally {
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
-
-  test("evaluates last-matching permission rules and selects the Workcell plan fingerprint", () => {
-    const permission = [
-      { permission: "delegate", pattern: "*", action: "deny" },
-      { permission: "delegate", pattern: "*", action: "allow" },
-      { permission: "delegation_read", pattern: "*", action: "allow" },
-      { permission: "delegation_list", pattern: "*", action: "allow" },
-      { permission: "plan_save", pattern: "*", action: "allow" },
-      { permission: "plan_read", pattern: "*", action: "allow" },
-      { permission: "task", pattern: "*", action: "deny" },
-    ] as const;
-    expect(effectivePermissionAction(permission, "delegate")).toBe("allow");
-    expect(
-      effectivePermissionAction(
-        [
-          { permission: "delegation_*", pattern: "*", action: "allow" },
-          { permission: "delegation_read", pattern: "*", action: "deny" },
-        ],
-        "delegation_read",
-      ),
-    ).toBe("deny");
-    expect(
-      effectivePermissionAction(
-        [
-          { permission: "delegate", pattern: "child-*", action: "allow" },
-          { permission: "*", pattern: "child-secret", action: "deny" },
-        ],
-        "delegate",
-        "child-secret",
-      ),
-    ).toBe("deny");
-    expect(
-      effectivePermissionAction(
-        [
-          { permission: "*", pattern: "*", action: "allow" },
-          { permission: "deleg*", pattern: "child-*", action: "deny" },
-        ],
-        "delegate",
-        "child-coder",
-      ),
-    ).toBe("deny");
-    const body = JSON.stringify([
-      {
-        name: "plan",
-        mode: "primary",
-        model: { providerID: "openai", modelID: "gpt-5.6-sol" },
-        description:
-          "Designs implementation-ready plans using delegated repository and external research.",
-        permission,
-      },
-    ]);
-    expect(parseWorkcellPlanFingerprint(body)).toMatchObject({
-      name: "plan",
-      permissions: { delegate: "allow", task: "deny" },
-    });
-
-    const shadowed = JSON.parse(body);
-    shadowed[0].permission.push({
-      permission: "delegate",
-      pattern: "*",
-      action: "deny",
-    });
-    expect(() =>
-      parseWorkcellPlanFingerprint(JSON.stringify(shadowed)),
-    ).toThrow("delegate resolved to deny; expected allow");
-
-    for (const [field, value, expectedCause] of [
-      ["mode", "subagent", "Workcell plan mode mismatch"],
-      [
-        "model",
-        { providerID: "anthropic", modelID: "claude" },
-        "Workcell plan provider/model mismatch",
-      ],
-      [
-        "description",
-        "Generic plan agent",
-        "Workcell plan description mismatch",
-      ],
-    ] as const) {
-      const mismatched = JSON.parse(body);
-      mismatched[0][field] = value;
-      expect(() =>
-        parseWorkcellPlanFingerprint(JSON.stringify(mismatched)),
-      ).toThrow(expectedCause);
-    }
-  });
-
-  test("bounds and authenticates the separate agent probe", async () => {
-    let observedAuthorization: string | null = null;
-    const probe = await probeAgents(
-      4005,
-      "Basic redacted",
-      async (_input, init) => {
-        observedAuthorization = new Headers(init?.headers).get("Authorization");
-        return Response.json([]);
-      },
-    );
-    expect(String(observedAuthorization)).toBe("Basic redacted");
-    expect(probe).toMatchObject({
-      status: 200,
-      body: "[]",
-      bodyTruncated: false,
-      requestError: undefined,
-    });
-
-    let streamCancelled = false;
-    const oversizedBody = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array(agentBodyByteLimit + 1));
-      },
-      cancel() {
-        streamCancelled = true;
-      },
-    });
-    const oversizedProbe = await probeAgents(
-      4005,
-      "Basic redacted",
-      async () => new Response(oversizedBody, { status: 200 }),
-    );
-    expect(oversizedProbe.bodyTruncated).toBe(true);
-    expect(streamCancelled).toBe(true);
-  });
-
-  test("validates one exact DCP metadata receipt and rejects source mismatch", () => {
-    const metadataRecord = {
-      id: "opencode-dcp",
-      spec: expectedDcpSpec,
-      requested: "3.1.15",
-      version: "3.1.15",
-      source: "npm",
-      target:
-        "/private/var/folders/x/installation/node_modules/@tarquinen/opencode-dcp",
-      first_time: 100,
-    };
-    const receipt = parseDcpMetadataReceipt(
-      JSON.stringify({ "opencode-dcp": metadataRecord }),
-      100,
-    );
-    expect(receipt.spec).toBe(expectedDcpSpec);
-    expect(receipt.requested).toBe("3.1.15");
-    expect(receipt.version).toBe("3.1.15");
-    expect(receipt.source).toBe("npm");
-    expect(receipt.firstTime).toBe(100);
-    expect(() =>
-      parseDcpMetadataReceipt(
-        `${JSON.stringify(metadataRecord)}\n${JSON.stringify(metadataRecord)}`,
-      ),
-    ).toThrow("exactly one DCP record");
-    expect(() =>
-      parseDcpMetadataReceipt(JSON.stringify(metadataRecord), 101),
-    ).toThrow("record is stale");
-    for (const [changes, expectedCause] of [
-      [{ requested: "latest" }, "requested version must equal 3.1.15"],
-      [{ version: "3.1.16" }, "resolved version must equal 3.1.15"],
-      [{ source: "config" }, "source must equal npm"],
-      [
+      const environment = smokeEnvironment(
         {
-          target:
-            "/cache/node_modules/@tarquinen/opencode-dcp-lookalike/node_modules-marker/@tarquinen/opencode-dcp-lookalike",
+          PATH: "/usr/bin:/bin",
+          OPENCODE_CONFIG: "bad",
+          OCX_PROFILE: "bad",
+          npm_config_registry: "bad",
+          NPM_TOKEN: "secret",
         },
-        "canonical path ending in node_modules/@tarquinen/opencode-dcp",
-      ],
-      [{ requested: 3.1 }, "requested version must equal 3.1.15"],
-      [{ version: null }, "resolved version must equal 3.1.15"],
-      [{ target: 42 }, "target must be a string"],
-      [{ first_time: "100" }, "first_time must be a finite number"],
-    ] as const) {
-      expect(() =>
-        parseDcpMetadataReceipt(
-          JSON.stringify({ ...metadataRecord, ...changes }),
-        ),
-      ).toThrow(expectedCause);
-    }
-    expect(classifyTuiResolverFailure(true, undefined, false)).toBe("timeout");
-    expect(classifyTuiResolverFailure(false, 1, false)).toBe("early-exit");
-    expect(classifyTuiResolverFailure(false, undefined, false)).toBe(
-      "missing-metadata",
-    );
-    expect(classifyTuiResolverFailure(false, undefined, true)).toBeUndefined();
-  });
-
-  test("polls until fresh complete metadata while the direct child remains live", async () => {
-    const metadataRecord = JSON.stringify({
-      id: "opencode-dcp",
-      spec: expectedDcpSpec,
-      requested: "3.1.15",
-      version: "3.1.15",
-      source: "npm",
-      target: "/cache/node_modules/@tarquinen/opencode-dcp",
-      first_time: 100,
-    });
-    const poll = async (
-      reads: Array<string | undefined>,
-      exitCode: () => number | undefined = () => undefined,
-      timeout = 1_000,
-    ) => {
-      let now = 100;
-      return waitForFreshDcpMetadata(100, timeout, {
-        readMetadata: async () => reads.shift(),
-        childExitCode: exitCode,
-        now: () => now,
-        sleep: async (milliseconds) => {
-          now += milliseconds;
-        },
-      });
-    };
-
-    await expect(poll([undefined, "", metadataRecord])).resolves.toMatchObject({
-      spec: expectedDcpSpec,
-    });
-    await expect(
-      poll(['{"id":"opencode-', metadataRecord]),
-    ).resolves.toMatchObject({ spec: expectedDcpSpec });
-
-    let malformedExitChecks = 0;
-    await expect(
-      poll(["{malformed}\n"], () => (malformedExitChecks++ === 0 ? 9 : 9)),
-    ).rejects.toThrow("malformed JSON");
-    await expect(poll([metadataRecord], () => 7)).rejects.toThrow(
-      "exited with code 7 before metadata acceptance",
-    );
-    await expect(poll([], () => undefined, 200)).rejects.toThrow(
-      "timed out before metadata acceptance",
-    );
-  });
-
-  test("validates the global fixture and isolated merged-directory cardinality", async () => {
-    expect(() => validateGlobalTuiConflict('{"plugin":[]}')).toThrow(
-      "must contain only",
-    );
-    expect(() => validateGlobalTuiConflict("{changed")).toThrow(
-      "invalid JSON/JSONC",
-    );
-    expect(
-      requireExactlyOneMergedConfigDirectory([], "before-launch"),
-    ).toBeUndefined();
-    expect(() =>
-      requireExactlyOneMergedConfigDirectory([], "acceptance"),
-    ).toThrow("received 0");
-    expect(() =>
-      requireExactlyOneMergedConfigDirectory(["one", "two"], "acceptance"),
-    ).toThrow("received 2");
-    expect(requireExactlyOneMergedConfigDirectory(["one"], "acceptance")).toBe(
-      "one",
-    );
-
-    const sandbox = await mkdtemp(join(tmpdir(), "workcell-tui-fixture-"));
-    try {
-      await expect(
-        readGlobalTuiConflictImmediatelyBeforeLaunch(
-          join(sandbox, "missing.json"),
-        ),
-      ).rejects.toThrow("missing immediately before launch");
-      const changedFixture = join(sandbox, "tui.json");
-      await writeFile(changedFixture, '{"plugin":[]}');
-      await expect(
-        readGlobalTuiConflictImmediatelyBeforeLaunch(changedFixture),
-      ).rejects.toThrow("must contain only");
+        sandbox,
+      );
+      expect(environment.OPENCODE_CONFIG).toBeUndefined();
+      expect(environment.OCX_PROFILE).toBeUndefined();
+      expect(environment.npm_config_registry).toBeUndefined();
+      expect(environment.NPM_TOKEN).toBeUndefined();
+      expect(environment.HOME).toBe(join(sandbox, "home"));
+      expect(environment.TMPDIR).toBe(join(sandbox, "tmp"));
+      for (const name of [
+        "NPM_CONFIG_REGISTRY",
+        "npm_config_userconfig",
+        "NODE_AUTH_TOKEN",
+        "BUN_AUTH_TOKEN",
+        "opencode_config",
+        "ocx_profile",
+      ])
+        expect(isInheritedSmokeVariable(name), name).toBe(true);
+      const policyPath = await writeSandboxNpmPolicy(sandbox);
+      expect(policyPath).toBe(environment.NPM_CONFIG_USERCONFIG);
+      expect(await readFile(policyPath, "utf8")).toBe(npmPolicyContent);
     } finally {
       await rm(sandbox, { recursive: true, force: true });
     }
   });
 
-  test("redacts credentials, tokens, repository paths, and temporary paths from diagnostics", () => {
-    const credentials = {
-      username: "generated-user",
-      password: "generated-password",
-    };
-    const encoded = Buffer.from(
-      `${credentials.username}:${credentials.password}`,
-    ).toString("base64");
+  test("redacts and bounds smoke diagnostics", () => {
     const context = createSmokeRedactionContext(
       "/tmp/private-smoke",
-      credentials,
-      {
-        NPM_TOKEN: "npm-secret",
-        npm_config_foo_authToken: "scoped-secret",
-        OPENCODE_AUTH_TOKEN: "config-secret",
-      },
+      { NPM_TOKEN: "npm-secret" },
       ["/tmp/private-smoke-sibling"],
     );
-    const concreteRepositoryFile = join(
-      repositoryRoot,
-      "scripts",
-      "smoke-install.ts",
-    );
-    const concreteCommandPath = join(
-      repositoryRoot,
-      "node_modules",
-      ".bin",
-      "ocx",
-    );
     const diagnostic = redactSmokeDiagnostics(
-      `generated-user generated-password generated-user:generated-password Basic ${encoded} NPM_TOKEN=npm-secret //registry.example/:_authToken=scoped-secret OPENCODE_AUTH_TOKEN=config-secret /tmp/private-smoke/file /tmp/private-smoke-sibling/file ${concreteRepositoryFile} ${concreteCommandPath} verify`,
+      `NPM_TOKEN=npm-secret /tmp/private-smoke/file /tmp/private-smoke-sibling/file ${join(repositoryRoot, "scripts", "smoke-install.ts")} ${join(repositoryRoot, "node_modules", ".bin", "ocx")} verify`,
       context,
     );
-    for (const secret of [
-      credentials.username,
-      credentials.password,
-      encoded,
-      "npm-secret",
-      "scoped-secret",
-      "config-secret",
-    ])
-      expect(diagnostic).not.toContain(secret);
+    expect(diagnostic).not.toContain("npm-secret");
     expect(diagnostic).not.toContain("/tmp/private-smoke");
     expect(diagnostic).not.toContain(repositoryRoot);
-    expect(diagnostic).not.toContain(concreteCommandPath);
     expect(diagnostic).toContain("<redacted>");
     expect(diagnostic).toContain("<temporary-path>");
     expect(diagnostic).toContain("<repository-path>/scripts/smoke-install.ts");
     expect(diagnostic).toContain("<repository-binary-path>/ocx verify");
-    const bounded = boundSmokeDiagnostics("x".repeat(70_000));
-    expect(bounded.length).toBeLessThan(70_000);
-    expect(bounded).toContain("characters omitted");
+    expect(boundSmokeDiagnostics("x".repeat(70_000))).toContain(
+      "characters omitted",
+    );
   });
 
-  test("cleans detached TUI process groups with bounded fallback and unconditional terminal close", async () => {
-    const signals: string[] = [];
-    let terminalClosed = false;
-    let alive = true;
-    await expect(
-      cleanupTuiProcess(
-        {
-          writeInterrupt: () => {
-            throw new Error("write failed");
-          },
-          closeTerminal: () => {
-            terminalClosed = true;
-          },
-          isGroupAlive: () => alive,
-          signalGroup: (signal) => {
-            signals.push(signal);
-            if (signal === "SIGKILL") alive = false;
-          },
-          exited: Promise.resolve(0),
-          sleep: async () => {},
-        },
-        1,
-      ),
-    ).rejects.toThrow("Ctrl-C write failed");
-    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
-    expect(terminalClosed).toBe(true);
-
-    await expect(
-      cleanupTuiProcess(
-        {
-          writeInterrupt: () => {},
-          closeTerminal: () => {
-            throw new Error("close failed");
-          },
-          isGroupAlive: () => false,
-          signalGroup: () => {},
-          exited: Promise.resolve(0),
-          sleep: async () => {},
-        },
-        1,
-      ),
-    ).rejects.toThrow("terminal close failed");
+  test("times out when a descendant retains the completed leader's output pipes", async () => {
+    const sandbox = await mkdtemp(join(tmpdir(), "workcell-command-timeout-"));
+    const startedAt = Date.now();
+    try {
+      await expect(
+        runSmokeCommand(
+          "/bin/sh",
+          ["-c", "sleep 10 &"],
+          process.env,
+          sandbox,
+          createSmokeRedactionContext(sandbox),
+          100,
+        ),
+      ).rejects.toThrow("timed out after 100ms");
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
   });
 
-  test("refuses a stale built registry before launching Workcell", async () => {
+  test("refuses a stale built registry", async () => {
     const registryDirectory = await mkdtemp(
       join(tmpdir(), "workcell-stale-registry-"),
     );
@@ -2650,394 +2517,40 @@ describe("pinned automation", () => {
     }
   });
 
-  test("requires OpenCode's WWW-Authenticate challenge before sending credentials", async () => {
-    let requestCount = 0;
-    const fetcher: ProbeFetch = async () => {
-      requestCount += 1;
-      return new Response("Unauthorized", { status: 401 });
-    };
-
-    const handshake = await probeToolIdsHandshake(
-      4001,
-      { username: "expected-user", password: "expected-password" },
-      fetcher,
-    );
-
-    expect(handshake.ownershipVerified).toBe(false);
-    expect(handshake.probe.wwwAuthenticate).toBeNull();
-    expect(requestCount).toBe(1);
-  });
-
-  test("rejects the wrong authentication scheme or Basic realm", async () => {
-    for (const challenge of [
-      'Bearer realm="Secure Area"',
-      'Basic realm="Other Area"',
-    ]) {
-      let requestCount = 0;
-      const fetcher: ProbeFetch = async () => {
-        requestCount += 1;
-        return new Response("Unauthorized", {
-          status: 401,
-          headers: { "WWW-Authenticate": challenge },
-        });
-      };
-
-      const handshake = await probeToolIdsHandshake(
-        4002,
-        { username: "expected-user", password: "expected-password" },
-        fetcher,
-      );
-
-      expect(handshake.ownershipVerified, challenge).toBe(false);
-      expect(requestCount, challenge).toBe(1);
-    }
-  });
-
-  test("accepts legal Basic challenge casing and whitespace only with the configured credentials", async () => {
-    const correctCredentials = {
-      username: "expected-user",
-      password: "expected-password",
-    };
-    const expectedAuthorization = `Basic ${Buffer.from(
-      `${correctCredentials.username}:${correctCredentials.password}`,
-    ).toString("base64")}`;
-
-    for (const challenge of [
-      'Basic realm="Secure Area"',
-      'bAsIc\tReAlM = "Secure Area"  ',
-    ]) {
-      const observedAuthorizations: Array<string | null> = [];
-      const fetcher: ProbeFetch = async (_input, init) => {
-        const authorization = new Headers(init?.headers).get("Authorization");
-        observedAuthorizations.push(authorization);
-        if (!authorization) {
-          return new Response("Unauthorized", {
-            status: 401,
-            headers: { "WWW-Authenticate": challenge },
-          });
-        }
-        if (authorization !== expectedAuthorization) {
-          return new Response("Forbidden", { status: 403 });
-        }
-        return Response.json(requiredToolIds);
-      };
-
-      const validHandshake = await probeToolIdsHandshake(
-        4003,
-        correctCredentials,
-        fetcher,
-      );
-      expect(validHandshake.ownershipVerified, challenge).toBe(true);
-      expect(parseToolIds(validHandshake.probe), challenge).toEqual([
-        ...requiredToolIds,
-      ]);
-      expect(observedAuthorizations, challenge).toEqual([
-        null,
-        expectedAuthorization,
-      ]);
-
-      const invalidHandshake = await probeToolIdsHandshake(
-        4003,
-        { ...correctCredentials, password: "wrong-password" },
-        fetcher,
-      );
-      expect(invalidHandshake.ownershipVerified, challenge).toBe(false);
-      expect(invalidHandshake.probe.status, challenge).toBe(403);
-    }
-  });
-
-  test("cancels oversized chunked tool responses before parsing the retained prefix", async () => {
-    const validJsonPrefix = JSON.stringify(requiredToolIds);
-    let streamCancelled = false;
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(validJsonPrefix));
-        controller.enqueue(new Uint8Array(httpBodyByteLimit));
-      },
-      cancel() {
-        streamCancelled = true;
-      },
-    });
-    const fetcher: ProbeFetch = async () => new Response(body, { status: 200 });
-
-    const probe = await probeToolIds(4004, "Basic redacted", fetcher);
-
-    expect(probe.body).toBe(validJsonPrefix);
-    expect(probe.bodyTruncated).toBe(true);
-    expect(streamCancelled).toBe(true);
-    expect(parseToolIds(probe)).toEqual([]);
-  });
-
-  test("retries an exited EADDRINUSE launch instead of accepting an unrelated responder", async () => {
-    const ports = [4101, 4102, 4103];
-    const attemptedPorts: number[] = [];
-    const successfulProbe = {
-      status: 200,
-      body: JSON.stringify(requiredToolIds),
-      bodyTruncated: false,
-      wwwAuthenticate: null,
-      requestError: undefined,
-    };
-    const successfulAttempt: InstalledToolsLaunchAttempt = {
-      probe: successfulProbe,
-      ...establishToolAcceptanceAtLivenessBoundary(
-        successfulProbe,
-        true,
-        () => undefined,
-        verifiedAgentEvidence,
-      ),
-      agentProbe: successfulProbe,
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-    };
-    const collisionAttempt: InstalledToolsLaunchAttempt = {
-      ...successfulAttempt,
-      ...establishToolAcceptanceAtLivenessBoundary(
-        successfulProbe,
-        true,
-        () => 1,
-        verifiedAgentEvidence,
-      ),
-      exitCode: 1,
-      stderr: "listen EADDRINUSE: address already in use 127.0.0.1:4101",
-    };
-    const attempts = [collisionAttempt, successfulAttempt];
-
-    await assertInstalledTools(1, {}, "/unused", {
-      reservePort: () => ports.shift()!,
-      launchProbeAndCleanup: async (port) => {
-        attemptedPorts.push(port);
-        return attempts.shift()!;
-      },
-    });
-
-    expect(attemptedPorts).toEqual([4101, 4102]);
-    expect(attempts).toHaveLength(0);
-
-    let boundedAttemptCount = 0;
-    await expect(
-      assertInstalledTools(1, {}, "/unused", {
-        reservePort: () => 4200 + boundedAttemptCount,
-        launchProbeAndCleanup: async (port) => {
-          boundedAttemptCount += 1;
-          return {
-            ...collisionAttempt,
-            stderr: `listen EADDRINUSE: address already in use 127.0.0.1:${port}`,
-          };
-        },
-      }),
-    ).rejects.toThrow("Launch attempt: 3 of 3");
-    expect(boundedAttemptCount).toBe(3);
-  });
-
-  test("establishes tool acceptance atomically before intentional cleanup", async () => {
-    const probe = {
-      status: 200,
-      body: JSON.stringify(requiredToolIds),
-      bodyTruncated: false,
-      wwwAuthenticate: null,
-      requestError: undefined,
-    };
-    const exitedBeforeAcceptance = establishToolAcceptanceAtLivenessBoundary(
-      probe,
-      true,
-      () => 17,
-      verifiedAgentEvidence,
-    );
-    const liveAtAcceptance = establishToolAcceptanceAtLivenessBoundary(
-      probe,
-      true,
-      () => undefined,
-      verifiedAgentEvidence,
-    );
-    const missingAgentEvidence = establishToolAcceptanceAtLivenessBoundary(
-      probe,
-      true,
-      () => undefined,
-      {
-        verified: false,
-        failureReason: "bounded Workcell fingerprint mismatch",
-      },
-    );
-
-    expect(exitedBeforeAcceptance.acceptedWhileChildLive).toBe(false);
-    expect(exitedBeforeAcceptance.childExitCodeAtAcceptance).toBe(17);
-    expect(exitedBeforeAcceptance.toolIds).toEqual([...requiredToolIds]);
-    expect(exitedBeforeAcceptance.missingToolIds).toEqual([]);
-    expect(Object.isFrozen(exitedBeforeAcceptance)).toBe(true);
-    expect(Object.isFrozen(exitedBeforeAcceptance.toolIds)).toBe(true);
-    await expect(
-      assertInstalledTools(1, {}, "/unused", {
-        reservePort: () => 4251,
-        launchProbeAndCleanup: async () => ({
-          probe,
-          agentProbe: probe,
-          ...exitedBeforeAcceptance,
-          exitCode: 17,
-          stdout: "",
-          stderr: "",
-        }),
-      }),
-    ).rejects.toThrow("Child exit code at acceptance: 17");
-
-    expect(liveAtAcceptance.acceptedWhileChildLive).toBe(true);
-    expect(missingAgentEvidence.acceptedWhileChildLive).toBe(false);
-    expect(missingAgentEvidence.planFingerprintFailureReason).toBe(
-      "bounded Workcell fingerprint mismatch",
-    );
-    await expect(
-      assertInstalledTools(3, {}, "/unused", {
-        reservePort: () => 4253,
-        launchProbeAndCleanup: async () => ({
-          probe,
-          agentProbe: { ...probe, body: "FULL_AGENT_BODY_MUST_NOT_LEAK" },
-          ...missingAgentEvidence,
-          exitCode: 0,
-          stdout: "",
-          stderr: "",
-        }),
-      }),
-    ).rejects.toThrow("bounded Workcell fingerprint mismatch");
-    await expect(
-      assertInstalledTools(3, {}, "/unused", {
-        reservePort: () => 4254,
-        launchProbeAndCleanup: async () => ({
-          probe,
-          agentProbe: { ...probe, body: "FULL_AGENT_BODY_MUST_NOT_LEAK" },
-          ...missingAgentEvidence,
-          exitCode: 0,
-          stdout: "",
-          stderr: "",
-        }),
-      }),
-    ).rejects.not.toThrow("FULL_AGENT_BODY_MUST_NOT_LEAK");
-    await assertInstalledTools(2, {}, "/unused", {
-      reservePort: () => 4252,
-      launchProbeAndCleanup: async () => ({
-        probe,
-        agentProbe: probe,
-        ...liveAtAcceptance,
-        exitCode: 143,
-        stdout: "",
-        stderr: "",
-      }),
-    });
-  });
-
-  test("rejects valid tool IDs when endpoint ownership was not proven", async () => {
-    let attemptCount = 0;
-    const probe = {
-      status: 200,
-      body: JSON.stringify(requiredToolIds),
-      bodyTruncated: false,
-      wwwAuthenticate: null,
-      requestError: undefined,
-    };
-    const unownedAttempt: InstalledToolsLaunchAttempt = {
-      probe,
-      ...establishToolAcceptanceAtLivenessBoundary(
-        probe,
-        false,
-        () => undefined,
-        verifiedAgentEvidence,
-      ),
-      agentProbe: probe,
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-    };
-
-    await expect(
-      assertInstalledTools(1, {}, "/unused", {
-        reservePort: () => 4301,
-        launchProbeAndCleanup: async () => {
-          attemptCount += 1;
-          return unownedAttempt;
-        },
-      }),
-    ).rejects.toThrow("Endpoint ownership verified: false");
-    expect(attemptCount).toBe(1);
-  });
-
-  test("rejects an owned endpoint missing a required tool ID", async () => {
-    const missingToolId = "worktree_delete";
-    const probe = {
-      status: 200,
-      body: JSON.stringify(
-        requiredToolIds.filter((toolId) => toolId !== missingToolId),
-      ),
-      bodyTruncated: false,
-      wwwAuthenticate: null,
-      requestError: undefined,
-    };
-    const incompleteAttempt: InstalledToolsLaunchAttempt = {
-      probe,
-      ...establishToolAcceptanceAtLivenessBoundary(
-        probe,
-        true,
-        () => undefined,
-        verifiedAgentEvidence,
-      ),
-      agentProbe: probe,
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-    };
-
-    await expect(
-      assertInstalledTools(1, {}, "/unused", {
-        reservePort: () => 4351,
-        launchProbeAndCleanup: async () => incompleteAttempt,
-      }),
-    ).rejects.toThrow(`Missing required tool IDs: ${missingToolId}`);
-  });
-
-  test("does not retry EADDRINUSE for a different listener port", async () => {
-    let attemptCount = 0;
-    const probe = {
-      status: undefined,
-      body: "",
-      bodyTruncated: false,
-      wwwAuthenticate: null,
-      requestError: "Server did not accept a connection.",
-    };
-    const unrelatedCollision: InstalledToolsLaunchAttempt = {
-      probe,
-      ...establishToolAcceptanceAtLivenessBoundary(
-        probe,
-        false,
-        () => 1,
-        verifiedAgentEvidence,
-      ),
-      agentProbe: probe,
-      exitCode: 1,
-      stdout: "",
-      stderr: "listen EADDRINUSE: address already in use 127.0.0.1:4402",
-    };
-
-    await expect(
-      assertInstalledTools(1, {}, "/unused", {
-        reservePort: () => 4401,
-        launchProbeAndCleanup: async () => {
-          attemptCount += 1;
-          return unrelatedCollision;
-        },
-      }),
-    ).rejects.toThrow(unrelatedCollision.stderr);
-    expect(attemptCount).toBe(1);
-  });
-
-  test("cleans a smoke sandbox and runs all release gates with data-driven live comparison", async () => {
+  test("awaits registry shutdown before deleting a smoke sandbox", async () => {
     const sandbox = await mkdtemp(join(tmpdir(), "ocx-smoke-cleanup-"));
-    let stopped = false;
-    await cleanupSmokeSandbox(sandbox, {
+    let finishStop: (() => void) | undefined;
+    let stopStarted = false;
+    const stopFinished = new Promise<void>((resolve) => {
+      finishStop = resolve;
+    });
+    const cleanup = cleanupSmokeSandbox(sandbox, {
       stop: async () => {
-        stopped = true;
+        stopStarted = true;
+        await stopFinished;
       },
     });
-    expect(stopped).toBe(true);
-    expect(await Bun.file(sandbox).exists()).toBe(false);
+    await Bun.sleep(10);
+    expect(stopStarted).toBe(true);
+    await expect(lstat(sandbox)).resolves.toBeDefined();
+    finishStop?.();
+    await cleanup;
+    await expect(lstat(sandbox)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("surfaces registry shutdown failure after deleting the sandbox", async () => {
+    const sandbox = await mkdtemp(join(tmpdir(), "ocx-smoke-cleanup-"));
+    await expect(
+      cleanupSmokeSandbox(sandbox, {
+        stop: async () => {
+          throw new Error("registry stop failed");
+        },
+      }),
+    ).rejects.toThrow("registry stop failed");
+    await expect(lstat(sandbox)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("runs all release gates with data-driven live comparison", () => {
     for (const workflow of [continuousIntegration, releaseWorkflow]) {
       expect(workflow).toContain("npm install --global bun@1.4.1");
       expect(workflow).toContain('test "$(bun --version)" = 1.4.1');
