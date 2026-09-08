@@ -50,8 +50,14 @@ bun run smoke
 
 Smoke npm policy is isolated to the smoke sandbox. It uses
 `min-release-age=7` and `engine-strict=false`, filters inherited npm settings,
-and does not mutate repository or user `.npmrc` files. Smoke validates selected
-DCP resolution metadata only; it does not claim `/dcp` activation or rendering.
+and does not mutate repository or user `.npmrc` files. Smoke uses the local
+built registry, initializes OCX, installs and verifies Workcell, installs the
+profile-local direct npm dependencies from the generated manifest under the
+sandbox npm policy, verifies the exact profile, receipt, and direct-package
+state, removes Workcell, verifies that its profile root is gone while the
+default profile remains, and then cleans the sandbox. It does not launch
+OpenCode, resolve, import, activate, or render DCP, verify `/dcp`, validate
+runtime tools or agents, or claim package-cache cleanup.
 
 The repository-only migration sequence is to install and validate Workcell
 0.2.8 first. If DCP should be Workcell-only, optionally remove a duplicate

@@ -43,10 +43,14 @@ Grep.
 Workcell owns the profile-root `tui.jsonc`. It pins external AGPL-3.0-or-later
 DCP 3.1.15 in both the server and TUI configuration.
 
-Smoke verification uses production plugin metadata to prove that the exact DCP
-spec was requested and version 3.1.15 resolved from npm at the exact scoped
-package target. It does not prove plugin import, activation, `/dcp`
-registration, rendering, or interaction.
+Smoke verification uses an isolated sandbox and the local built registry. It
+initializes OCX, installs and verifies Workcell, installs the profile-local
+direct npm dependencies from the generated manifest under the sandbox npm
+policy, verifies the exact profile, receipt, and direct-package state, removes
+Workcell, verifies that its profile root is gone while the default profile
+remains, and then cleans the sandbox. Smoke does not launch OpenCode, resolve,
+import, activate, or render DCP, verify `/dcp`, validate runtime tools or
+agents, or claim package-cache cleanup.
 
 ## Migration and rollback
 
