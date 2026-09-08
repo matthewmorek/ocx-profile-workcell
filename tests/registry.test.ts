@@ -504,7 +504,6 @@ describe("dependency and inventory policy helpers", () => {
 describe("self-contained Workcell registry", () => {
   test("declares the reviewed graph and release identity", () => {
     expect(registry.version).toBe(packageManifest.version);
-    expect(registry.version).toBe("0.2.8");
     expect(registry.opencode).toBe("1.18.25");
     expect(registry.ocx).toBe("2.0.14");
     expect(registry.components.map((component: any) => component.name)).toEqual(
