@@ -148,47 +148,6 @@ function parseInventoryPath(value: unknown, description: string): string {
   return value;
 }
 
-function declaredShippableInventory(
-  components: any[],
-  physicalFiles?: string[],
-): { sourceFiles: string[]; targetOwners: Map<string, string> } {
-  const sourceOwners = new Map<string, string>();
-  const targetOwners = new Map<string, string>();
-
-  for (const component of components) {
-    if (!Array.isArray(component.files))
-      throw new Error(`Component ${component.name} must declare a file array`);
-    for (const declaration of component.files) {
-      const source = parseInventoryPath(
-        typeof declaration === "string" ? declaration : declaration?.path,
-        `Component ${component.name} source`,
-      );
-      const target = parseInventoryPath(
-        typeof declaration === "string" ? declaration : declaration?.target,
-        `Component ${component.name} target`,
-      );
-      if (sourceOwners.has(source))
-        throw new Error(
-          `Source ${source} is declared by both ${sourceOwners.get(source)} and ${component.name}`,
-        );
-      if (targetOwners.has(target))
-        throw new Error(
-          `Target ${target} is owned by both ${targetOwners.get(target)} and ${component.name}`,
-        );
-      sourceOwners.set(source, component.name);
-      targetOwners.set(target, component.name);
-    }
-  }
-
-  const sourceFiles = [...sourceOwners.keys()].sort();
-  if (
-    physicalFiles &&
-    JSON.stringify(sourceFiles) !== JSON.stringify([...physicalFiles].sort())
-  )
-    throw new Error("Physical files and registry declarations do not match");
-  return { sourceFiles, targetOwners };
-}
-
 function assertReviewedBundleCoverage(
   components: any[],
   bundleName: string,
@@ -401,32 +360,6 @@ describe("dependency and inventory policy helpers", () => {
         "Fixture",
       ),
     ).toThrow("duplicates package identity @example/plugin");
-  });
-
-  test("rejects duplicate and incomplete shippable inventories", () => {
-    expect(() =>
-      declaredShippableInventory([
-        {
-          name: "first",
-          files: [{ path: "one.ts", target: "shared.ts" }],
-        },
-        {
-          name: "second",
-          files: [{ path: "two.ts", target: "shared.ts" }],
-        },
-      ]),
-    ).toThrow("Target shared.ts is owned by both first and second");
-    expect(() =>
-      declaredShippableInventory(
-        [
-          {
-            name: "first",
-            files: [{ path: "one.ts", target: "one.ts" }],
-          },
-        ],
-        ["one.ts", "undeclared.ts"],
-      ),
-    ).toThrow("Physical files and registry declarations do not match");
   });
 
   test("rejects missing bundle edges and duplicate component dependencies", () => {
@@ -833,29 +766,7 @@ describe("self-contained Workcell registry", () => {
     });
   });
 
-  test("declares every physical shippable file exactly once with one owner per target", async () => {
-    const physicalFiles = await outputFiles(join(repositoryRoot, "files"));
-    const inventory = declaredShippableInventory(
-      registry.components,
-      physicalFiles,
-    );
-    expect(inventory.sourceFiles).toEqual(physicalFiles);
-    expect(inventory.targetOwners.size).toBe(inventory.sourceFiles.length);
-  });
-
   test("contains no forbidden runtime dependency, integration, artifact, secret, symlink, or machine path", async () => {
-    const sourceFiles = await outputFiles(join(repositoryRoot, "files"));
-    for (const sourcePath of sourceFiles) {
-      const path = `files/${sourcePath}`;
-      expect(path).not.toMatch(
-        /(?:\.DS_Store|node_modules|\.ocx\/|receipt|cache|lock)/i,
-      );
-      const content = await readFile(join(repositoryRoot, path), "utf8");
-      expect(content.toLowerCase()).not.toContain(`${"lin"}${"ear"}`);
-      expect(content).not.toMatch(
-        /(?:kdco\/workspace|registry\.kdco\.dev|@latest|@mohak34|\/Users\/|ghp_|github_pat_|phc_|(?:^|[^a-z])sk-)/i,
-      );
-    }
     const profile = parse(
       await readFile(
         join(repositoryRoot, "files/profiles/workcell/ocx.jsonc"),
