@@ -557,7 +557,7 @@ describe("self-contained Workcell registry", () => {
         promptHash:
           "7118513f19cbf2f399f6c19427a1f26805cf3242ea7a669971793fd69e1eba6b",
         permissionHash:
-          "0d454b72b405822958d92cc6a0d9a089c71ebfd9ab96695716a3155892c80607",
+          "a38d357aca6878996cd35d9bf3d890aea290dcbbd5474e7772aae916942821bd",
       },
       build: {
         mode: "primary",
@@ -567,7 +567,7 @@ describe("self-contained Workcell registry", () => {
         promptHash:
           "9df5756dc38e91b4d544cfe07c6f36259fe5af4d427d632657298e246fcff98d",
         permissionHash:
-          "9f3fc4cee3d4818f87a8d9f33a78ec9a2007cf5ddabdc193166d5265eddd46cc",
+          "0a9b4ecd6b8cb6af1e731c34fe2f836e1fb8e2830796e8a3423008e1469e256e",
       },
       coder: {
         mode: "subagent",
@@ -676,10 +676,18 @@ describe("self-contained Workcell registry", () => {
       expect(profileConfig.agent[name].textVerbosity).toBeUndefined();
     }
     expect({
-      plan: profileConfig.agent.plan.permission.skill,
-      build: profileConfig.agent.build.permission.skill,
-      reviewer: profileConfig.agent.reviewer.permission.skill,
-    }).toEqual({ plan: "allow", build: "allow", reviewer: "allow" });
+      planSkill: profileConfig.agent.plan.permission.skill,
+      planTodoWrite: profileConfig.agent.plan.permission.todowrite,
+      buildSkill: profileConfig.agent.build.permission.skill,
+      buildTodoRead: profileConfig.agent.build.permission.todoread,
+      reviewerSkill: profileConfig.agent.reviewer.permission.skill,
+    }).toEqual({
+      planSkill: "allow",
+      planTodoWrite: "allow",
+      buildSkill: "allow",
+      buildTodoRead: "allow",
+      reviewerSkill: "allow",
+    });
     expect(
       Object.entries(profileConfig.agent.committer.permission.bash),
     ).toEqual([
