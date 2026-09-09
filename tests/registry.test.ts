@@ -2479,21 +2479,16 @@ describe("pinned automation", () => {
     expect(releaseWorkflow).not.toContain("components/ws");
   });
 
-  test("rejects non-annotated release tags with an actionable error before release work", () => {
-    const objectTypeCheck = 'if [ "$TAG_OBJECT_TYPE" != "tag" ]; then';
-    const diagnostic =
-      "::error title=Annotated tag required::Release tags must be annotated tag objects. Create one with: git tag -a vX.Y.Z -m vX.Y.Z";
+  test("releases main tags regardless of tag type or creation path", () => {
+    expect(releaseWorkflow).toContain("release:\n    types: [published]");
     expect(releaseWorkflow).toContain(
-      'TAG_OBJECT_TYPE="$(git cat-file -t "$GITHUB_REF")"',
+      'SOURCE_COMMIT="$(git rev-parse "$GITHUB_REF^{commit}")"',
     );
-    expect(releaseWorkflow).toContain(objectTypeCheck);
-    expect(releaseWorkflow).toContain(diagnostic);
-    expect(releaseWorkflow.indexOf(objectTypeCheck)).toBeLessThan(
-      releaseWorkflow.indexOf('SOURCE_COMMIT="$(git rev-parse'),
+    expect(releaseWorkflow).toContain(
+      'git merge-base --is-ancestor "$SOURCE_COMMIT" origin/main',
     );
-    expect(releaseWorkflow.indexOf(diagnostic)).toBeLessThan(
-      releaseWorkflow.indexOf("bun install --frozen-lockfile"),
-    );
+    expect(releaseWorkflow).not.toContain("TAG_OBJECT_TYPE=");
+    expect(releaseWorkflow).not.toContain("Annotated tag required");
   });
 
   test("treats an exact live release identity as an idempotent no-op", () => {
