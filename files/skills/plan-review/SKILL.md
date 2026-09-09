@@ -30,10 +30,12 @@ Systematic plan review focused on 3 quality categories: Citation Quality, Comple
 
 | Requirement | Check |
 |-------------|-------|
-| Decisions reference sources | `ref:delegation-id` format used |
-| No unsubstantiated claims | Architectural decisions cite research |
-| Research phases show refs | Completed research tasks include citations |
-| Citations are verifiable | IDs match actual delegation outputs |
+| Decisions reference sources | User constraints, repository paths/sections, or `ref:delegation-id` for delegated research |
+| No unsubstantiated claims | The actual provenance supports the decision; unresolved material external/version-sensitive claims need research |
+| Research phases show refs | Completed delegated research tasks include citations |
+| Citations are verifiable | User/repository references identify the relevant evidence; delegation IDs match actual outputs |
+
+Accept explicit user constraints and established repository conventions as provenance. Reuse available evidence; do not mandate new research for every architectural choice or manufacture citations to satisfy a template. Request external research only for material unresolved external or version-sensitive claims.
 
 **Red Flags:**
 - Decisions table with empty or `-` in Source column
@@ -77,7 +79,7 @@ Systematic plan review focused on 3 quality categories: Citation Quality, Comple
 
 | Severity | Icon | Criteria | Action Required |
 |----------|------|----------|-----------------|
-| Critical | 🔴 | Missing citations for key decisions, no clear goal, unactionable tasks | Must fix before execution |
+| Critical | 🔴 | Unsupported key decisions with material correctness or safety risk, no clear goal, unactionable tasks | Must fix before execution |
 | Major | 🟠 | Vague tasks, incomplete phases, missing edge case handling | Should fix |
 | Minor | 🟡 | Missing notes, unclear dependencies, incomplete rationale | Nice to fix |
 | Nitpick | 🟢 | Style preferences, wording suggestions | Optional |
@@ -134,7 +136,7 @@ APPROVE | REQUEST_CHANGES | NEEDS_DISCUSSION
 - Do NOT re-validate format—`plan_save` handles structural validation
 - Do NOT evaluate code quality (that's code-review's job)
 - Do NOT execute or modify the plan during review
-- Do NOT skip citation verification for decisions
+- Do NOT skip provenance verification for decisions; user/repository evidence is valid without a new research delegation
 - Do NOT accept vague goals or ambiguous tasks
 - Do NOT forget to note positive observations
 

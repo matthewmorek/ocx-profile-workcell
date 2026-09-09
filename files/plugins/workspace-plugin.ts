@@ -58,18 +58,6 @@ type ParseResult =
 	| { ok: true; data: z.infer<typeof PlanSchema>; warnings: string[] }
 	| { ok: false; error: string; hint: string }
 
-const PLAN_SAVE_SUCCESS_EVIDENCE = '<plan-save-result status="success" />'
-
-function formatPlanSaveSuccess(message: string): string {
-	return `${PLAN_SAVE_SUCCESS_EVIDENCE}\n${message}`
-}
-
-function consumePlanSaveSuccess(output: string): string | null {
-	const prefix = `${PLAN_SAVE_SUCCESS_EVIDENCE}\n`
-	if (!output.startsWith(prefix)) return null
-
-	return output.slice(prefix.length)
-}
 
 /**
  * Raw extracted parts from markdown (no validation).
@@ -341,7 +329,18 @@ function hasActiveTaskForSession(agent: TrackedTaskAgent, sessionID: string): bo
 }
 
 function parseTesterResult(taskOutput: string): TesterResult | null {
-	const result = taskOutput.match(/^RESULT:\s*(.+?)\s*$/im)?.[1]?.toLowerCase()
+	const results: string[] = []
+	for (const rawLine of taskOutput.split(/\r?\n/)) {
+		let line = rawLine.trim()
+		// Accept only standalone status lines, with balanced inline Markdown wrappers.
+		line = line.replace(/^(\*\*|__)(RESULT:)\1[ \t]*/i, "$2 ")
+		line = line.replace(/^(\*\*|__|`)(RESULT:.*?)\1$/i, "$2")
+		line = line.replace(/^(RESULT:[ \t]*)(\*\*|__|`)([^`*_]+)\2$/i, "$1$3")
+		const match = line.match(/^RESULT:[ \t]*(.*)$/i)
+		if (match) results.push(match[1].trim().toLowerCase())
+	}
+	if (results.length === 0 || new Set(results).size !== 1) return null
+	const result = results[0]
 
 	switch (result) {
 		case "passed":
@@ -358,7 +357,16 @@ function parseTesterResult(taskOutput: string): TesterResult | null {
 // RULES FOR INJECTION
 // ==========================================
 
+const SHARED_PLAN_RULES = `<shared-plan>
+The saved plan is shared by the root session and its child sessions; unrelated root sessions have separate plans.
+Treat the accepted plan as a design artifact, not a live progress ledger. Save substantive design revisions, not full-plan rewrites for routine progress updates.
+Saving a plan does not automatically require review, delegation, or a reread. Review is an explicit orchestration decision.
+Use the plan already in context. Call \`plan_read\` only when the plan is missing or known to have changed; do not repeat reads for each task.
+Give child agents bounded assignments with task IDs or section references to the shared saved plan, scope, constraints, and expected evidence; do not copy the full plan into prompts. Children can use \`plan_read\` when they need missing plan context.
+</shared-plan>`
+
 const PLAN_RULES = `<system-reminder>
+${SHARED_PLAN_RULES}
 <workspace-routing policy_level="critical">
 
 ## Agent Routing (STRICT BOUNDARIES)
@@ -375,7 +383,8 @@ const PLAN_RULES = `<system-reminder>
 
 - \`explore\` CANNOT access external resources (docs, web, APIs)
 - \`researcher\` CANNOT search codebase files
-- For external docs about a library used in the codebase → \`researcher\`
+- Reuse available evidence; research only material unresolved external or version-sensitive claims
+- For missing external docs about a library used in the codebase → \`researcher\`
 - For how that library is used in THIS codebase → \`explore\`
 
 <example>
@@ -393,15 +402,16 @@ Wrong: Use grep/glob directly
 <example>
 User: "How should I implement OAuth2 in this project?"
 Correct:
-  1. delegate to researcher for OAuth2 best practices (EXTERNAL)
-  2. delegate to explore for existing auth patterns (INTERNAL)
+  1. Reuse established constraints and evidence already in context
+  2. delegate to researcher for material unresolved OAuth2 or version-sensitive claims (EXTERNAL)
+  3. delegate to explore for missing existing auth patterns (INTERNAL)
 Wrong: Search codebase yourself or answer from memory
 </example>
 
 </workspace-routing>
 
 <philosophy>
-Load relevant skills before finalizing plan:
+Load philosophy skills when making the corresponding design decisions, not merely forwarding assignments:
 - Planning work → \`skill\` load \`plan-protocol\` (REQUIRED before using plan_save)
 - Backend/logic work → \`skill\` load \`code-philosophy\`
 - UI/frontend work → \`skill\` load \`frontend-philosophy\`
@@ -440,8 +450,8 @@ updated: YYYY-MM-DD
 
 ### Rules
 1. **One CURRENT task** - Only one task may have ← CURRENT
-2. **Cite decisions** - Use \`ref:delegation-id\` for research-informed choices
-3. **Update immediately** - Mark tasks complete right after finishing
+2. **Cite decisions** - Record user constraints or repository paths/sections as provenance; use \`ref:delegation-id\` for choices informed by delegated research. Research only material unresolved external or version-sensitive claims; never manufacture citations
+3. **Track progress separately** - Routine task completion does not require a full-plan save
 4. **Auto-save after approval** - When user approves your plan, immediately call \`plan_save\`. Do NOT wait for user to remind you or switch modes.
 </plan-format>
 
@@ -453,7 +463,7 @@ You are in PLAN MODE. Your primary deliverable is a saved implementation plan.
 ## Requirements
 1. **First**: Load the \`plan-protocol\` skill to understand the required plan schema
 2. **During**: Collaborate with the user to develop a comprehensive, well-cited plan
-3. **Before exiting**: You MUST call \`plan_save\` with the finalized plan
+3. **Before exiting**: Ensure the finalized plan is saved with \`plan_save\`; do not save it again if unchanged
 
 ## CRITICAL
 Saving your plan is a REQUIREMENT, not a request. Plans that are not saved will be lost when the session ends or mode changes. The user cannot see your plan unless you save it.
@@ -462,6 +472,7 @@ Saving your plan is a REQUIREMENT, not a request. Plans that are not saved will 
 </system-reminder>`
 
 const BUILD_RULES = `<system-reminder>
+${SHARED_PLAN_RULES}
 <delegation-mandate policy_level="critical">
 
 ## You Are an ORCHESTRATOR
@@ -516,28 +527,29 @@ Use plan/delegation tools for context and coordination, and native \`task\` agen
 <build-workflow>
 
 ### Before Writing Code
-1. Call \`plan_read\` to get the current plan
-2. Call \`delegation_list\` ONCE to see available research
-3. Call \`delegation_read\` for relevant findings
-4. **REUSE code snippets from researcher research** - they are production-ready
+1. Use the shared saved plan already in context; call \`plan_read\` only if missing or known to have changed
+2. Reuse relevant findings already in context; use \`delegation_read\` for missing relevant artifacts and \`delegation_list\` only when their IDs are unknown
+3. Request research only for material unresolved external or version-sensitive claims. User constraints and established repository conventions need honest provenance, not new research or manufactured citations
+4. Treat research snippets as evidence to inspect and adapt to local versions and conventions, not as production-ready code
+5. For a sufficiently scoped implementation, send the assignment directly to \`coder\`; its bounded repository discovery does not require preliminary \`explore\` delegation. Use \`explore\` when missing facts materially affect scope or design, not as a routine prerequisite
 
 ### Philosophy Loading
-Load the relevant skill BEFORE delegating to coder:
-- Frontend work → \`skill\` load \`frontend-philosophy\`
-- Backend work → \`skill\` load \`code-philosophy\`
+The parent loads philosophy only when making design decisions, not merely dispatching accepted work. The implementing child still loads applicable skills:
+- Frontend design → \`skill\` load \`frontend-philosophy\`
+- Backend design → \`skill\` load \`code-philosophy\`
 
 ### Execution and Verification
-1. Orient: Use \`plan_read\` and relevant delegation findings; do not read repository files directly
-2. Implement: Send bounded implementation to \`coder\`, including proportionate immediate focused self-checks
+1. Orient: Reuse the plan and relevant delegation findings already in context; do not read repository files directly
+2. Implement: Send bounded implementation to \`coder\` by shared plan task ID or section, including scope, constraints, expected evidence, and proportionate immediate focused self-checks
 3. Verify independently: Call native \`task\` with \`tester\` only when the implementation is ready for verification
 4. Give tester a self-contained handoff containing changed files, acceptance criteria, exact existing commands to run, and coder evidence
 5. Dispose tester evidence:
-   - \`passed\` → send changed files, acceptance criteria, and tester evidence to \`reviewer\`
+   - \`passed\` → when ready for review, send only the verified scope, changed files, acceptance criteria, and tester evidence to \`reviewer\`; a batch pass does not verify the entire plan
    - \`failed\` → route correction to \`coder\` or difficult diagnosis/repair to \`debugger\`; request a tester rerun only through a new explicit parent \`task\` call
    - \`infrastructure-error\` or \`blocked\` → decide whether the limitation is material; review may proceed only when the limitation and disposition are supplied to \`reviewer\`
-   - missing or unrecognized result → reissue a self-contained tester task
+   - missing, unrecognized, or contradictory status → request a report-only correction using existing tester evidence; do not rerun commands solely for formatting. If actual evidence is missing, inaccessible, stale, or insufficient, explicitly request fresh verification for that gap
 6. Document: Delegate documentation work to \`scribe\`
-7. Commit: Delegate Git or authorized pull-request work to \`committer\`
+7. Commit: Delegate to \`committer\` only with explicit authorization for each requested commit, push, or pull-request action; plan acceptance is not Git authorization
 
 Do not claim completion without independent tester evidence or an explicit disposition explaining a material verification limitation.
 A coder's self-checks are implementation evidence, not independent verification.
@@ -551,7 +563,7 @@ A tester never fixes a failure; failed evidence returns to \`coder\` or \`debugg
 
 When implementation is ready for review:
 1. Obtain and inspect the tester's terminal result and evidence before review
-2. For \`passed\`, delegate to \`reviewer\` with changed files, acceptance criteria, and the complete tester evidence
+2. For \`passed\`, when the verified scope is ready, delegate that scope to \`reviewer\` with changed files, acceptance criteria, and compact tester evidence: status, exact commands, exit codes, decisive failures, limitations, and accessible artifact references. Inline essential evidence when artifacts are inaccessible to the recipient; do not require the complete tester payload
 3. For \`failed\`, correct through \`coder\` or \`debugger\`, then explicitly rerun \`tester\`; do not review the failed implementation as complete
 4. For \`infrastructure-error\` or \`blocked\`, make an explicit material-limitation disposition and provide it to \`reviewer\` if review proceeds
 5. Include verification disposition and review findings in the completion report
@@ -624,7 +636,7 @@ const WorkspacePlugin: Plugin = async (ctx) => {
 					const warningText =
 						warningCount > 0 ? ` (${warningCount} warnings: ${result.warnings?.join(", ")})` : ""
 
-					return formatPlanSaveSuccess(`Plan saved.${warningText}`)
+					return `Plan saved.${warningText}`
 				},
 			}),
 
@@ -688,25 +700,11 @@ Today is ${today}. When searching for documentation, APIs, or external resources
 			})
 		},
 
-		// Trigger plan review or session-scoped implementation verification reminders
+		// Session-scoped implementation verification reminders
 		"tool.execute.after": async (
 			input: { tool: string; sessionID: string; callID: string },
 			output: { title: string; output: string; metadata: unknown },
 		) => {
-			// Plan save triggers reviewer delegation reminder
-			if (input.tool === "plan_save") {
-				const successfulPlanSaveOutput = consumePlanSaveSuccess(output.output)
-				if (successfulPlanSaveOutput === null) return
-
-				output.output = `${successfulPlanSaveOutput}\n\n<system-reminder>
-Plan saved successfully. You MUST now delegate to the reviewer:
-1. Use the \`delegate\` tool to send the plan to the \`reviewer\` agent
-2. The reviewer will load \`plan-review\` and \`code-philosophy\` skills
-3. Use \`plan_read\` to get the plan content for the delegation prompt
-4. This is NON-BLOCKING - continue work while review runs in background
-</system-reminder>`
-				return
-			}
 
 			if (!input.callID) return
 			const trackedTask = activeTaskCalls.get(input.callID)
@@ -718,8 +716,8 @@ Plan saved successfully. You MUST now delegate to the reviewer:
 
 			if (trackedTask.agent === "coder") {
 				output.output += `\n\n<system-reminder>
-Final coder task for this session completed. Before review, explicitly run native \`task\` with \`tester\` for independent existing verification.
-Give tester a self-contained prompt with changed files, acceptance criteria, exact existing commands, and coder evidence. Tester must not author or repair tests.
+No coder calls are currently active in this session; this does not mean the final planned task or implementation is complete. Assess the returned scope and evidence. When an implementation batch is ready, explicitly run native \`task\` with \`tester\` for independent existing verification before review.
+Give tester bounded shared-plan references, changed files, exact existing commands, and compact coder evidence (status, commands, exit codes, decisive failures, limitations, accessible artifacts); inline essentials when artifacts are inaccessible. Tester must not author or repair tests.
 </system-reminder>`
 				return
 			}
@@ -728,7 +726,7 @@ Give tester a self-contained prompt with changed files, acceptance criteria, exa
 			switch (testerResult) {
 				case "passed":
 					output.output += `\n\n<system-reminder>
-Tester RESULT is passed. Proceed to \`reviewer\` with the changed files, acceptance criteria, and complete tester evidence.
+Tester RESULT is passed. Inspect the evidence and its coverage; the status alone does not prove completion. When ready, proceed to \`reviewer\` for only the verified scope with changed files, acceptance criteria, and compact evidence: status, commands, exit codes, decisive failures, limitations, and accessible artifacts. Inline essentials when artifacts are inaccessible; do not imply the entire plan is verified.
 </system-reminder>`
 					break
 				case "failed":
@@ -744,7 +742,7 @@ Tester RESULT is ${testerResult}. Make an explicit disposition of the material v
 					break
 				default:
 					output.output += `\n\n<system-reminder>
-Tester result is invalid: a recognized \`RESULT: passed | failed | infrastructure-error | blocked\` line is missing. Reissue a self-contained tester task with changed files, acceptance criteria, exact existing commands, coder evidence, and the required final contract.
+Tester result is invalid: a recognized, non-contradictory standalone \`RESULT: passed | failed | infrastructure-error | blocked\` line is required. Request a report-only correction with the existing tester evidence and required final contract; do not rerun commands solely for formatting. Supply accessible artifacts or inline essential evidence. If actual verification evidence is missing, inaccessible, stale, or insufficient, explicitly request fresh verification of the gap instead. Do not route a reporting failure to debugger.
 </system-reminder>`
 			}
 		},
@@ -779,11 +777,12 @@ Tester result is invalid: a recognized \`RESULT: passed | failed | infrastructur
 ## Current Plan
 ${planContent}
 
-## Resume Point
-${currentTask ? `Current task: ${currentTask}` : "No task marked as CURRENT"}
+## Design Reference
+${currentTask ? `Task marked in saved plan: ${currentTask}` : "No task marked as CURRENT"}
+The saved plan is a design artifact; its task markers may not reflect execution progress. Reuse this plan context without rereading it unless it has changed.
 
 ## Verification
-To verify any cited decision, use \`delegation_read("ref:id")\`.
+Verify decisions against their stated provenance: user constraints, repository paths/sections, or relevant research artifacts. Use \`delegation_read("id")\` for missing delegated evidence; do not manufacture research for user or repository provenance.
 </workspace-context>`)
 		},
 	}
