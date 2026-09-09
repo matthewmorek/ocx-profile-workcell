@@ -81,6 +81,22 @@ reinstall the prior Workcell profile, or launch the existing `ws` profile.
    git push origin vX.Y.Z
    ```
 
+## Workflow efficiency
+
+Agents reference the shared saved plan rather than copying it into each handoff.
+Plan saves do not trigger automatic review, and routine progress does not require
+rewriting the plan. Independent verification and review apply to ready implementation
+batches, not every intermediate child result. Reporting-only corrections reuse
+existing evidence; missing or stale evidence still requires fresh verification.
+
+Background delegations use deterministic titles and descriptions by default.
+To opt into model-generated metadata, set `KDCO_BACKGROUND_METADATA=1` before
+launching OpenCode. Only the exact value `1` enables enrichment; the setting is
+read when the delegation manager is created. Enrichment sends result excerpts to
+the configured metadata model and incurs additional model requests and potential
+cost. It runs after result persistence and parent notification, with deterministic
+metadata retained if enrichment fails.
+
 ## Troubleshooting
 
 Installing or updating Workcell does not change the profile of an already
