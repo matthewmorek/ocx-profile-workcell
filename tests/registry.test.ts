@@ -1000,6 +1000,138 @@ describe("high-risk deterministic plugin boundaries", () => {
     }
   });
 
+  test("preserves reviewer read configuration and gates metadata enrichment through the existing manager", async () => {
+    const { DelegationManager, generateFallbackMetadata } = BackgroundAgentsPlugin.testInternals;
+    const previousMetadata = process.env.KDCO_BACKGROUND_METADATA;
+    const result = "Repository checks complete\nEvidence: existing verification passed.";
+    const generated = { title: "Verified repository", description: "Existing verification passed." };
+    const scenarios = [
+      { env: undefined, agent: "reviewer", mode: "disabled" },
+      { env: "0", agent: "explore", mode: "disabled" },
+      { env: "true", agent: "researcher", mode: "disabled" },
+      { env: "01", agent: "reviewer", mode: "disabled" },
+      { env: "1 ", agent: "explore", mode: "disabled" },
+      { env: "1", agent: "reviewer", mode: "success" },
+      { env: "1", agent: "explore", mode: "invalid-response" },
+      { env: "1", agent: "researcher", mode: "missing-agent" },
+      { env: "1", agent: "reviewer", mode: "model-error" },
+      { env: undefined, agent: "reviewer", mode: "injected-success" },
+      { env: "0", agent: "explore", mode: "injected-error" },
+    ];
+    try {
+      for (const scenario of scenarios) {
+        if (scenario.env === undefined) delete process.env.KDCO_BACKGROUND_METADATA;
+        else process.env.KDCO_BACKGROUND_METADATA = scenario.env;
+        const baseDirectory = await mkdtemp(join(tmpdir(), "workcell-metadata-"));
+        const requests: Array<{ path: { id: string }; body: any }> = [];
+        const created: any[] = [];
+        const deleted: string[] = [];
+        const logs: string[] = [];
+        let discoveryCalls = 0;
+        let generatorCalls = 0;
+        let releaseGenerator: () => void = () => {};
+        const generatorGate = new Promise<void>((resolve) => { releaseGenerator = resolve; });
+        const client = {
+          app: {
+            agents: async () => {
+              discoveryCalls += 1;
+              return { data: [
+                { name: scenario.agent, mode: "subagent" },
+                ...(scenario.mode === "missing-agent" ? [] : [{ name: "metadata", mode: "subagent" }]),
+              ] };
+            },
+            log: async () => ({}),
+          },
+          session: {
+            get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id } }),
+            create: async ({ body }: { body: any }) => {
+              created.push(body);
+              return { data: { id: created.length === 1 ? "child" : "metadata-child" } };
+            },
+            delete: async ({ path }: { path: { id: string } }) => { deleted.push(path.id); return {}; },
+            prompt: async (request: { path: { id: string }; body: any }) => {
+              requests.push(request);
+              if (request.body.agent === "metadata" && scenario.mode === "model-error") throw new Error("model unavailable");
+              const text = request.path.id === "child" ? result
+                : scenario.mode === "invalid-response" ? "not JSON" : JSON.stringify(generated);
+              return { data: { parts: [{ type: "text", text }] } };
+            },
+          },
+        };
+        const injected = scenario.mode.startsWith("injected-");
+        const manager = new DelegationManager(client as any, baseDirectory, {
+          ...silentLog,
+          debug: (message: string) => { logs.push(message); },
+        } as any, {
+          idGenerator: () => "calm-blue-otter",
+          allCompleteQuietPeriodMs: 1,
+          ...(injected ? { metadataGenerator: async (...args: any[]) => {
+            generatorCalls += 1;
+            expect(args.slice(0, 4)).toEqual([client, result, "child", "calm-blue-otter"]);
+            await generatorGate;
+            if (scenario.mode === "injected-error") throw new Error("injected metadata failure");
+            return generated;
+          } } : {}),
+        });
+        // Opt-in is captured at construction, not read during completion.
+        if (scenario.env === "1") delete process.env.KDCO_BACKGROUND_METADATA;
+        else process.env.KDCO_BACKGROUND_METADATA = "1";
+        try {
+          const record = await manager.delegate({
+            parentSessionID: "root", parentMessageID: "message", parentAgent: "build",
+            prompt: "Inspect the bounded repository scope.", agent: scenario.agent,
+          });
+          const initialArtifact = await manager.readOutput("root", record.id);
+          expect(record.status, scenario.mode).toBe("complete");
+          expect(initialArtifact).toContain(result);
+          const childRequest = requests.find((request) => request.path.id === "child")!;
+          const denied = { task: false, delegate: false, todowrite: false, plan_save: false };
+          expect(childRequest.body.tools).toEqual(scenario.agent === "reviewer" ? denied : {
+            ...denied, delegation_read: false, delegation_list: false,
+          });
+          if (scenario.agent === "reviewer") {
+            for (const permission of ["allow", "deny"] as const) {
+              const configured = { delegation_read: permission, delegation_list: permission };
+              expect({ ...configured, ...childRequest.body.tools }).toMatchObject(configured);
+            }
+          }
+          const fallback = generateFallbackMetadata(result, record.id);
+          if (injected) {
+            expect(record.title).toBe(fallback.title);
+            expect(initialArtifact).toContain(fallback.title);
+            releaseGenerator();
+          }
+          const enriched = scenario.mode === "success" || scenario.mode === "injected-success";
+          const expected = enriched ? generated : fallback;
+          const persistedCount = scenario.mode === "disabled" || scenario.mode === "injected-error" ? 1 : 2;
+          const deadline = Date.now() + 1_000;
+          while (Date.now() < deadline && (
+            logs.filter((line) => line.startsWith("persistOutput: wrote ")).length < persistedCount ||
+            (scenario.mode === "injected-error" && !logs.some((line) => line.includes("injected metadata failure")))
+          )) await Bun.sleep(5);
+          expect(logs.filter((line) => line.startsWith("persistOutput: wrote ")).length, scenario.mode).toBe(persistedCount);
+          expect(record.title, scenario.mode).toBe(expected.title);
+          expect(record.description, scenario.mode).toBe(expected.description);
+          const artifact = await manager.readOutput("root", record.id);
+          expect(artifact).toContain(expected.title);
+          expect(artifact).toContain(result);
+          expect(generatorCalls).toBe(injected ? 1 : 0);
+          expect(discoveryCalls, scenario.mode).toBe(scenario.mode === "disabled" || injected ? 1 : 2);
+          const usesModel = ["success", "invalid-response", "model-error"].includes(scenario.mode);
+          expect(created).toHaveLength(usesModel ? 2 : 1);
+          expect(requests.filter((request) => request.body.agent === "metadata")).toHaveLength(usesModel ? 1 : 0);
+          expect(deleted).toEqual(usesModel ? ["metadata-child"] : []);
+        } finally {
+          releaseGenerator();
+          await rm(baseDirectory, { recursive: true, force: true });
+        }
+      }
+    } finally {
+      if (previousMetadata === undefined) delete process.env.KDCO_BACKGROUND_METADATA;
+      else process.env.KDCO_BACKGROUND_METADATA = previousMetadata;
+    }
+  });
+
   test("rejects malformed generated delegation IDs before creating a child session", async () => {
     const baseDirectory = await mkdtemp(
       join(tmpdir(), "workcell-delegation-id-"),

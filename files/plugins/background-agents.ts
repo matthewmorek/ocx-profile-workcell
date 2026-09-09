@@ -14,6 +14,11 @@
  * KDCO_TASK_AGENTS=coder,debugger,tester,scribe,committer
  * KDCO_ORCHESTRATOR_AGENTS=plan,build
  *
+ * Optional LLM metadata enrichment (only the exact value `1` enables it):
+ * KDCO_BACKGROUND_METADATA=1
+ * Unset or any other value keeps deterministic metadata without metadata-agent
+ * discovery, temporary sessions, or model calls. Read when the manager is created.
+ *
  * Copied and modified from KDCO OCX/Workspace under MIT.
  * See THIRD_PARTY_NOTICES.md for immutable source mappings and notices.
  *
@@ -518,6 +523,7 @@ interface DelegationManagerOptions {
   idleFinalizationGraceMs?: number;
   allCompleteQuietPeriodMs?: number;
   idGenerator?: () => string;
+  // Supplying a generator explicitly opts into enrichment, including in tests.
   metadataGenerator?: typeof generateMetadata;
 }
 
@@ -605,7 +611,7 @@ class DelegationManager {
   private readonly idleFinalizationGraceMs: number;
   private readonly allCompleteQuietPeriodMs: number;
   private readonly idGenerator: () => string;
-  private readonly metadataGenerator: typeof generateMetadata;
+  private readonly metadataGenerator: typeof generateMetadata | undefined;
 
   constructor(
     client: OpencodeClient,
@@ -623,7 +629,9 @@ class DelegationManager {
     this.allCompleteQuietPeriodMs =
       options.allCompleteQuietPeriodMs ?? ALL_COMPLETE_QUIET_PERIOD_MS;
     this.idGenerator = options.idGenerator ?? generateReadableId;
-    this.metadataGenerator = options.metadataGenerator ?? generateMetadata;
+    this.metadataGenerator =
+      options.metadataGenerator ??
+      (process.env.KDCO_BACKGROUND_METADATA === "1" ? generateMetadata : undefined);
   }
 
   async getRootSessionID(sessionID: string): Promise<string> {
@@ -1218,6 +1226,10 @@ class DelegationManager {
   }
 
   private async enrichMetadata(delegationID: string, content: string): Promise<void> {
+    if (!this.metadataGenerator) {
+      return;
+    }
+
     const delegation = this.delegations.get(delegationID);
 
     if (!delegation || !content.trim()) {
@@ -1497,7 +1509,7 @@ class DelegationManager {
       /*
        * Persist before terminal waiters are resolved or the parent is
        * notified. The persisted header initially uses deterministic
-       * metadata and is atomically enriched later.
+       * metadata, which remains authoritative unless optional enrichment succeeds.
        */
       delegation.status = targetStatus;
       delegation.completedAt = new Date();
@@ -1516,7 +1528,9 @@ class DelegationManager {
        * Metadata enrichment is deliberately outside the completion
        * critical path. It cannot delay parent notification.
        */
-      void this.enrichMetadata(finalized.id, resolvedResult);
+      if (this.metadataGenerator) {
+        void this.enrichMetadata(finalized.id, resolvedResult);
+      }
     } catch (finalizationError) {
       const delegation = this.delegations.get(delegationID);
 
@@ -1650,8 +1664,10 @@ class DelegationManager {
           tools: {
             task: false,
             delegate: false,
-            delegation_read: false,
-            delegation_list: false,
+            // Preserve the reviewer's configured read permissions, never grant them.
+            ...(delegation.agent === "reviewer"
+              ? {}
+              : { delegation_read: false, delegation_list: false }),
             todowrite: false,
             plan_save: false,
           },
