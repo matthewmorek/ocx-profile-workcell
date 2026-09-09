@@ -35,7 +35,7 @@
         "lsp": "deny",
         "formatter": "deny",
         "task": "deny",
-        "todowrite": "deny",
+        "todowrite": "allow",
         "todoread": "deny",
         "external_directory": "deny",
 
@@ -79,7 +79,7 @@
         "grep": "deny",
         "lsp": "allow",
         "todowrite": "deny",
-        "todoread": "deny",
+        "todoread": "allow",
         "external_directory": "deny",
 
         "context7_*": "deny",
