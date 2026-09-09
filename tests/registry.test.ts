@@ -555,9 +555,9 @@ describe("self-contained Workcell registry", () => {
         temperature: 0.3,
         options: { reasoningEffort: "high", textVerbosity: "medium" },
         promptHash:
-          "7118513f19cbf2f399f6c19427a1f26805cf3242ea7a669971793fd69e1eba6b",
+          "1b9505d51aa4a77167fd6c7ebe786ae99a74eefb368aecadae07af3ac7df3473",
         permissionHash:
-          "0d454b72b405822958d92cc6a0d9a089c71ebfd9ab96695716a3155892c80607",
+          "a38d357aca6878996cd35d9bf3d890aea290dcbbd5474e7772aae916942821bd",
       },
       build: {
         mode: "primary",
@@ -565,9 +565,9 @@ describe("self-contained Workcell registry", () => {
         temperature: 0.3,
         options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash:
-          "9df5756dc38e91b4d544cfe07c6f36259fe5af4d427d632657298e246fcff98d",
+          "886bd7a56665bb5701fe3fc3964941018887515da9857bf7cdb8a3df02135c03",
         permissionHash:
-          "9f3fc4cee3d4818f87a8d9f33a78ec9a2007cf5ddabdc193166d5265eddd46cc",
+          "0a9b4ecd6b8cb6af1e731c34fe2f836e1fb8e2830796e8a3423008e1469e256e",
       },
       coder: {
         mode: "subagent",
@@ -621,7 +621,7 @@ describe("self-contained Workcell registry", () => {
         options: { reasoningEffort: "medium", textVerbosity: "low" },
         promptHash: null,
         permissionHash:
-          "5f2ca9314851177457b44938ce5af0c2acd1b35c124d9a5cac15a4a6d03f379b",
+          "9733bac4d4ea7387f6287099b3f3911126aa9b5a1cf789ceeab5104267c2e810",
       },
       reviewer: {
         mode: "subagent",
@@ -676,10 +676,18 @@ describe("self-contained Workcell registry", () => {
       expect(profileConfig.agent[name].textVerbosity).toBeUndefined();
     }
     expect({
-      plan: profileConfig.agent.plan.permission.skill,
-      build: profileConfig.agent.build.permission.skill,
-      reviewer: profileConfig.agent.reviewer.permission.skill,
-    }).toEqual({ plan: "allow", build: "allow", reviewer: "allow" });
+      planSkill: profileConfig.agent.plan.permission.skill,
+      planTodoWrite: profileConfig.agent.plan.permission.todowrite,
+      buildSkill: profileConfig.agent.build.permission.skill,
+      buildTodoRead: profileConfig.agent.build.permission.todoread,
+      reviewerSkill: profileConfig.agent.reviewer.permission.skill,
+    }).toEqual({
+      planSkill: "allow",
+      planTodoWrite: "allow",
+      buildSkill: "allow",
+      buildTodoRead: "allow",
+      reviewerSkill: "allow",
+    });
     expect(
       Object.entries(profileConfig.agent.committer.permission.bash),
     ).toEqual([
@@ -989,6 +997,138 @@ describe("high-risk deterministic plugin boundaries", () => {
       }
     } finally {
       await rm(baseDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves reviewer read configuration and gates metadata enrichment through the existing manager", async () => {
+    const { DelegationManager, generateFallbackMetadata } = BackgroundAgentsPlugin.testInternals;
+    const previousMetadata = process.env.KDCO_BACKGROUND_METADATA;
+    const result = "Repository checks complete\nEvidence: existing verification passed.";
+    const generated = { title: "Verified repository", description: "Existing verification passed." };
+    const scenarios = [
+      { env: undefined, agent: "reviewer", mode: "disabled" },
+      { env: "0", agent: "explore", mode: "disabled" },
+      { env: "true", agent: "researcher", mode: "disabled" },
+      { env: "01", agent: "reviewer", mode: "disabled" },
+      { env: "1 ", agent: "explore", mode: "disabled" },
+      { env: "1", agent: "reviewer", mode: "success" },
+      { env: "1", agent: "explore", mode: "invalid-response" },
+      { env: "1", agent: "researcher", mode: "missing-agent" },
+      { env: "1", agent: "reviewer", mode: "model-error" },
+      { env: undefined, agent: "reviewer", mode: "injected-success" },
+      { env: "0", agent: "explore", mode: "injected-error" },
+    ];
+    try {
+      for (const scenario of scenarios) {
+        if (scenario.env === undefined) delete process.env.KDCO_BACKGROUND_METADATA;
+        else process.env.KDCO_BACKGROUND_METADATA = scenario.env;
+        const baseDirectory = await mkdtemp(join(tmpdir(), "workcell-metadata-"));
+        const requests: Array<{ path: { id: string }; body: any }> = [];
+        const created: any[] = [];
+        const deleted: string[] = [];
+        const logs: string[] = [];
+        let discoveryCalls = 0;
+        let generatorCalls = 0;
+        let releaseGenerator: () => void = () => {};
+        const generatorGate = new Promise<void>((resolve) => { releaseGenerator = resolve; });
+        const client = {
+          app: {
+            agents: async () => {
+              discoveryCalls += 1;
+              return { data: [
+                { name: scenario.agent, mode: "subagent" },
+                ...(scenario.mode === "missing-agent" ? [] : [{ name: "metadata", mode: "subagent" }]),
+              ] };
+            },
+            log: async () => ({}),
+          },
+          session: {
+            get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id } }),
+            create: async ({ body }: { body: any }) => {
+              created.push(body);
+              return { data: { id: created.length === 1 ? "child" : "metadata-child" } };
+            },
+            delete: async ({ path }: { path: { id: string } }) => { deleted.push(path.id); return {}; },
+            prompt: async (request: { path: { id: string }; body: any }) => {
+              requests.push(request);
+              if (request.body.agent === "metadata" && scenario.mode === "model-error") throw new Error("model unavailable");
+              const text = request.path.id === "child" ? result
+                : scenario.mode === "invalid-response" ? "not JSON" : JSON.stringify(generated);
+              return { data: { parts: [{ type: "text", text }] } };
+            },
+          },
+        };
+        const injected = scenario.mode.startsWith("injected-");
+        const manager = new DelegationManager(client as any, baseDirectory, {
+          ...silentLog,
+          debug: (message: string) => { logs.push(message); },
+        } as any, {
+          idGenerator: () => "calm-blue-otter",
+          allCompleteQuietPeriodMs: 1,
+          ...(injected ? { metadataGenerator: async (...args: any[]) => {
+            generatorCalls += 1;
+            expect(args.slice(0, 4)).toEqual([client, result, "child", "calm-blue-otter"]);
+            await generatorGate;
+            if (scenario.mode === "injected-error") throw new Error("injected metadata failure");
+            return generated;
+          } } : {}),
+        });
+        // Opt-in is captured at construction, not read during completion.
+        if (scenario.env === "1") delete process.env.KDCO_BACKGROUND_METADATA;
+        else process.env.KDCO_BACKGROUND_METADATA = "1";
+        try {
+          const record = await manager.delegate({
+            parentSessionID: "root", parentMessageID: "message", parentAgent: "build",
+            prompt: "Inspect the bounded repository scope.", agent: scenario.agent,
+          });
+          const initialArtifact = await manager.readOutput("root", record.id);
+          expect(record.status, scenario.mode).toBe("complete");
+          expect(initialArtifact).toContain(result);
+          const childRequest = requests.find((request) => request.path.id === "child")!;
+          const denied = { task: false, delegate: false, todowrite: false, plan_save: false };
+          expect(childRequest.body.tools).toEqual(scenario.agent === "reviewer" ? denied : {
+            ...denied, delegation_read: false, delegation_list: false,
+          });
+          if (scenario.agent === "reviewer") {
+            for (const permission of ["allow", "deny"] as const) {
+              const configured = { delegation_read: permission, delegation_list: permission };
+              expect({ ...configured, ...childRequest.body.tools }).toMatchObject(configured);
+            }
+          }
+          const fallback = generateFallbackMetadata(result, record.id);
+          if (injected) {
+            expect(record.title).toBe(fallback.title);
+            expect(initialArtifact).toContain(fallback.title);
+            releaseGenerator();
+          }
+          const enriched = scenario.mode === "success" || scenario.mode === "injected-success";
+          const expected = enriched ? generated : fallback;
+          const persistedCount = scenario.mode === "disabled" || scenario.mode === "injected-error" ? 1 : 2;
+          const deadline = Date.now() + 1_000;
+          while (Date.now() < deadline && (
+            logs.filter((line) => line.startsWith("persistOutput: wrote ")).length < persistedCount ||
+            (scenario.mode === "injected-error" && !logs.some((line) => line.includes("injected metadata failure")))
+          )) await Bun.sleep(5);
+          expect(logs.filter((line) => line.startsWith("persistOutput: wrote ")).length, scenario.mode).toBe(persistedCount);
+          expect(record.title, scenario.mode).toBe(expected.title);
+          expect(record.description, scenario.mode).toBe(expected.description);
+          const artifact = await manager.readOutput("root", record.id);
+          expect(artifact).toContain(expected.title);
+          expect(artifact).toContain(result);
+          expect(generatorCalls).toBe(injected ? 1 : 0);
+          expect(discoveryCalls, scenario.mode).toBe(scenario.mode === "disabled" || injected ? 1 : 2);
+          const usesModel = ["success", "invalid-response", "model-error"].includes(scenario.mode);
+          expect(created).toHaveLength(usesModel ? 2 : 1);
+          expect(requests.filter((request) => request.body.agent === "metadata")).toHaveLength(usesModel ? 1 : 0);
+          expect(deleted).toEqual(usesModel ? ["metadata-child"] : []);
+        } finally {
+          releaseGenerator();
+          await rm(baseDirectory, { recursive: true, force: true });
+        }
+      }
+    } finally {
+      if (previousMetadata === undefined) delete process.env.KDCO_BACKGROUND_METADATA;
+      else process.env.KDCO_BACKGROUND_METADATA = previousMetadata;
     }
   });
 
@@ -1883,7 +2023,90 @@ describe("high-risk deterministic plugin boundaries", () => {
     }
   });
 
-  test("adds the plan-review reminder only for structured plan_save success", async () => {
+  test("normalizes standalone tester statuses with balanced Markdown", async () => {
+    const hooks = await WorkspacePlugin({ directory: repositoryRoot, client: {} } as any) as any;
+    const renderings = [
+      (status: string) => `RESULT: ${status}`,
+      (status: string) => `  result: ${status.toUpperCase()}  \r\nCOMMANDS: bun run test`,
+      (status: string) => `**RESULT:** ${status}`,
+      (status: string) => `__RESULT:__ ${status}`,
+      (status: string) => `**RESULT: ${status}**`,
+      (status: string) => `__RESULT: ${status}__`,
+      (status: string) => `\`RESULT: ${status}\``,
+      (status: string) => `RESULT: **${status}**`,
+      (status: string) => `RESULT: __${status}__`,
+      (status: string) => `RESULT: \`${status}\``,
+      (status: string) => `RESULT: ${status}\n**RESULT: ${status.toUpperCase()}**`,
+    ];
+    for (const status of ["passed", "failed", "blocked", "infrastructure-error"]) {
+      for (const [index, render] of renderings.entries()) {
+        const input = { tool: "task", sessionID: "status-normalization", callID: `${status}-${index}` };
+        await hooks["tool.execute.before"](input, { args: { subagent_type: "tester" } });
+        const output = { title: "", output: render(status), metadata: {} };
+        await hooks["tool.execute.after"](input, output);
+        expect(output.output).toContain(`Tester RESULT is ${status}.`);
+        expect(output.output).not.toContain("Tester result is invalid");
+      }
+    }
+  });
+
+  test.each([
+    "No status supplied",
+    "RESULT: unknown",
+    "RESULT: passed\nRESULT: failed",
+    "**RESULT: passed**\nRESULT: __blocked__",
+    "RESULT: passed\nRESULT: unknown",
+    "**RESULT: passed__",
+    "RESULT: **passed__",
+    "RESULT: `passed",
+    "RESULT: passed**",
+    "The RESULT: passed",
+    "> RESULT: passed",
+    "RESULT: passed with limitations",
+  ])("requests report-only correction, not blind reruns, for %s", async (report) => {
+    const hooks = await WorkspacePlugin({ directory: repositoryRoot, client: {} } as any) as any;
+    const input = { tool: "task", sessionID: "invalid-status", callID: "invalid-status-call" };
+    await hooks["tool.execute.before"](input, { args: { subagent_type: "tester" } });
+    const output = { title: "", output: report, metadata: {} };
+    await hooks["tool.execute.after"](input, output);
+    const reminder = output.output.slice(report.length);
+    expect(reminder).toContain("Tester result is invalid");
+    expect(reminder).toContain("report-only correction");
+    expect(reminder).toContain("existing tester evidence");
+    expect(reminder).toContain("do not rerun commands solely for formatting");
+    expect(reminder).toMatch(/If actual verification evidence is missing.*fresh verification of the gap/s);
+    expect(reminder).toContain("Do not route a reporting failure to debugger");
+    expect(reminder).not.toContain("proceed to `reviewer`");
+  });
+
+  test.each(["coder", "tester"])("tracks concurrent %s calls per session without claiming whole-plan completion", async (agent) => {
+    const hooks = await WorkspacePlugin({ directory: repositoryRoot, client: {} } as any) as any;
+    const calls = ["first", "second", "other-root"].map((callID) => ({
+      tool: "task", sessionID: callID === "other-root" ? "batch-b" : "batch-a", callID: `${agent}-${callID}`,
+    }));
+    await Promise.all(calls.map((input) => hooks["tool.execute.before"](input, { args: { subagent_type: agent } })));
+    const result = agent === "coder" ? "RESULT: completed" : "RESULT: passed";
+    const finish = async (input: typeof calls[number]) => {
+      const output = { title: "", output: result, metadata: {} };
+      await hooks["tool.execute.after"](input, output);
+      return output.output;
+    };
+    expect(await finish(calls[0]!)).toBe(result);
+
+    const completed = await finish(calls[1]!);
+    if (agent === "coder") {
+      expect(completed).toContain("When an implementation batch is ready");
+      expect(completed).toContain("does not mean the final planned task");
+      expect(completed).toContain("independent existing verification");
+    } else {
+      expect(completed).toContain("only the verified scope");
+      expect(completed).toContain("do not imply the entire plan is verified");
+    }
+    expect(await finish(calls[1]!)).toBe(result);
+    expect(await finish(calls[2]!)).toContain("<system-reminder>");
+  });
+
+  test("saves shared plans without review reminders and preserves validation and root isolation", async () => {
     const sandbox = await mkdtemp(join(tmpdir(), "workcell-plan-save-"));
     const previousHome = process.env.HOME;
     process.env.HOME = sandbox;
@@ -1894,7 +2117,10 @@ describe("high-risk deterministic plugin boundaries", () => {
         client: {
           session: {
             get: async ({ path }: { path: { id: string } }) => ({
-              data: { id: path.id },
+              data: {
+                id: path.id,
+                parentID: new Map([["child", "session-a"], ["grandchild", "child"]]).get(path.id),
+              },
             }),
           },
         },
@@ -1912,9 +2138,29 @@ describe("high-risk deterministic plugin boundaries", () => {
         { tool: "plan_save", sessionID: "session-a", callID: "call-a" },
         successOutput,
       );
-      expect(successOutput.output).toContain(
-        "Plan saved successfully. You MUST now delegate to the reviewer",
-      );
+      expect(successOutput.output).toBe("Plan saved.");
+      const readPlan = (sessionID: string) =>
+        hooks.tool.plan_read.execute({ reason: "Verify session scope" }, { sessionID });
+      expect(await readPlan("session-a")).toBe(validPlan);
+      expect(await readPlan("child")).toBe(validPlan);
+      expect(await readPlan("grandchild")).toBe(validPlan);
+      expect(await readPlan("session-b")).toBe("No plan found.");
+
+      const otherPlan = validPlan.replace("Repair the validated plan workflow.", "Keep unrelated work isolated.");
+      await hooks.tool.plan_save.execute({ content: otherPlan }, { sessionID: "session-b" });
+      const revisedPlan = validPlan.replace("Apply the repair", "Apply the revised repair");
+      expect(await hooks.tool.plan_save.execute(
+        { content: revisedPlan }, { sessionID: "grandchild" },
+      )).toBe("Plan saved.");
+      expect(await readPlan("session-a")).toBe(revisedPlan);
+      expect(await readPlan("child")).toBe(revisedPlan);
+      expect(await readPlan("session-b")).toBe(otherPlan);
+
+      const compacted = { context: [] as string[] };
+      await hooks["experimental.session.compacting"]({ sessionID: "child" }, compacted);
+      expect(compacted.context.join("\n")).toContain(revisedPlan);
+      expect(compacted.context.join("\n")).not.toContain(otherPlan);
+      expect(compacted.context.join("\n")).toContain("may not reflect execution progress");
 
       const failureOutput = {
         title: "",
@@ -1931,6 +2177,56 @@ describe("high-risk deterministic plugin boundaries", () => {
       );
       expect(failureOutput.output).toBe(originalFailure);
       expect(failureOutput.output).not.toContain("delegate to the reviewer");
+      expect(failureOutput.output).toContain("❌");
+      expect(await readPlan("session-a")).toBe(revisedPlan);
+      expect(await readPlan("session-b")).toBe(otherPlan);
+
+      const warningOutput = {
+        title: "",
+        output: await hooks.tool.plan_save.execute(
+          { content: `${revisedPlan}\n## Phase 2: Follow-up [IN PROGRESS]\n- [ ] 2.1 Check the revision\n` },
+          { sessionID: "child" },
+        ),
+        metadata: {},
+      };
+      const originalWarning = warningOutput.output;
+      await hooks["tool.execute.after"](
+        { tool: "plan_save", sessionID: "child", callID: "warning-call" }, warningOutput,
+      );
+      expect(warningOutput.output).toBe(originalWarning);
+      expect(warningOutput.output).toContain("Plan saved.");
+      expect(warningOutput.output).toContain("warnings:");
+
+      for (const agent of ["plan", "build"]) {
+        const output = { system: [] as string[] };
+        await hooks["experimental.chat.system.transform"]({ agent }, output);
+        const rules = output.system.join("\n");
+        expect(rules).toContain("design artifact, not a live progress ledger");
+        expect(rules).toContain("does not automatically require review, delegation, or a reread");
+        expect(rules).toContain("do not repeat reads for each task");
+        expect(rules).toContain("do not copy the full plan into prompts");
+        expect(rules).toContain("task IDs or section references");
+        expect(rules).not.toContain("Update immediately");
+        if (agent === "build") {
+          expect(rules).toContain("Do not claim completion without independent tester evidence");
+          expect(rules).toContain("Do NOT review before tester evidence");
+        }
+      }
+
+      for (const [agent, result, reminder] of [
+        ["coder", "Implementation ready", "independent existing verification"],
+        ["tester", "RESULT: passed", "proceed to `reviewer`"],
+        ["tester", "RESULT: failed", "Route correction"],
+        ["tester", "RESULT: blocked", "material verification limitation"],
+        ["tester", "RESULT: infrastructure-error", "material verification limitation"],
+        ["tester", "No result", "Tester result is invalid"],
+      ]) {
+        const input = { tool: "task", sessionID: "session-a", callID: `verify-${agent}-${result}` };
+        await hooks["tool.execute.before"](input, { args: { subagent_type: agent } });
+        const output = { title: "", output: result, metadata: {} };
+        await hooks["tool.execute.after"](input, output);
+        expect(output.output).toContain(reminder);
+      }
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;

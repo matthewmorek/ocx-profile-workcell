@@ -13,7 +13,7 @@ When creating or updating a plan, ensure:
 
 - [ ] YAML frontmatter with `status`, `phase`, `updated`
 - [ ] `## Goal` section (one sentence)
-- [ ] `## Context & Decisions` table with citations (`ref:delegation-id`)
+- [ ] `## Context & Decisions` table with provenance (user constraints, repository paths/sections, or `ref:delegation-id` for delegated research)
 - [ ] Phases with status markers: `[COMPLETE]`, `[IN PROGRESS]`, `[PENDING]`
 - [ ] Tasks with hierarchical numbering (1.1, 1.2, 2.1)
 - [ ] Only ONE task marked `← CURRENT`
@@ -25,7 +25,7 @@ When creating or updating a plan, ensure:
 
 1. Starting a multi-step implementation
 2. After receiving a complex user request
-3. When tracking progress across phases
+3. When defining or substantively revising a multi-phase design
 4. After research that informs architectural decisions
 
 ## When NOT to Use
@@ -126,8 +126,10 @@ not-started → in-progress → complete
 
 1. **Only ONE phase** may be `[IN PROGRESS]` at any time
 2. **Only ONE task** may have `← CURRENT` marker at any time
-3. **Move `← CURRENT`** immediately when starting a new task
-4. **Mark tasks `[x]`** immediately after completing them
+3. **Treat markers as a saved snapshot**, not authoritative live execution progress
+4. **Track routine progress separately** in task results and primary-session context; do not rewrite or delegate updates to the full plan for each completed task
+
+The accepted shared plan is the design reference. Save substantive design revisions, not unchanged content or progress-only updates. Children read it directly with `plan_read` when context is missing or known to have changed; handoffs reference bounded task IDs or sections rather than copying the plan. Saving does not initiate review.
 
 ---
 
@@ -135,7 +137,9 @@ not-started → in-progress → complete
 
 ### Where Citations Come From
 
-Citations reference delegation research. The flow is:
+Cite the actual basis of each decision: an explicit user constraint, an established repository convention with its path/section, or relevant research. These are valid provenance; not every decision needs external research. Request research only for material unresolved external or version-sensitive claims. Never manufacture citations or commission research merely to fill the Source column.
+
+For delegated research, the flow is:
 
 1. You delegate research: `delegate` to `researcher` or `explore`
 2. Delegation completes with a readable ID (e.g., `swift-amber-falcon`)
@@ -151,8 +155,9 @@ Citations reference delegation research. The flow is:
 
 ### How to Find Delegation IDs
 
-- Use `delegation_list()` to see all delegations
-- Use `delegation_read("id")` to verify content before citing
+- Reuse relevant delegation IDs and evidence already in context
+- Use `delegation_list()` only when a relevant artifact ID is unknown
+- Use `delegation_read("id")` when its content is missing and needed before citing
 
 ### ❌ NEVER
 
@@ -240,7 +245,7 @@ Add authentication
 | Use Redis | It's fast | -      |
 ```
 
-**Error:** Decisions must cite research with `ref:delegation-id`.
+**Error:** This performance claim lacks supporting provenance. Cite relevant evidence with `ref:delegation-id` when research informed it; if the choice instead follows a user constraint or established repository convention, identify that actual source without inventing research.
 
 ### ❌ WRONG: Invalid phase status
 
@@ -271,7 +276,7 @@ Before calling `plan_save`, verify:
 
 - [ ] **Frontmatter:** Has status, phase, and updated date?
 - [ ] **Goal:** Is there a clear, one-sentence goal?
-- [ ] **Citations:** Are all research-based decisions cited with `ref:id`?
+- [ ] **Provenance:** Are user/repository decisions attributed to their actual source, and delegated research-based decisions cited with `ref:id`?
 - [ ] **Single CURRENT:** Is exactly one task marked `← CURRENT`?
 - [ ] **Valid markers:** Do all phases use valid status markers?
 - [ ] **Hierarchical IDs:** Are tasks numbered correctly (1.1, 1.2, 2.1)?
