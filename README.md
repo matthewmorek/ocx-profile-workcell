@@ -89,6 +89,41 @@ rewriting the plan. Independent verification and review apply to ready implement
 batches, not every intermediate child result. Reporting-only corrections reuse
 existing evidence; missing or stale evidence still requires fresh verification.
 
+## Shared and archived plans
+
+`plan_read({ reason })` without a path reads the Workcell root-session shared plan.
+An optional `path` reads one exact user-selected Markdown file from the default
+Plannotator archive, intentionally across projects:
+
+```text
+plan_read({
+  reason: "Review the user's approved archive plan",
+  path: "~/.plannotator/plans/example-approved.md"
+})
+```
+
+Archive reads return raw Markdown and do not replace the shared plan, save anything,
+or authorize implementation. The `-approved.md` suffix is not authorization; user
+scope and approval still govern the work. If sources are missing or conflict, report
+that instead of guessing. Workers must use this exact-path reader, not ordinary
+`Read` or a no-path fallback; ordinary `Read` outside the workspace remains denied.
+Explore and researcher tool permissions are unchanged, so parents must provide
+self-contained assignments.
+
+The archive root is selected once at plugin startup: a nonblank
+`PLANNOTATOR_DATA_DIR` (with `~` expansion and relative values resolved from the
+process working directory), otherwise an existing `~/.plannotator`, otherwise an
+absolute `XDG_DATA_HOME/plannotator`, otherwise `~/.plannotator`. Plans are read
+under its `plans` directory. The selected path must be one exact regular `.md` file,
+with no listing, globbing, interpolation, symlinks, or custom-save roots, and no
+larger than 1 MiB; oversized files are rejected rather than truncated. Obsidian and
+other custom archives/tools are deferred—there is no arbitrary external filesystem
+access.
+
+Deliberate promotion with `plan_save` requires Workcell-format Markdown and
+preservation of the approved scope. Material changes require renewed approval.
+There is no storage migration; existing archive artifacts are untouched.
+
 Background delegations use deterministic titles and descriptions by default.
 To opt into model-generated metadata, set `KDCO_BACKGROUND_METADATA=1` before
 launching OpenCode. Only the exact value `1` enables enrichment; the setting is
@@ -101,7 +136,9 @@ metadata retained if enrichment fails.
 
 Installing or updating Workcell does not change the profile of an already
 running session. Launch a fresh session with `ocx oc -p workcell` to use the
-installed profile.
+installed profile; the profile is not hot reloaded. After deploying or installing a
+candidate through the normal authorized workflow, quit the running session and start
+a fresh one. To roll back, restart the prior profile; archive artifacts are untouched.
 
 If `delegate` is missing, check the resolved Workcell `plan` identity first. A
 wrong or stale Workcell plan can look like a tool failure. If
