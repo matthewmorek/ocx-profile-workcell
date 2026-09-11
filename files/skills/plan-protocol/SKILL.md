@@ -131,6 +131,43 @@ not-started → in-progress → complete
 
 The accepted shared plan is the design reference. Save substantive design revisions, not unchanged content or progress-only updates. Children read it directly with `plan_read` when context is missing or known to have changed; handoffs reference bounded task IDs or sections rather than copying the plan. Saving does not initiate review.
 
+### Shared plan and explicit archive reads
+
+Call `plan_read({ reason })` without `path` for the Workcell root-session shared
+plan. For a user-selected Plannotator archive, call it with the exact absolute or
+`~/` path and a reason, for example:
+
+```text
+plan_read({
+  reason: "Review the user's approved archive plan",
+  path: "~/.plannotator/plans/example-approved.md"
+})
+```
+
+The explicit path selects one exact regular `.md` file under the startup-selected
+default archive's `plans` directory. It supports absolute and `~/` paths only; it
+does not list, glob, interpolate, or select the latest file. It rejects symlinks and
+nonregular files, and rejects files over 1 MiB rather than truncating them. The
+archive root is captured at startup from nonblank `PLANNOTATOR_DATA_DIR`
+(`~` expansion; relative values use the process working directory), then an existing
+`~/.plannotator`, then absolute `XDG_DATA_HOME/plannotator`, then
+`~/.plannotator`; the reader appends `plans` to that root. This is intentionally
+cross-project archive access for agents already permitted `plan_read`.
+
+Archive content is returned as raw Markdown: it is not parsed by the shared-plan
+reader, saved, automatically promoted or approved, or used to overwrite the shared
+plan. A filename such as `-approved.md` is not authorization, and user scope
+dominates. Report missing or conflicting sources rather than falling back to the
+shared plan or guessing another source. Workers should use this custom reader with
+the exact parent/user-selected path; do not use ordinary `Read` outside the
+workspace or a no-path fallback.
+Explore and researcher permissions remain unchanged. Custom archives and other
+archive tools are deferred; arbitrary external filesystem access is not available.
+
+Deliberate promotion with `plan_save` requires adapting the archive content to the
+Workcell format while preserving approved scope. Material changes require renewed
+approval. Reading, filenames, and saving do not authorize implementation.
+
 ---
 
 ## Citations & Delegations

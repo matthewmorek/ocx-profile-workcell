@@ -1,3 +1,4 @@
+import { constants } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -354,6 +355,103 @@ function parseTesterResult(taskOutput: string): TesterResult | null {
 }
 
 // ==========================================
+// EXPLICIT PLANNOTATOR ARCHIVE READS
+// ==========================================
+
+const ARCHIVE_PLAN_MAX_BYTES = 1024 * 1024
+
+/** Original local archive reader. Startup configuration and archive ownership are trusted;
+ * this is not a defense against hostile concurrent directory-tree substitution.
+ * Only ancestors of the selected data directory may be symlink aliases (e.g. macOS /var).
+ */
+async function createArchivePlanReader() {
+	const home = process.env.HOME || os.homedir()
+	const cwd = process.cwd()
+	const configured = process.env.PLANNOTATOR_DATA_DIR?.trim()
+	const xdg = process.env.XDG_DATA_HOME
+	const legacy = path.join(home, ".plannotator")
+	let dataDir: string
+	if (configured) {
+		const expanded = configured === "~" ? home
+			: configured.startsWith("~/") ? path.join(home, configured.slice(2)) : configured
+		dataDir = path.resolve(cwd, expanded)
+	} else {
+		let legacyExists = true
+		try {
+			await fs.lstat(legacy)
+		} catch (error) {
+			if (isNodeError(error) && error.code === "ENOENT") legacyExists = false
+			else throw error
+		}
+		dataDir = legacyExists || !xdg || !path.isAbsolute(xdg) ? legacy : path.join(xdg, "plannotator")
+	}
+	const archive = path.join(dataDir, "plans")
+	const lexicalRoots = [archive]
+	try {
+		lexicalRoots.push(path.join(await fs.realpath(path.dirname(dataDir)), path.basename(dataDir), "plans"))
+	} catch (error) {
+		if (!isNodeError(error) || error.code !== "ENOENT") throw error
+	}
+	const below = (root: string, target: string) => {
+		const relative = path.relative(root, target)
+		return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+	}
+	return async (input: string): Promise<string> => {
+		if (!input || (!path.isAbsolute(input) && !input.startsWith("~/")) || /[$`\0*?[\]{}]/.test(input)) {
+			return "❌ Archive plan input: provide one literal absolute or ~/ path; no URLs, interpolation, or globbing."
+		}
+		const target = path.resolve(input.startsWith("~/") ? path.join(home, input.slice(2)) : input)
+		const lexicalRoot = lexicalRoots.find((root) => below(root, target))
+		if (!lexicalRoot) return `❌ Archive plan location: select a file below ${archive}.`
+		if (path.extname(target) !== ".md") return "❌ Archive plan input: select a .md file."
+		try {
+			for (const directory of [dataDir, archive]) {
+				const stat = await fs.lstat(directory)
+				if (stat.isSymbolicLink()) return `❌ Archive plan symlink: selected directory must not be a symbolic link: ${directory}`
+				if (!stat.isDirectory()) return `❌ Archive plan nonregular location: expected a directory: ${directory}`
+			}
+			const canonicalArchive = await fs.realpath(archive)
+			const components = path.relative(lexicalRoot, target).split(path.sep)
+			let current = canonicalArchive
+			for (const [index, component] of components.entries()) {
+				current = path.join(current, component)
+				const stat = await fs.lstat(current)
+				if (stat.isSymbolicLink()) return `❌ Archive plan symlink: select a path without symbolic links: ${current}`
+				if (index < components.length - 1 ? !stat.isDirectory() : !stat.isFile()) {
+					return `❌ Archive plan nonregular target: select a regular Markdown file through directories: ${current}`
+				}
+			}
+			const canonicalTarget = await fs.realpath(target)
+			if (!below(canonicalArchive, canonicalTarget)) return `❌ Archive plan location: resolved file is outside ${archive}.`
+			const file = await fs.open(canonicalTarget, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+			try {
+				const stat = await file.stat()
+				if (!stat.isFile()) return "❌ Archive plan nonregular target: select a regular Markdown file."
+				const oversize = `❌ Archive plan size: maximum is ${ARCHIVE_PLAN_MAX_BYTES} bytes (1 MiB); select a smaller file.`
+				if (stat.size > ARCHIVE_PLAN_MAX_BYTES) return oversize
+				const buffer = Buffer.alloc(ARCHIVE_PLAN_MAX_BYTES + 1)
+				let bytes = 0
+				while (bytes < buffer.length) {
+					const { bytesRead } = await file.read(buffer, bytes, buffer.length - bytes, null)
+					if (!bytesRead) break
+					bytes += bytesRead
+				}
+				return bytes > ARCHIVE_PLAN_MAX_BYTES ? oversize : buffer.subarray(0, bytes).toString("utf8")
+			} finally {
+				await file.close()
+			}
+		} catch (error) {
+			if (isNodeError(error)) {
+				if (error.code === "ENOENT") return `❌ Archive plan missing: check the selected archive directory and exact file: ${target}`
+				if (error.code === "ELOOP") return `❌ Archive plan symlink: select a path without symbolic links: ${target}`
+				if (error.code === "ENOTDIR") return `❌ Archive plan nonregular location: a path component is not a directory: ${target}`
+			}
+			throw new Error(`Unable to read archive plan ${target}: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+		}
+	}
+}
+
+// ==========================================
 // RULES FOR INJECTION
 // ==========================================
 
@@ -363,6 +461,8 @@ Treat the accepted plan as a design artifact, not a live progress ledger. Save s
 Saving a plan does not automatically require review, delegation, or a reread. Review is an explicit orchestration decision.
 Use the plan already in context. Call \`plan_read\` only when the plan is missing or known to have changed; do not repeat reads for each task.
 Give child agents bounded assignments with task IDs or section references to the shared saved plan, scope, constraints, and expected evidence; do not copy the full plan into prompts. Children can use \`plan_read\` when they need missing plan context.
+For a user-selected Plannotator archive, the parent supplies its exact path plus the bounded assignment. Workers with this tool use \`plan_read(path)\`, not ordinary Read or a no-path fallback. Report missing or conflicting sources rather than guessing. Explore and researcher do not have plan_read.
+Explicit archive reads span projects in this user's selected default archive, not session-isolated storage. They return raw Markdown without replacing the shared plan. Reading, filenames (including -approved), and saving do not authorize implementation. Deliberate promotion via \`plan_save\` must conform to the Workcell schema and preserve accepted scope; material changes require approval.
 </shared-plan>`
 
 const PLAN_RULES = `<system-reminder>
@@ -452,7 +552,7 @@ updated: YYYY-MM-DD
 1. **One CURRENT task** - Only one task may have ← CURRENT
 2. **Cite decisions** - Record user constraints or repository paths/sections as provenance; use \`ref:delegation-id\` for choices informed by delegated research. Research only material unresolved external or version-sensitive claims; never manufacture citations
 3. **Track progress separately** - Routine task completion does not require a full-plan save
-4. **Auto-save after approval** - When user approves your plan, immediately call \`plan_save\`. Do NOT wait for user to remind you or switch modes.
+4. **Auto-save after approval** - When user approves your Workcell-authored plan, immediately call \`plan_save\`. An external archive read is not automatic promotion; deliberately adapt it to the Workcell schema only when promotion is intended, preserving accepted scope.
 </plan-format>
 
 <instruction name="plan_persistence" policy_level="critical">
@@ -577,6 +677,12 @@ Do NOT claim "done" or "complete" without that evidence or disposition.
 
 const WorkspacePlugin: Plugin = async (ctx) => {
 	const { directory } = ctx
+	const readArchivePlan = await createArchivePlanReader().catch((error: unknown) => {
+		// Optional archive failure must not disable shared-plan tools or compaction.
+		// Keep the startup failure: path calls must not retry configuration or fall back.
+		const message = `❌ Archive plan unavailable: startup initialization failed: ${error instanceof Error ? error.message : String(error)}. Check the startup Plannotator data directory and its parent directories, then restart OpenCode.`
+		return async () => message
+	})
 
 	// Use git root commit hash for cross-worktree consistency
 	const projectId = await getProjectId(directory)
@@ -610,7 +716,7 @@ const WorkspacePlugin: Plugin = async (ctx) => {
 		tool: {
 			plan_save: tool({
 				description:
-					"Save the implementation plan as markdown. Must include citations (ref:delegation-id) for decisions based on research. Plan is validated before saving.",
+					"Save the implementation plan as Workcell-schema markdown. Deliberate archive promotion must preserve accepted scope; material changes require approval. Saving does not authorize implementation. Must include citations (ref:delegation-id) for decisions based on research. Plan is validated before saving.",
 				args: {
 					content: tool.schema.string().describe("The full plan in markdown format"),
 				},
@@ -641,17 +747,19 @@ const WorkspacePlugin: Plugin = async (ctx) => {
 			}),
 
 			plan_read: tool({
-				description: "Read the current implementation plan for this session.",
+				description: "Without path, read the root-session shared implementation plan. With path, read one exact user-selected .md file (max 1 MiB) from the startup-selected default Plannotator archive, across projects. Returns raw Markdown, not approval or shared-plan replacement. Use this instead of ordinary Read for that archive; report explicit-path errors or source conflicts, never fall back to the shared plan or guess another source.",
 				args: {
+					path: tool.schema.string().optional().describe("Exact user-selected absolute or ~/ archive .md path; no listing, globbing, interpolation, or latest selection. Omit only to read the shared session plan."),
 					reason: tool.schema
 						.string()
 						.describe("Brief explanation of why you are calling this tool"),
 				},
-				async execute(_args, toolCtx) {
+				async execute(args, toolCtx) {
 					// Guard: Session required (Law 1: Early Exit)
 					if (!toolCtx?.sessionID) {
 						return "❌ plan_read requires sessionID. This is a system error."
 					}
+					if (args.path !== undefined) return readArchivePlan(args.path)
 					const rootID = await getRootSessionID(toolCtx.sessionID)
 					const planPath = path.join(baseDir, rootID, "plan.md")
 					try {

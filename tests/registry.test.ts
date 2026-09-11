@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   lstat,
@@ -12,6 +12,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -525,7 +526,7 @@ describe("self-contained Workcell registry", () => {
 
   test("publishes the canonical profile configuration with all identities and nested options", () => {
     expect(profileConfig).toMatchObject({
-      model: "openai/gpt-5.6-sol",
+      model: "openai/gpt-6-astra",
       small_model: "openai/gpt-5.6-luna",
       default_agent: "plan",
       subagent_depth: 1,
@@ -551,7 +552,7 @@ describe("self-contained Workcell registry", () => {
     const expectedAgentMatrix = {
       plan: {
         mode: "primary",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.3,
         options: { reasoningEffort: "high", textVerbosity: "medium" },
         promptHash:
@@ -561,7 +562,7 @@ describe("self-contained Workcell registry", () => {
       },
       build: {
         mode: "primary",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.3,
         options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash:
@@ -571,7 +572,7 @@ describe("self-contained Workcell registry", () => {
       },
       coder: {
         mode: "subagent",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.1,
         options: { reasoningEffort: "medium", textVerbosity: "low" },
         promptHash: null,
@@ -580,7 +581,7 @@ describe("self-contained Workcell registry", () => {
       },
       debugger: {
         mode: "subagent",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.1,
         options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash: null,
@@ -625,7 +626,7 @@ describe("self-contained Workcell registry", () => {
       },
       reviewer: {
         mode: "subagent",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.1,
         options: { reasoningEffort: "high", textVerbosity: "medium" },
         promptHash: null,
@@ -634,7 +635,7 @@ describe("self-contained Workcell registry", () => {
       },
       committer: {
         mode: "subagent",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.1,
         options: { reasoningEffort: "low", textVerbosity: "low" },
         promptHash: null,
@@ -772,6 +773,21 @@ describe("self-contained Workcell registry", () => {
       plan_read: "allow",
       task: "deny",
     });
+    for (const agent of [
+      "coder",
+      "debugger",
+      "tester",
+      "scribe",
+      "committer",
+      "reviewer",
+      "explore",
+      "researcher",
+    ]) {
+      expect(profileConfig.agent[agent].permission).toMatchObject({
+        external_directory: "deny",
+        plan_read: ["explore", "researcher"].includes(agent) ? "deny" : "allow",
+      });
+    }
   });
 
   test("contains no forbidden runtime dependency, integration, artifact, secret, symlink, or machine path", async () => {
@@ -2106,8 +2122,323 @@ describe("high-risk deterministic plugin boundaries", () => {
     expect(await finish(calls[2]!)).toContain("<system-reminder>");
   });
 
+  test("plan_read explicit archive path never substitutes the shared plan", async () => {
+    const sandbox = await mkdtemp(join(repositoryRoot, ".plan-read-test-"));
+    const home = spyOn(os, "homedir").mockReturnValue(sandbox);
+    const keys = ["HOME", "PLANNOTATOR_DATA_DIR", "XDG_DATA_HOME"] as const;
+    const previous = keys.map((key) => process.env[key]);
+    process.env.HOME = sandbox;
+    delete process.env.PLANNOTATOR_DATA_DIR;
+    delete process.env.XDG_DATA_HOME;
+    try {
+      const archive = join(sandbox, ".plannotator", "plans");
+      await mkdir(archive, { recursive: true });
+      const selected = join(archive, "selected.md");
+      const markdown =
+        "# User-selected archive\n\nArbitrary Markdown — not a Workcell plan.\n";
+      await writeFile(selected, markdown);
+      const hooks = (await WorkspacePlugin({
+        directory: sandbox,
+        client: {
+          session: {
+            get: async ({ path }: { path: { id: string } }) => ({
+              data: {
+                id: path.id,
+                parentID: path.id === "child" ? "root" : undefined,
+              },
+            }),
+          },
+        },
+      } as any)) as any;
+      const shared =
+        "---\nstatus: in-progress\nphase: 1\nupdated: 2026-09-10\n---\n\n## Goal\nKeep the different shared plan.\n\n## Phase 1: Work [IN PROGRESS]\n- [ ] 1.1 Keep shared state ← CURRENT\n";
+      expect(
+        await hooks.tool.plan_save.execute(
+          { content: shared },
+          { sessionID: "root" },
+        ),
+      ).toBe("Plan saved.");
+      expect(
+        await hooks.tool.plan_read.execute(
+          { reason: "Selected source", path: selected },
+          { sessionID: "child" },
+        ),
+      ).toBe(markdown);
+      const read = (path: string, sessionID = "child") =>
+        hooks.tool.plan_read.execute(
+          { reason: "Selected source", path },
+          { sessionID },
+        );
+      expect(await read("~/.plannotator/plans/selected.md")).toBe(markdown);
+      expect(await read(selected, "no-shared-plan")).toBe(markdown);
+      expect(
+        await hooks.tool.plan_read.execute(
+          { reason: "Guard", path: selected },
+          {},
+        ),
+      ).toContain("requires sessionID");
+      const before = await readdir(sandbox, { recursive: true });
+      for (const input of [
+        "",
+        "selected.md",
+        "https://example.com/plan.md",
+        "file:///plan.md",
+        "~other/plans/a.md",
+        "$HOME/a.md",
+        `${archive}/$(id).md`,
+        `${archive}/*.md`,
+      ]) {
+        expect(await read(input)).toContain("Archive plan input:");
+      }
+      for (const input of [
+        `${archive}/../outside.md`,
+        `${archive}-sibling/a.md`,
+        join(sandbox, "unrelated.md"),
+      ]) {
+        expect(await read(input)).toContain("Archive plan location:");
+      }
+      expect(await read(join(archive, "a.txt"))).toContain("select a .md file");
+      expect(await read(join(archive, "missing", "a.md"))).toContain(
+        "Archive plan missing:",
+      );
+      expect((await readdir(sandbox, { recursive: true })).sort()).toEqual(
+        before.sort(),
+      );
+      await mkdir(join(archive, "directory.md"));
+      expect(await read(join(archive, "directory.md"))).toContain(
+        "Archive plan nonregular",
+      );
+      await symlink(selected, join(archive, "linked.md"));
+      await symlink(archive, join(archive, "linked-dir"));
+      expect(await read(join(archive, "linked.md"))).toContain(
+        "Archive plan symlink:",
+      );
+      expect(await read(join(archive, "linked-dir", "selected.md"))).toContain(
+        "Archive plan symlink:",
+      );
+      const fifo = join(archive, "pipe.md");
+      expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+      expect(await read(fifo)).toContain("Archive plan nonregular");
+      const limit = join(archive, "limit.md");
+      const exact = "é".repeat(512 * 1024);
+      await writeFile(limit, exact);
+      expect(await read(limit)).toBe(exact);
+      await writeFile(limit, `${exact}x`);
+      expect(await read(limit)).toContain("Archive plan size:");
+      expect(await readFile(selected, "utf8")).toBe(markdown);
+      expect(
+        await hooks.tool.plan_read.execute(
+          { reason: "Shared unchanged" },
+          { sessionID: "child" },
+        ),
+      ).toBe(shared);
+      const compacted = { context: [] as string[] };
+      await hooks["experimental.session.compacting"](
+        { sessionID: "child" },
+        compacted,
+      );
+      expect(compacted.context.join("\n")).toContain(shared);
+      expect(compacted.context.join("\n")).not.toContain(markdown);
+    } finally {
+      keys.forEach((key, index) => {
+        if (previous[index] === undefined) delete process.env[key];
+        else process.env[key] = previous[index];
+      });
+      home.mockRestore();
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["configured", "legacy"])("archive startup failure (%s) preserves shared plan tools and compaction", async (source) => {
+    const sandbox = await mkdtemp(join(repositoryRoot, ".plan-read-test-"));
+    const home = spyOn(os, "homedir").mockReturnValue(sandbox);
+    const keys = ["HOME", "PLANNOTATOR_DATA_DIR", "XDG_DATA_HOME"] as const;
+    const previous = keys.map((key) => process.env[key]);
+    try {
+      const blocker = join(sandbox, "blocker");
+      await writeFile(blocker, "not a directory");
+      process.env.HOME = source === "legacy" ? blocker : sandbox;
+      if (source === "configured") {
+        process.env.PLANNOTATOR_DATA_DIR = join(blocker, "nested", "data");
+      } else {
+        delete process.env.PLANNOTATOR_DATA_DIR;
+      }
+      process.env.XDG_DATA_HOME = join(sandbox, "xdg");
+      const selected = join(
+        source === "configured" ? process.env.PLANNOTATOR_DATA_DIR! : join(blocker, ".plannotator"),
+        "plans", "selected.md",
+      );
+      const hooks = (await WorkspacePlugin({
+        directory: sandbox,
+        client: {
+          session: {
+            get: async ({ path }: { path: { id: string } }) => ({
+              data: { id: path.id, parentID: path.id === "child" ? "root" : undefined },
+            }),
+          },
+        },
+      } as any)) as any;
+      const shared = "---\nstatus: in-progress\nphase: 1\nupdated: 2026-09-10\n---\n\n## Goal\nKeep shared tools available.\n\n## Phase 1: Work [IN PROGRESS]\n- [ ] 1.1 Preserve shared state ← CURRENT\n";
+      expect(await hooks.tool.plan_save.execute({ content: shared }, { sessionID: "root" })).toBe("Plan saved.");
+      const read = (path?: string) => hooks.tool.plan_read.execute(
+        { reason: "Startup failure isolation", ...(path === undefined ? {} : { path }) },
+        { sessionID: "child" },
+      );
+      expect(await read()).toBe(shared);
+      const failure = await read(selected);
+      expect(failure).toContain("Archive plan unavailable");
+      expect(failure).toContain("ENOTDIR");
+      expect(failure).toContain(blocker);
+      expect(failure).toContain("restart");
+      expect(failure).not.toContain(shared);
+      // A later valid configuration must not revive or redirect this startup reader.
+      process.env.HOME = sandbox;
+      process.env.PLANNOTATOR_DATA_DIR = join(sandbox, "valid-data");
+      await mkdir(join(process.env.PLANNOTATOR_DATA_DIR, "plans"), { recursive: true });
+      const other = join(process.env.PLANNOTATOR_DATA_DIR, "plans", "other.md");
+      await writeFile(other, "A different archive plan");
+      expect(await read(other)).toBe(failure);
+      expect(await read()).toBe(shared);
+      const compacted = { context: [] as string[] };
+      await hooks["experimental.session.compacting"]({ sessionID: "child" }, compacted);
+      expect(compacted.context.join("\n")).toContain(shared);
+      expect(compacted.context.join("\n")).not.toContain("A different archive plan");
+    } finally {
+      keys.forEach((key, index) => {
+        if (previous[index] === undefined) delete process.env[key];
+        else process.env[key] = previous[index];
+      });
+      home.mockRestore();
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  test("plan_read archive captures startup precedence and rejects linked roots without creating state", async () => {
+    const sandbox = await mkdtemp(join(repositoryRoot, ".plan-read-test-"));
+    const keys = ["HOME", "PLANNOTATOR_DATA_DIR", "XDG_DATA_HOME"] as const;
+    const previous = keys.map((key) => process.env[key]);
+    process.env.HOME = sandbox;
+    delete process.env.PLANNOTATOR_DATA_DIR;
+    process.env.XDG_DATA_HOME = join(sandbox, "xdg");
+    try {
+      // An ancestry lookup would fail: explicit reads require a session, not its tree.
+      const create = async () => {
+        const hooks = (await WorkspacePlugin({
+          directory: sandbox,
+          client: {},
+        } as any)) as any;
+        return hooks.tool.plan_read;
+      };
+      const read = (tool: any, path: string) =>
+        tool.execute(
+          { reason: "Archive boundary", path },
+          { sessionID: "child" },
+        );
+      const put = async (data: string) => {
+        await mkdir(join(data, "plans"), { recursive: true });
+        const file = join(data, "plans", "plan.md");
+        await writeFile(file, data);
+        return file;
+      };
+      const xdg = join(sandbox, "xdg", "plannotator");
+      const xdgFile = await put(xdg);
+      const xdgReader = await create();
+      expect(await read(xdgReader, xdgFile)).toBe(xdg);
+      const legacy = join(sandbox, ".plannotator");
+      const legacyFile = await put(legacy);
+      process.env.PLANNOTATOR_DATA_DIR = "  ";
+      const legacyReader = await create();
+      expect(await read(legacyReader, legacyFile)).toBe(legacy);
+      expect(await read(xdgReader, legacyFile)).toContain(
+        "Archive plan location:",
+      );
+      const custom = join(sandbox, "custom");
+      const customFile = await put(custom);
+      for (const configured of [
+        custom,
+        "~/custom",
+        relative(process.cwd(), custom),
+      ]) {
+        process.env.PLANNOTATOR_DATA_DIR = configured;
+        const captured = await create();
+        process.env.PLANNOTATOR_DATA_DIR = legacy;
+        process.env.HOME = join(sandbox, "changed-home");
+        const cwd = spyOn(process, "cwd").mockReturnValue(sandbox);
+        try {
+          expect(await read(captured, customFile)).toBe(custom);
+        } finally {
+          cwd.mockRestore();
+        }
+        expect(await read(captured, "~/custom/plans/plan.md")).toBe(custom);
+        expect(await read(captured, legacyFile)).toContain(
+          "Archive plan location:",
+        );
+        process.env.HOME = sandbox;
+      }
+      const alias = join(sandbox, "home-alias");
+      await symlink(sandbox, alias);
+      process.env.HOME = alias;
+      delete process.env.PLANNOTATOR_DATA_DIR;
+      const aliasReader = await create();
+      expect(await read(aliasReader, legacyFile)).toBe(legacy);
+      expect(await read(aliasReader, "~/.plannotator/plans/plan.md")).toBe(
+        legacy,
+      );
+      await rm(alias);
+      process.env.HOME = sandbox;
+      const linkedData = join(sandbox, "linked-data");
+      await symlink(custom, linkedData);
+      process.env.PLANNOTATOR_DATA_DIR = linkedData;
+      expect(
+        await read(await create(), join(linkedData, "plans", "plan.md")),
+      ).toContain("Archive plan symlink:");
+      const linkedArchive = join(sandbox, "linked-archive");
+      await mkdir(linkedArchive);
+      await symlink(join(custom, "plans"), join(linkedArchive, "plans"));
+      process.env.PLANNOTATOR_DATA_DIR = linkedArchive;
+      expect(
+        await read(await create(), join(linkedArchive, "plans", "plan.md")),
+      ).toContain("Archive plan symlink:");
+      await rm(legacy, { recursive: true });
+      process.env.PLANNOTATOR_DATA_DIR = "  ";
+      expect(await read(await create(), xdgFile)).toBe(xdg);
+      delete process.env.PLANNOTATOR_DATA_DIR;
+      process.env.XDG_DATA_HOME = "relative-xdg";
+      const before = await readdir(sandbox, { recursive: true });
+      expect(await read(await create(), legacyFile)).toContain(
+        "Archive plan missing:",
+      );
+      delete process.env.XDG_DATA_HOME;
+      expect(await read(await create(), legacyFile)).toContain(
+        "Archive plan missing:",
+      );
+      process.env.PLANNOTATOR_DATA_DIR = join(sandbox, "absent");
+      expect(
+        await read(await create(), join(sandbox, "absent", "plans", "a.md")),
+      ).toContain("Archive plan missing:");
+      expect((await readdir(sandbox, { recursive: true })).sort()).toEqual(
+        before.sort(),
+      );
+      await mkdir(join(sandbox, "absent"));
+      expect(
+        await read(await create(), join(sandbox, "absent", "plans", "a.md")),
+      ).toContain("Archive plan missing:");
+      await writeFile(join(sandbox, "absent", "plans"), "not a directory");
+      expect(
+        await read(await create(), join(sandbox, "absent", "plans", "a.md")),
+      ).toContain("Archive plan nonregular");
+    } finally {
+      keys.forEach((key, index) => {
+        if (previous[index] === undefined) delete process.env[key];
+        else process.env[key] = previous[index];
+      });
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
   test("saves shared plans without review reminders and preserves validation and root isolation", async () => {
     const sandbox = await mkdtemp(join(tmpdir(), "workcell-plan-save-"));
+    const home = spyOn(os, "homedir").mockReturnValue(sandbox);
     const previousHome = process.env.HOME;
     process.env.HOME = sandbox;
 
@@ -2230,6 +2561,7 @@ describe("high-risk deterministic plugin boundaries", () => {
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
+      home.mockRestore();
       await rm(sandbox, { recursive: true, force: true });
     }
   });
