@@ -2,7 +2,7 @@
   "$schema": "https://ocx.kdco.dev/schemas/v2/registry.json",
   "name": "matthewmorek",
   "author": "Matthew Morek",
-  "version": "0.2.13",
+  "version": "0.3.0",
   "opencode": "1.18.25",
   "ocx": "2.0.14",
   "components": [
@@ -216,6 +216,29 @@
       ],
     },
     {
+      "name": "workcell-skill-debug-investigation",
+      "type": "skill",
+      "description": "Observation-first investigation, approved local probes, and evidence-backed issue drafts.",
+      "files": [
+        {
+          "path": "skills/debug-investigation/SKILL.md",
+          "target": "skills/debug-investigation/SKILL.md",
+        },
+        {
+          "path": "skills/debug-investigation/references/system-project.md",
+          "target": "skills/debug-investigation/references/system-project.md",
+        },
+        {
+          "path": "skills/debug-investigation/references/connected-tools.md",
+          "target": "skills/debug-investigation/references/connected-tools.md",
+        },
+        {
+          "path": "skills/debug-investigation/references/issue-report.md",
+          "target": "skills/debug-investigation/references/issue-report.md",
+        },
+      ],
+    },
+    {
       "name": "workcell-review-command",
       "type": "command",
       "description": "Command for review against an accepted plan.",
@@ -312,6 +335,7 @@
         "workcell-skill-code-philosophy",
         "workcell-skill-frontend-philosophy",
         "workcell-skill-code-review",
+        "workcell-skill-debug-investigation",
         "workcell-review-command",
         "workcell-notify",
         "workcell-worktree",
