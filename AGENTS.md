@@ -35,7 +35,7 @@ local profile name is `workcell`; its OCX source is `matthewmorek/workcell`.
 
 ## Development
 
-Supported baseline for Workcell 0.2.8: Apple Silicon macOS, Bun 1.4.1,
+Supported baseline for Workcell 0.3.0: Apple Silicon macOS, Bun 1.4.1,
 registry-target OCX 2.0.14, validation CLI OCX 2.0.15, and OpenCode 1.18.25.
 
 ```sh
@@ -60,7 +60,7 @@ OpenCode, resolve, import, activate, or render DCP, verify `/dcp`, validate
 runtime tools or agents, or claim package-cache cleanup.
 
 The repository-only migration sequence is to install and validate Workcell
-0.2.8 first. If DCP should be Workcell-only, optionally remove a duplicate
+0.3.0 additively alongside the prior known-good profile. If DCP should be Workcell-only, optionally remove a duplicate
 user-global DCP TUI declaration after validation. Do not perform these machine-
 level steps as part of repository changes. Roll back by restoring that
 declaration and launching the prior Workcell profile or the existing `ws`

@@ -33,7 +33,7 @@ intentionally replace the current Workcell installation.
 
 ## Support baseline
 
-Workcell 0.2.8 supports Apple Silicon macOS with Bun 1.4.1 and OpenCode
+Workcell 0.3.0 supports Apple Silicon macOS with Bun 1.4.1 and OpenCode
 1.18.25. The registry targets OCX 2.0.14. Repository validation uses the OCX
 2.0.15 CLI. Configured MCP servers are limited to Context7, Exa, and GitHub
 Grep.
@@ -52,9 +52,25 @@ remains, and then cleans the sandbox. Smoke does not launch OpenCode, resolve,
 import, activate, or render DCP, verify `/dcp`, validate runtime tools or
 agents, or claim package-cache cleanup.
 
+## Debug mode
+
+Workcell 0.3.0 uses an observation-first `debug` primary for bounded diagnosis;
+the `debugger` child remains a distinct repair path. The primary reads existing
+evidence, compares known-good behavior, ranks falsifiable hypotheses, and asks
+before shell, external-path, authenticated-service, or local scratch probes. It
+does not edit tracked source or mutate remote services. See
+[docs/debug-mode.md](docs/debug-mode.md) and the packaged
+[`debug-investigation`](files/skills/debug-investigation/SKILL.md) skill.
+
+The pinned selector is `opencode --agent debug`. After configuration-time changes
+restart OpenCode; after installation launch a fresh `ocx oc -p workcell` session
+and use the interactive selector. OCX argument forwarding beyond the documented
+CLI selector is not asserted.
+
 ## Migration and rollback
 
-For a repository-only migration, install and validate Workcell 0.2.8 first. If
+For a repository-only migration, install and validate Workcell 0.3.0 additively
+alongside the prior known-good profile first. If
 DCP should be Workcell-only, optionally remove a duplicate user-global DCP TUI
 declaration after validation. Do not make these machine-level changes as part
 of repository changes.
