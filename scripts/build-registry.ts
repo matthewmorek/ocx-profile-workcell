@@ -43,6 +43,7 @@ export const expectedComponents = [
   "workcell-skill-code-philosophy",
   "workcell-skill-frontend-philosophy",
   "workcell-skill-code-review",
+  "workcell-skill-debug-investigation",
   "workcell-review-command",
   "workcell-notify",
   "workcell-worktree",

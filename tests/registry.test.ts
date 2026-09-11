@@ -133,22 +133,6 @@ function parseUniqueExactPackagePins(
   return pins;
 }
 
-function parseInventoryPath(value: unknown, description: string): string {
-  if (typeof value !== "string" || value.length === 0)
-    throw new Error(`${description} must be a non-empty string`);
-  if (
-    value.startsWith("/") ||
-    value.includes("\\") ||
-    value
-      .split("/")
-      .some((segment) => !segment || segment === "." || segment === "..")
-  )
-    throw new Error(
-      `${description} must be a normalized relative path: ${value}`,
-    );
-  return value;
-}
-
 function assertReviewedBundleCoverage(
   components: any[],
   bundleName: string,
@@ -538,6 +522,7 @@ describe("self-contained Workcell registry", () => {
     const expectedAgents = [
       "plan",
       "build",
+      "debug",
       "coder",
       "debugger",
       "tester",
@@ -569,6 +554,16 @@ describe("self-contained Workcell registry", () => {
           "886bd7a56665bb5701fe3fc3964941018887515da9857bf7cdb8a3df02135c03",
         permissionHash:
           "0a9b4ecd6b8cb6af1e731c34fe2f836e1fb8e2830796e8a3423008e1469e256e",
+      },
+      debug: {
+        mode: "primary",
+        model: "openai/gpt-6-astra",
+        temperature: 0.3,
+        options: { reasoningEffort: "high", textVerbosity: "medium" },
+        promptHash:
+          "38c498ef8439f0843dbe0ce5c0d13c7db16d0488fa4d223c7297154bf0ebdba5",
+        permissionHash:
+          "49482be84b314c4389174fd8aeff044f16db0dabf5187b133e4f121540f1a74d",
       },
       coder: {
         mode: "subagent",
@@ -761,7 +756,7 @@ describe("self-contained Workcell registry", () => {
     expect(
       runtimePlugins.some(({ name }) => /notif(?:y|ier)/i.test(name)),
     ).toBe(false);
-    for (const agentName of ["plan", "build"]) {
+    for (const agentName of ["plan", "build", "debug"]) {
       expect(profileConfig.agent[agentName].permission).toMatchObject({
         delegate: "allow",
         delegation_read: "allow",
@@ -787,6 +782,118 @@ describe("self-contained Workcell registry", () => {
         external_directory: "deny",
         plan_read: ["explore", "researcher"].includes(agent) ? "deny" : "allow",
       });
+    }
+  });
+
+  test("keeps debug fail-closed with bounded approval gates and only the diagnostic skill", () => {
+    expect(
+      Object.entries(profileConfig.agent)
+        .filter(([, agent]: [string, any]) => agent.mode === "primary")
+        .map(([name]) => name),
+    ).toEqual(["plan", "build", "debug"]);
+    const permission = profileConfig.agent.debug.permission;
+    expect(Object.entries(permission)[0]).toEqual(["*", "deny"]);
+    expect(Object.entries(permission.read)).toEqual([
+      ["*", "allow"],
+      ["*.env", "ask"],
+      ["*.env.*", "ask"],
+      ["*.env.example", "allow"],
+    ]);
+    expect(permission.skill).toEqual({
+      "*": "deny",
+      "debug-investigation": "allow",
+    });
+    for (const tool of [
+      "glob",
+      "grep",
+      "list",
+      "lsp",
+      "git_inspect",
+      "question",
+      "todowrite",
+      "delegate",
+      "delegation_read",
+      "delegation_list",
+    ])
+      expect(permission[tool], tool).toBe("allow");
+    // Flat bash ask is intentional: no approved prefixes, interpreters, or runners.
+    expect(
+      Object.entries(permission)
+        .filter(([, action]) => action === "ask")
+        .map(([name]) => name),
+    ).toEqual(["bash", "external_directory", "webfetch", "websearch"]);
+    for (const tool of [
+      "edit",
+      "write",
+      "apply_patch",
+      "formatter",
+      "task",
+      "worktree_*",
+      "plan_read",
+      "plan_save",
+      "submit_plan",
+      "plan_enter",
+      "plan_exit",
+      "context7_*",
+      "exa_*",
+      "gh_grep_*",
+      "kagi_*",
+    ])
+      expect(permission[tool], tool).toBe("deny");
+    // No shipped MCP/custom ask opt-in: exact reviewed names belong to user config.
+    for (const [name, action] of Object.entries(permission))
+      if (name.includes("*")) expect(action, name).toBe("deny");
+    const { routing } = BackgroundAgentsPlugin.testInternals;
+    expect([...routing.asyncAgents]).toEqual([
+      "explore",
+      "researcher",
+      "reviewer",
+    ]);
+    expect([...routing.orchestratorAgents]).toEqual(["plan", "build"]);
+    expect([...routing.taskAgents]).toEqual([
+      "coder",
+      "debugger",
+      "tester",
+      "scribe",
+      "committer",
+    ]);
+  });
+
+  test("packages the standalone debug skill and every local reference", async () => {
+    const component = registry.components.find(
+      (item: any) => item.name === "workcell-skill-debug-investigation",
+    );
+    const root = "skills/debug-investigation";
+    const paths = [
+      "SKILL.md",
+      "references/system-project.md",
+      "references/connected-tools.md",
+      "references/issue-report.md",
+    ];
+    expect(component.type).toBe("skill");
+    expect(component.files).toEqual(
+      paths.map((path) => ({
+        path: `${root}/${path}`,
+        target: `${root}/${path}`,
+      })),
+    );
+    expect(component.dependencies ?? []).toEqual([]);
+    const skill = await readFile(
+      join(repositoryRoot, "files", root, "SKILL.md"),
+      "utf8",
+    );
+    expect(skill).toMatch(/^name: debug-investigation$/m);
+    for (const path of paths.slice(1)) {
+      expect(skill).toContain(path);
+      expect(
+        (
+          await readFile(join(repositoryRoot, "files", root, path), "utf8")
+        ).trim(),
+      ).not.toBe("");
+    }
+    for (const match of skill.matchAll(/\]\(([^)]+\.md)\)/g)) {
+      if (/^https?:/.test(match[1])) continue;
+      expect(paths).toContain(match[1].replace(/^\.\//, ""));
     }
   });
 
@@ -1017,10 +1124,15 @@ describe("high-risk deterministic plugin boundaries", () => {
   });
 
   test("preserves reviewer read configuration and gates metadata enrichment through the existing manager", async () => {
-    const { DelegationManager, generateFallbackMetadata } = BackgroundAgentsPlugin.testInternals;
+    const { DelegationManager, generateFallbackMetadata } =
+      BackgroundAgentsPlugin.testInternals;
     const previousMetadata = process.env.KDCO_BACKGROUND_METADATA;
-    const result = "Repository checks complete\nEvidence: existing verification passed.";
-    const generated = { title: "Verified repository", description: "Existing verification passed." };
+    const result =
+      "Repository checks complete\nEvidence: existing verification passed.";
+    const generated = {
+      title: "Verified repository",
+      description: "Existing verification passed.",
+    };
     const scenarios = [
       { env: undefined, agent: "reviewer", mode: "disabled" },
       { env: "0", agent: "explore", mode: "disabled" },
@@ -1036,9 +1148,12 @@ describe("high-risk deterministic plugin boundaries", () => {
     ];
     try {
       for (const scenario of scenarios) {
-        if (scenario.env === undefined) delete process.env.KDCO_BACKGROUND_METADATA;
+        if (scenario.env === undefined)
+          delete process.env.KDCO_BACKGROUND_METADATA;
         else process.env.KDCO_BACKGROUND_METADATA = scenario.env;
-        const baseDirectory = await mkdtemp(join(tmpdir(), "workcell-metadata-"));
+        const baseDirectory = await mkdtemp(
+          join(tmpdir(), "workcell-metadata-"),
+        );
         const requests: Array<{ path: { id: string }; body: any }> = [];
         const created: any[] = [];
         const deleted: string[] = [];
@@ -1046,69 +1161,129 @@ describe("high-risk deterministic plugin boundaries", () => {
         let discoveryCalls = 0;
         let generatorCalls = 0;
         let releaseGenerator: () => void = () => {};
-        const generatorGate = new Promise<void>((resolve) => { releaseGenerator = resolve; });
+        const generatorGate = new Promise<void>((resolve) => {
+          releaseGenerator = resolve;
+        });
         const client = {
           app: {
             agents: async () => {
               discoveryCalls += 1;
-              return { data: [
-                { name: scenario.agent, mode: "subagent" },
-                ...(scenario.mode === "missing-agent" ? [] : [{ name: "metadata", mode: "subagent" }]),
-              ] };
+              return {
+                data: [
+                  { name: scenario.agent, mode: "subagent" },
+                  ...(scenario.mode === "missing-agent"
+                    ? []
+                    : [{ name: "metadata", mode: "subagent" }]),
+                ],
+              };
             },
             log: async () => ({}),
           },
           session: {
-            get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id } }),
+            get: async ({ path }: { path: { id: string } }) => ({
+              data: { id: path.id },
+            }),
             create: async ({ body }: { body: any }) => {
               created.push(body);
-              return { data: { id: created.length === 1 ? "child" : "metadata-child" } };
+              return {
+                data: { id: created.length === 1 ? "child" : "metadata-child" },
+              };
             },
-            delete: async ({ path }: { path: { id: string } }) => { deleted.push(path.id); return {}; },
+            delete: async ({ path }: { path: { id: string } }) => {
+              deleted.push(path.id);
+              return {};
+            },
             prompt: async (request: { path: { id: string }; body: any }) => {
               requests.push(request);
-              if (request.body.agent === "metadata" && scenario.mode === "model-error") throw new Error("model unavailable");
-              const text = request.path.id === "child" ? result
-                : scenario.mode === "invalid-response" ? "not JSON" : JSON.stringify(generated);
+              if (
+                request.body.agent === "metadata" &&
+                scenario.mode === "model-error"
+              )
+                throw new Error("model unavailable");
+              const text =
+                request.path.id === "child"
+                  ? result
+                  : scenario.mode === "invalid-response"
+                    ? "not JSON"
+                    : JSON.stringify(generated);
               return { data: { parts: [{ type: "text", text }] } };
             },
           },
         };
         const injected = scenario.mode.startsWith("injected-");
-        const manager = new DelegationManager(client as any, baseDirectory, {
-          ...silentLog,
-          debug: (message: string) => { logs.push(message); },
-        } as any, {
-          idGenerator: () => "calm-blue-otter",
-          allCompleteQuietPeriodMs: 1,
-          ...(injected ? { metadataGenerator: async (...args: any[]) => {
-            generatorCalls += 1;
-            expect(args.slice(0, 4)).toEqual([client, result, "child", "calm-blue-otter"]);
-            await generatorGate;
-            if (scenario.mode === "injected-error") throw new Error("injected metadata failure");
-            return generated;
-          } } : {}),
-        });
+        const manager = new DelegationManager(
+          client as any,
+          baseDirectory,
+          {
+            ...silentLog,
+            debug: (message: string) => {
+              logs.push(message);
+            },
+          } as any,
+          {
+            idGenerator: () => "calm-blue-otter",
+            allCompleteQuietPeriodMs: 1,
+            ...(injected
+              ? {
+                  metadataGenerator: async (...args: any[]) => {
+                    generatorCalls += 1;
+                    expect(args.slice(0, 4)).toEqual([
+                      client,
+                      result,
+                      "child",
+                      "calm-blue-otter",
+                    ]);
+                    await generatorGate;
+                    if (scenario.mode === "injected-error")
+                      throw new Error("injected metadata failure");
+                    return generated;
+                  },
+                }
+              : {}),
+          },
+        );
         // Opt-in is captured at construction, not read during completion.
         if (scenario.env === "1") delete process.env.KDCO_BACKGROUND_METADATA;
         else process.env.KDCO_BACKGROUND_METADATA = "1";
         try {
           const record = await manager.delegate({
-            parentSessionID: "root", parentMessageID: "message", parentAgent: "build",
-            prompt: "Inspect the bounded repository scope.", agent: scenario.agent,
+            parentSessionID: "root",
+            parentMessageID: "message",
+            parentAgent: "build",
+            prompt: "Inspect the bounded repository scope.",
+            agent: scenario.agent,
           });
           const initialArtifact = await manager.readOutput("root", record.id);
           expect(record.status, scenario.mode).toBe("complete");
           expect(initialArtifact).toContain(result);
-          const childRequest = requests.find((request) => request.path.id === "child")!;
-          const denied = { task: false, delegate: false, todowrite: false, plan_save: false };
-          expect(childRequest.body.tools).toEqual(scenario.agent === "reviewer" ? denied : {
-            ...denied, delegation_read: false, delegation_list: false,
-          });
+          const childRequest = requests.find(
+            (request) => request.path.id === "child",
+          )!;
+          const denied = {
+            task: false,
+            delegate: false,
+            todowrite: false,
+            plan_save: false,
+          };
+          expect(childRequest.body.tools).toEqual(
+            scenario.agent === "reviewer"
+              ? denied
+              : {
+                  ...denied,
+                  delegation_read: false,
+                  delegation_list: false,
+                },
+          );
           if (scenario.agent === "reviewer") {
             for (const permission of ["allow", "deny"] as const) {
-              const configured = { delegation_read: permission, delegation_list: permission };
-              expect({ ...configured, ...childRequest.body.tools }).toMatchObject(configured);
+              const configured = {
+                delegation_read: permission,
+                delegation_list: permission,
+              };
+              expect({
+                ...configured,
+                ...childRequest.body.tools,
+              }).toMatchObject(configured);
             }
           }
           const fallback = generateFallbackMetadata(result, record.id);
@@ -1117,25 +1292,47 @@ describe("high-risk deterministic plugin boundaries", () => {
             expect(initialArtifact).toContain(fallback.title);
             releaseGenerator();
           }
-          const enriched = scenario.mode === "success" || scenario.mode === "injected-success";
+          const enriched =
+            scenario.mode === "success" || scenario.mode === "injected-success";
           const expected = enriched ? generated : fallback;
-          const persistedCount = scenario.mode === "disabled" || scenario.mode === "injected-error" ? 1 : 2;
+          const persistedCount =
+            scenario.mode === "disabled" || scenario.mode === "injected-error"
+              ? 1
+              : 2;
           const deadline = Date.now() + 1_000;
-          while (Date.now() < deadline && (
-            logs.filter((line) => line.startsWith("persistOutput: wrote ")).length < persistedCount ||
-            (scenario.mode === "injected-error" && !logs.some((line) => line.includes("injected metadata failure")))
-          )) await Bun.sleep(5);
-          expect(logs.filter((line) => line.startsWith("persistOutput: wrote ")).length, scenario.mode).toBe(persistedCount);
+          while (
+            Date.now() < deadline &&
+            (logs.filter((line) => line.startsWith("persistOutput: wrote "))
+              .length < persistedCount ||
+              (scenario.mode === "injected-error" &&
+                !logs.some((line) =>
+                  line.includes("injected metadata failure"),
+                )))
+          )
+            await Bun.sleep(5);
+          expect(
+            logs.filter((line) => line.startsWith("persistOutput: wrote "))
+              .length,
+            scenario.mode,
+          ).toBe(persistedCount);
           expect(record.title, scenario.mode).toBe(expected.title);
           expect(record.description, scenario.mode).toBe(expected.description);
           const artifact = await manager.readOutput("root", record.id);
           expect(artifact).toContain(expected.title);
           expect(artifact).toContain(result);
           expect(generatorCalls).toBe(injected ? 1 : 0);
-          expect(discoveryCalls, scenario.mode).toBe(scenario.mode === "disabled" || injected ? 1 : 2);
-          const usesModel = ["success", "invalid-response", "model-error"].includes(scenario.mode);
+          expect(discoveryCalls, scenario.mode).toBe(
+            scenario.mode === "disabled" || injected ? 1 : 2,
+          );
+          const usesModel = [
+            "success",
+            "invalid-response",
+            "model-error",
+          ].includes(scenario.mode);
           expect(created).toHaveLength(usesModel ? 2 : 1);
-          expect(requests.filter((request) => request.body.agent === "metadata")).toHaveLength(usesModel ? 1 : 0);
+          expect(
+            requests.filter((request) => request.body.agent === "metadata"),
+          ).toHaveLength(usesModel ? 1 : 0);
           expect(deleted).toEqual(usesModel ? ["metadata-child"] : []);
         } finally {
           releaseGenerator();
@@ -1143,8 +1340,178 @@ describe("high-risk deterministic plugin boundaries", () => {
         }
       }
     } finally {
-      if (previousMetadata === undefined) delete process.env.KDCO_BACKGROUND_METADATA;
+      if (previousMetadata === undefined)
+        delete process.env.KDCO_BACKGROUND_METADATA;
       else process.env.KDCO_BACKGROUND_METADATA = previousMetadata;
+    }
+  });
+
+  test("debug async routes preserve evidence, failed results, and child isolation", async () => {
+    const baseDirectory = await mkdtemp(
+      join(tmpdir(), "workcell-debug-delegations-"),
+    );
+    const requests: Array<{ path: { id: string }; body: any }> = [];
+    let created = 0;
+    const ids = ["calm-blue-otter", "quiet-green-fox", "small-red-bird"];
+    const client = {
+      app: {
+        agents: async () => ({
+          data: Object.entries(profileConfig.agent).map(([name, agent]) => ({
+            name,
+            ...(agent as object),
+          })),
+        }),
+        log: async () => ({}),
+      },
+      session: {
+        get: async ({ path }: { path: { id: string } }) => ({
+          data: { id: path.id },
+        }),
+        create: async () => ({ data: { id: `child-${++created}` } }),
+        messages: async () => ({ data: [] }),
+        prompt: async (request: { path: { id: string }; body: any }) => {
+          requests.push(request);
+          if (request.path.id === "child-3")
+            throw new Error("Public source unavailable");
+          return {
+            data: {
+              parts: [
+                {
+                  type: "text",
+                  text:
+                    request.body.agent === "explore"
+                      ? "Evidence: src/example.ts:12 — observed branch."
+                      : "Evidence: https://example.org/docs/v1 — documented behavior.",
+                },
+              ],
+            },
+          };
+        },
+      },
+    };
+    const manager = new BackgroundAgentsPlugin.testInternals.DelegationManager(
+      client as any,
+      baseDirectory,
+      silentLog as any,
+      {
+        idGenerator: () => ids[created],
+        allCompleteQuietPeriodMs: 1,
+      },
+    );
+    const delegate = (agent: string) =>
+      manager.delegate({
+        parentSessionID: "debug-root",
+        parentMessageID: "question",
+        parentAgent: "debug",
+        prompt:
+          "Inspect this bounded synthetic question; return underlying evidence and stop.",
+        agent,
+      });
+    try {
+      for (const agent of ["debug", "plan", "build", "coder", "debugger"]) {
+        await expect(delegate(agent)).rejects.toThrow(
+          /primary-only|task-routed/,
+        );
+      }
+      expect(created).toBe(0);
+      for (const agent of ["explore", "researcher", "researcher"]) {
+        const record = await delegate(agent);
+        const output = await manager.readOutput("debug-root", record.id);
+        expect(record.parentAgent).toBe("debug");
+        expect(record.status).toBe(created === 3 ? "error" : "complete");
+        expect(output).toContain(
+          created === 3 ? "Public source unavailable" : "Evidence:",
+        );
+        expect(
+          (await manager.listDelegations("debug-root")).find(
+            ({ id }) => id === record.id,
+          ),
+        ).toMatchObject({ agent, status: record.status, unread: false });
+        const request = requests.find(
+          ({ path }) => path.id === `child-${created}`,
+        )!;
+        expect(request.body.agent).toBe(agent);
+        expect(request.body.tools).toEqual({
+          task: false,
+          delegate: false,
+          delegation_read: false,
+          delegation_list: false,
+          todowrite: false,
+          plan_save: false,
+        });
+        await expect(
+          manager.readOutput("unrelated-root", record.id),
+        ).rejects.toThrow("was not found");
+      }
+      const deadline = Date.now() + 1000;
+      while (
+        Date.now() < deadline &&
+        !requests.some(
+          ({ path, body }) =>
+            path.id === "debug-root" && body.noReply === false,
+        )
+      )
+        await Bun.sleep(5);
+      const notifications = requests.filter(
+        ({ path }) => path.id === "debug-root",
+      );
+      expect(notifications.length).toBeGreaterThanOrEqual(3);
+      expect(notifications.every(({ body }) => body.agent === "debug")).toBe(
+        true,
+      );
+      expect(
+        notifications.some(({ body }) =>
+          body.parts[0].text.includes("small-red-bird"),
+        ),
+      ).toBe(true);
+    } finally {
+      await rm(baseDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("debug receives neither shared task routing nor plan/build system rules", async () => {
+    const sandbox = await mkdtemp(join(tmpdir(), "workcell-debug-hooks-"));
+    const home = spyOn(os, "homedir").mockReturnValue(sandbox);
+    const previousHome = process.env.HOME;
+    process.env.HOME = sandbox;
+    try {
+      const input = {
+        directory: sandbox,
+        client: { app: { log: async () => ({}) } },
+      } as any;
+      const background = (await BackgroundAgentsPlugin(input)) as any;
+      const workspace = (await WorkspacePlugin(input)) as any;
+      const output = { system: [] as string[] };
+      await background["experimental.chat.system.transform"](
+        { agent: "debug" },
+        output,
+      );
+      expect(output.system).toEqual([]);
+      await workspace["experimental.chat.system.transform"](
+        { agent: "debug" },
+        output,
+      );
+      expect(output.system).toHaveLength(1);
+      expect(output.system[0]).toContain("<date-awareness>");
+      for (const marker of [
+        "<delegation-system>",
+        "<workspace-routing",
+        "<delegation-mandate",
+        "## Plan Mode Active",
+        "## You Are an ORCHESTRATOR",
+      ])
+        expect(output.system.join("\n")).not.toContain(marker);
+      await expect(
+        background["tool.execute.before"](
+          { tool: "task" },
+          { args: { subagent_type: "debug" } },
+        ),
+      ).rejects.toThrow("not configured for native task execution");
+    } finally {
+      home.mockRestore();
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await rm(sandbox, { recursive: true, force: true });
     }
   });
 
@@ -2040,10 +2407,14 @@ describe("high-risk deterministic plugin boundaries", () => {
   });
 
   test("normalizes standalone tester statuses with balanced Markdown", async () => {
-    const hooks = await WorkspacePlugin({ directory: repositoryRoot, client: {} } as any) as any;
+    const hooks = (await WorkspacePlugin({
+      directory: repositoryRoot,
+      client: {},
+    } as any)) as any;
     const renderings = [
       (status: string) => `RESULT: ${status}`,
-      (status: string) => `  result: ${status.toUpperCase()}  \r\nCOMMANDS: bun run test`,
+      (status: string) =>
+        `  result: ${status.toUpperCase()}  \r\nCOMMANDS: bun run test`,
       (status: string) => `**RESULT:** ${status}`,
       (status: string) => `__RESULT:__ ${status}`,
       (status: string) => `**RESULT: ${status}**`,
@@ -2052,12 +2423,24 @@ describe("high-risk deterministic plugin boundaries", () => {
       (status: string) => `RESULT: **${status}**`,
       (status: string) => `RESULT: __${status}__`,
       (status: string) => `RESULT: \`${status}\``,
-      (status: string) => `RESULT: ${status}\n**RESULT: ${status.toUpperCase()}**`,
+      (status: string) =>
+        `RESULT: ${status}\n**RESULT: ${status.toUpperCase()}**`,
     ];
-    for (const status of ["passed", "failed", "blocked", "infrastructure-error"]) {
+    for (const status of [
+      "passed",
+      "failed",
+      "blocked",
+      "infrastructure-error",
+    ]) {
       for (const [index, render] of renderings.entries()) {
-        const input = { tool: "task", sessionID: "status-normalization", callID: `${status}-${index}` };
-        await hooks["tool.execute.before"](input, { args: { subagent_type: "tester" } });
+        const input = {
+          tool: "task",
+          sessionID: "status-normalization",
+          callID: `${status}-${index}`,
+        };
+        await hooks["tool.execute.before"](input, {
+          args: { subagent_type: "tester" },
+        });
         const output = { title: "", output: render(status), metadata: {} };
         await hooks["tool.execute.after"](input, output);
         expect(output.output).toContain(`Tester RESULT is ${status}.`);
@@ -2079,48 +2462,78 @@ describe("high-risk deterministic plugin boundaries", () => {
     "The RESULT: passed",
     "> RESULT: passed",
     "RESULT: passed with limitations",
-  ])("requests report-only correction, not blind reruns, for %s", async (report) => {
-    const hooks = await WorkspacePlugin({ directory: repositoryRoot, client: {} } as any) as any;
-    const input = { tool: "task", sessionID: "invalid-status", callID: "invalid-status-call" };
-    await hooks["tool.execute.before"](input, { args: { subagent_type: "tester" } });
-    const output = { title: "", output: report, metadata: {} };
-    await hooks["tool.execute.after"](input, output);
-    const reminder = output.output.slice(report.length);
-    expect(reminder).toContain("Tester result is invalid");
-    expect(reminder).toContain("report-only correction");
-    expect(reminder).toContain("existing tester evidence");
-    expect(reminder).toContain("do not rerun commands solely for formatting");
-    expect(reminder).toMatch(/If actual verification evidence is missing.*fresh verification of the gap/s);
-    expect(reminder).toContain("Do not route a reporting failure to debugger");
-    expect(reminder).not.toContain("proceed to `reviewer`");
-  });
-
-  test.each(["coder", "tester"])("tracks concurrent %s calls per session without claiming whole-plan completion", async (agent) => {
-    const hooks = await WorkspacePlugin({ directory: repositoryRoot, client: {} } as any) as any;
-    const calls = ["first", "second", "other-root"].map((callID) => ({
-      tool: "task", sessionID: callID === "other-root" ? "batch-b" : "batch-a", callID: `${agent}-${callID}`,
-    }));
-    await Promise.all(calls.map((input) => hooks["tool.execute.before"](input, { args: { subagent_type: agent } })));
-    const result = agent === "coder" ? "RESULT: completed" : "RESULT: passed";
-    const finish = async (input: typeof calls[number]) => {
-      const output = { title: "", output: result, metadata: {} };
+  ])(
+    "requests report-only correction, not blind reruns, for %s",
+    async (report) => {
+      const hooks = (await WorkspacePlugin({
+        directory: repositoryRoot,
+        client: {},
+      } as any)) as any;
+      const input = {
+        tool: "task",
+        sessionID: "invalid-status",
+        callID: "invalid-status-call",
+      };
+      await hooks["tool.execute.before"](input, {
+        args: { subagent_type: "tester" },
+      });
+      const output = { title: "", output: report, metadata: {} };
       await hooks["tool.execute.after"](input, output);
-      return output.output;
-    };
-    expect(await finish(calls[0]!)).toBe(result);
+      const reminder = output.output.slice(report.length);
+      expect(reminder).toContain("Tester result is invalid");
+      expect(reminder).toContain("report-only correction");
+      expect(reminder).toContain("existing tester evidence");
+      expect(reminder).toContain("do not rerun commands solely for formatting");
+      expect(reminder).toMatch(
+        /If actual verification evidence is missing.*fresh verification of the gap/s,
+      );
+      expect(reminder).toContain(
+        "Do not route a reporting failure to debugger",
+      );
+      expect(reminder).not.toContain("proceed to `reviewer`");
+    },
+  );
 
-    const completed = await finish(calls[1]!);
-    if (agent === "coder") {
-      expect(completed).toContain("When an implementation batch is ready");
-      expect(completed).toContain("does not mean the final planned task");
-      expect(completed).toContain("independent existing verification");
-    } else {
-      expect(completed).toContain("only the verified scope");
-      expect(completed).toContain("do not imply the entire plan is verified");
-    }
-    expect(await finish(calls[1]!)).toBe(result);
-    expect(await finish(calls[2]!)).toContain("<system-reminder>");
-  });
+  test.each(["coder", "tester"])(
+    "tracks concurrent %s calls per session without claiming whole-plan completion",
+    async (agent) => {
+      const hooks = (await WorkspacePlugin({
+        directory: repositoryRoot,
+        client: {},
+      } as any)) as any;
+      const calls = ["first", "second", "other-root"].map((callID) => ({
+        tool: "task",
+        sessionID: callID === "other-root" ? "batch-b" : "batch-a",
+        callID: `${agent}-${callID}`,
+      }));
+      await Promise.all(
+        calls.map((input) =>
+          hooks["tool.execute.before"](input, {
+            args: { subagent_type: agent },
+          }),
+        ),
+      );
+      const result = agent === "coder" ? "RESULT: completed" : "RESULT: passed";
+      const finish = async (input: (typeof calls)[number]) => {
+        const output = { title: "", output: result, metadata: {} };
+        await hooks["tool.execute.after"](input, output);
+        return output.output;
+      };
+      expect(await finish(calls[0]!)).toBe(result);
+
+      const completed = await finish(calls[1]!);
+      if (agent === "coder") {
+        expect(completed).toContain("When an implementation batch is ready");
+        expect(completed).toContain("does not mean the final planned task");
+        expect(completed).toContain("independent existing verification");
+      } else {
+        expect(completed).toContain("only the verified scope");
+        expect(completed).toContain("do not imply the entire plan is verified");
+      }
+      expect(await finish(calls[1]!)).toBe(result);
+      expect(await finish(calls[2]!)).toContain("<system-reminder>");
+    },
+  );
 
   test("plan_read explicit archive path never substitutes the shared plan", async () => {
     const sandbox = await mkdtemp(join(repositoryRoot, ".plan-read-test-"));
@@ -2249,69 +2662,99 @@ describe("high-risk deterministic plugin boundaries", () => {
     }
   });
 
-  test.each(["configured", "legacy"])("archive startup failure (%s) preserves shared plan tools and compaction", async (source) => {
-    const sandbox = await mkdtemp(join(repositoryRoot, ".plan-read-test-"));
-    const home = spyOn(os, "homedir").mockReturnValue(sandbox);
-    const keys = ["HOME", "PLANNOTATOR_DATA_DIR", "XDG_DATA_HOME"] as const;
-    const previous = keys.map((key) => process.env[key]);
-    try {
-      const blocker = join(sandbox, "blocker");
-      await writeFile(blocker, "not a directory");
-      process.env.HOME = source === "legacy" ? blocker : sandbox;
-      if (source === "configured") {
-        process.env.PLANNOTATOR_DATA_DIR = join(blocker, "nested", "data");
-      } else {
-        delete process.env.PLANNOTATOR_DATA_DIR;
-      }
-      process.env.XDG_DATA_HOME = join(sandbox, "xdg");
-      const selected = join(
-        source === "configured" ? process.env.PLANNOTATOR_DATA_DIR! : join(blocker, ".plannotator"),
-        "plans", "selected.md",
-      );
-      const hooks = (await WorkspacePlugin({
-        directory: sandbox,
-        client: {
-          session: {
-            get: async ({ path }: { path: { id: string } }) => ({
-              data: { id: path.id, parentID: path.id === "child" ? "root" : undefined },
-            }),
+  test.each(["configured", "legacy"])(
+    "archive startup failure (%s) preserves shared plan tools and compaction",
+    async (source) => {
+      const sandbox = await mkdtemp(join(repositoryRoot, ".plan-read-test-"));
+      const home = spyOn(os, "homedir").mockReturnValue(sandbox);
+      const keys = ["HOME", "PLANNOTATOR_DATA_DIR", "XDG_DATA_HOME"] as const;
+      const previous = keys.map((key) => process.env[key]);
+      try {
+        const blocker = join(sandbox, "blocker");
+        await writeFile(blocker, "not a directory");
+        process.env.HOME = source === "legacy" ? blocker : sandbox;
+        if (source === "configured") {
+          process.env.PLANNOTATOR_DATA_DIR = join(blocker, "nested", "data");
+        } else {
+          delete process.env.PLANNOTATOR_DATA_DIR;
+        }
+        process.env.XDG_DATA_HOME = join(sandbox, "xdg");
+        const selected = join(
+          source === "configured"
+            ? process.env.PLANNOTATOR_DATA_DIR!
+            : join(blocker, ".plannotator"),
+          "plans",
+          "selected.md",
+        );
+        const hooks = (await WorkspacePlugin({
+          directory: sandbox,
+          client: {
+            session: {
+              get: async ({ path }: { path: { id: string } }) => ({
+                data: {
+                  id: path.id,
+                  parentID: path.id === "child" ? "root" : undefined,
+                },
+              }),
+            },
           },
-        },
-      } as any)) as any;
-      const shared = "---\nstatus: in-progress\nphase: 1\nupdated: 2026-09-10\n---\n\n## Goal\nKeep shared tools available.\n\n## Phase 1: Work [IN PROGRESS]\n- [ ] 1.1 Preserve shared state ← CURRENT\n";
-      expect(await hooks.tool.plan_save.execute({ content: shared }, { sessionID: "root" })).toBe("Plan saved.");
-      const read = (path?: string) => hooks.tool.plan_read.execute(
-        { reason: "Startup failure isolation", ...(path === undefined ? {} : { path }) },
-        { sessionID: "child" },
-      );
-      expect(await read()).toBe(shared);
-      const failure = await read(selected);
-      expect(failure).toContain("Archive plan unavailable");
-      expect(failure).toContain("ENOTDIR");
-      expect(failure).toContain(blocker);
-      expect(failure).toContain("restart");
-      expect(failure).not.toContain(shared);
-      // A later valid configuration must not revive or redirect this startup reader.
-      process.env.HOME = sandbox;
-      process.env.PLANNOTATOR_DATA_DIR = join(sandbox, "valid-data");
-      await mkdir(join(process.env.PLANNOTATOR_DATA_DIR, "plans"), { recursive: true });
-      const other = join(process.env.PLANNOTATOR_DATA_DIR, "plans", "other.md");
-      await writeFile(other, "A different archive plan");
-      expect(await read(other)).toBe(failure);
-      expect(await read()).toBe(shared);
-      const compacted = { context: [] as string[] };
-      await hooks["experimental.session.compacting"]({ sessionID: "child" }, compacted);
-      expect(compacted.context.join("\n")).toContain(shared);
-      expect(compacted.context.join("\n")).not.toContain("A different archive plan");
-    } finally {
-      keys.forEach((key, index) => {
-        if (previous[index] === undefined) delete process.env[key];
-        else process.env[key] = previous[index];
-      });
-      home.mockRestore();
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
+        } as any)) as any;
+        const shared =
+          "---\nstatus: in-progress\nphase: 1\nupdated: 2026-09-10\n---\n\n## Goal\nKeep shared tools available.\n\n## Phase 1: Work [IN PROGRESS]\n- [ ] 1.1 Preserve shared state ← CURRENT\n";
+        expect(
+          await hooks.tool.plan_save.execute(
+            { content: shared },
+            { sessionID: "root" },
+          ),
+        ).toBe("Plan saved.");
+        const read = (path?: string) =>
+          hooks.tool.plan_read.execute(
+            {
+              reason: "Startup failure isolation",
+              ...(path === undefined ? {} : { path }),
+            },
+            { sessionID: "child" },
+          );
+        expect(await read()).toBe(shared);
+        const failure = await read(selected);
+        expect(failure).toContain("Archive plan unavailable");
+        expect(failure).toContain("ENOTDIR");
+        expect(failure).toContain(blocker);
+        expect(failure).toContain("restart");
+        expect(failure).not.toContain(shared);
+        // A later valid configuration must not revive or redirect this startup reader.
+        process.env.HOME = sandbox;
+        process.env.PLANNOTATOR_DATA_DIR = join(sandbox, "valid-data");
+        await mkdir(join(process.env.PLANNOTATOR_DATA_DIR, "plans"), {
+          recursive: true,
+        });
+        const other = join(
+          process.env.PLANNOTATOR_DATA_DIR,
+          "plans",
+          "other.md",
+        );
+        await writeFile(other, "A different archive plan");
+        expect(await read(other)).toBe(failure);
+        expect(await read()).toBe(shared);
+        const compacted = { context: [] as string[] };
+        await hooks["experimental.session.compacting"](
+          { sessionID: "child" },
+          compacted,
+        );
+        expect(compacted.context.join("\n")).toContain(shared);
+        expect(compacted.context.join("\n")).not.toContain(
+          "A different archive plan",
+        );
+      } finally {
+        keys.forEach((key, index) => {
+          if (previous[index] === undefined) delete process.env[key];
+          else process.env[key] = previous[index];
+        });
+        home.mockRestore();
+        await rm(sandbox, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("plan_read archive captures startup precedence and rejects linked roots without creating state", async () => {
     const sandbox = await mkdtemp(join(repositoryRoot, ".plan-read-test-"));
@@ -2450,7 +2893,10 @@ describe("high-risk deterministic plugin boundaries", () => {
             get: async ({ path }: { path: { id: string } }) => ({
               data: {
                 id: path.id,
-                parentID: new Map([["child", "session-a"], ["grandchild", "child"]]).get(path.id),
+                parentID: new Map([
+                  ["child", "session-a"],
+                  ["grandchild", "child"],
+                ]).get(path.id),
               },
             }),
           },
@@ -2471,27 +2917,47 @@ describe("high-risk deterministic plugin boundaries", () => {
       );
       expect(successOutput.output).toBe("Plan saved.");
       const readPlan = (sessionID: string) =>
-        hooks.tool.plan_read.execute({ reason: "Verify session scope" }, { sessionID });
+        hooks.tool.plan_read.execute(
+          { reason: "Verify session scope" },
+          { sessionID },
+        );
       expect(await readPlan("session-a")).toBe(validPlan);
       expect(await readPlan("child")).toBe(validPlan);
       expect(await readPlan("grandchild")).toBe(validPlan);
       expect(await readPlan("session-b")).toBe("No plan found.");
 
-      const otherPlan = validPlan.replace("Repair the validated plan workflow.", "Keep unrelated work isolated.");
-      await hooks.tool.plan_save.execute({ content: otherPlan }, { sessionID: "session-b" });
-      const revisedPlan = validPlan.replace("Apply the repair", "Apply the revised repair");
-      expect(await hooks.tool.plan_save.execute(
-        { content: revisedPlan }, { sessionID: "grandchild" },
-      )).toBe("Plan saved.");
+      const otherPlan = validPlan.replace(
+        "Repair the validated plan workflow.",
+        "Keep unrelated work isolated.",
+      );
+      await hooks.tool.plan_save.execute(
+        { content: otherPlan },
+        { sessionID: "session-b" },
+      );
+      const revisedPlan = validPlan.replace(
+        "Apply the repair",
+        "Apply the revised repair",
+      );
+      expect(
+        await hooks.tool.plan_save.execute(
+          { content: revisedPlan },
+          { sessionID: "grandchild" },
+        ),
+      ).toBe("Plan saved.");
       expect(await readPlan("session-a")).toBe(revisedPlan);
       expect(await readPlan("child")).toBe(revisedPlan);
       expect(await readPlan("session-b")).toBe(otherPlan);
 
       const compacted = { context: [] as string[] };
-      await hooks["experimental.session.compacting"]({ sessionID: "child" }, compacted);
+      await hooks["experimental.session.compacting"](
+        { sessionID: "child" },
+        compacted,
+      );
       expect(compacted.context.join("\n")).toContain(revisedPlan);
       expect(compacted.context.join("\n")).not.toContain(otherPlan);
-      expect(compacted.context.join("\n")).toContain("may not reflect execution progress");
+      expect(compacted.context.join("\n")).toContain(
+        "may not reflect execution progress",
+      );
 
       const failureOutput = {
         title: "",
@@ -2515,14 +2981,17 @@ describe("high-risk deterministic plugin boundaries", () => {
       const warningOutput = {
         title: "",
         output: await hooks.tool.plan_save.execute(
-          { content: `${revisedPlan}\n## Phase 2: Follow-up [IN PROGRESS]\n- [ ] 2.1 Check the revision\n` },
+          {
+            content: `${revisedPlan}\n## Phase 2: Follow-up [IN PROGRESS]\n- [ ] 2.1 Check the revision\n`,
+          },
           { sessionID: "child" },
         ),
         metadata: {},
       };
       const originalWarning = warningOutput.output;
       await hooks["tool.execute.after"](
-        { tool: "plan_save", sessionID: "child", callID: "warning-call" }, warningOutput,
+        { tool: "plan_save", sessionID: "child", callID: "warning-call" },
+        warningOutput,
       );
       expect(warningOutput.output).toBe(originalWarning);
       expect(warningOutput.output).toContain("Plan saved.");
@@ -2533,13 +3002,17 @@ describe("high-risk deterministic plugin boundaries", () => {
         await hooks["experimental.chat.system.transform"]({ agent }, output);
         const rules = output.system.join("\n");
         expect(rules).toContain("design artifact, not a live progress ledger");
-        expect(rules).toContain("does not automatically require review, delegation, or a reread");
+        expect(rules).toContain(
+          "does not automatically require review, delegation, or a reread",
+        );
         expect(rules).toContain("do not repeat reads for each task");
         expect(rules).toContain("do not copy the full plan into prompts");
         expect(rules).toContain("task IDs or section references");
         expect(rules).not.toContain("Update immediately");
         if (agent === "build") {
-          expect(rules).toContain("Do not claim completion without independent tester evidence");
+          expect(rules).toContain(
+            "Do not claim completion without independent tester evidence",
+          );
           expect(rules).toContain("Do NOT review before tester evidence");
         }
       }
@@ -2549,11 +3022,21 @@ describe("high-risk deterministic plugin boundaries", () => {
         ["tester", "RESULT: passed", "proceed to `reviewer`"],
         ["tester", "RESULT: failed", "Route correction"],
         ["tester", "RESULT: blocked", "material verification limitation"],
-        ["tester", "RESULT: infrastructure-error", "material verification limitation"],
+        [
+          "tester",
+          "RESULT: infrastructure-error",
+          "material verification limitation",
+        ],
         ["tester", "No result", "Tester result is invalid"],
       ]) {
-        const input = { tool: "task", sessionID: "session-a", callID: `verify-${agent}-${result}` };
-        await hooks["tool.execute.before"](input, { args: { subagent_type: agent } });
+        const input = {
+          tool: "task",
+          sessionID: "session-a",
+          callID: `verify-${agent}-${result}`,
+        };
+        await hooks["tool.execute.before"](input, {
+          args: { subagent_type: agent },
+        });
         const output = { title: "", output: result, metadata: {} };
         await hooks["tool.execute.after"](input, output);
         expect(output.output).toContain(reminder);
@@ -2729,7 +3212,7 @@ describe("pinned automation", () => {
   }
 
   test("accepts the exact installed profile contract", async () => {
-    expect(receiptComponentNames).toHaveLength(23);
+    expect(receiptComponentNames).toHaveLength(24);
     expect(Object.keys(expectedDirectNpmDependencies)).toHaveLength(6);
     await withInstalledLayout(async (root) => {
       await expect(assertInstalledLayout(root)).resolves.toBeUndefined();
@@ -2769,7 +3252,7 @@ describe("pinned automation", () => {
         delete receipt.installed["component-22"];
         await writeFile(path, JSON.stringify(receipt));
       },
-      "exactly 23 entries",
+      "exactly 24 entries",
     ],
     [
       "duplicate receipt identity",
