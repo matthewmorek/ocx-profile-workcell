@@ -526,7 +526,7 @@ describe("self-contained Workcell registry", () => {
 
   test("publishes the canonical profile configuration with all identities and nested options", () => {
     expect(profileConfig).toMatchObject({
-      model: "openai/gpt-5.6-sol",
+      model: "openai/gpt-6-astra",
       small_model: "openai/gpt-5.6-luna",
       default_agent: "plan",
       subagent_depth: 1,
@@ -552,7 +552,7 @@ describe("self-contained Workcell registry", () => {
     const expectedAgentMatrix = {
       plan: {
         mode: "primary",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.3,
         options: { reasoningEffort: "high", textVerbosity: "medium" },
         promptHash:
@@ -562,7 +562,7 @@ describe("self-contained Workcell registry", () => {
       },
       build: {
         mode: "primary",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.3,
         options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash:
@@ -572,7 +572,7 @@ describe("self-contained Workcell registry", () => {
       },
       coder: {
         mode: "subagent",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.1,
         options: { reasoningEffort: "medium", textVerbosity: "low" },
         promptHash: null,
@@ -581,7 +581,7 @@ describe("self-contained Workcell registry", () => {
       },
       debugger: {
         mode: "subagent",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.1,
         options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash: null,
@@ -626,7 +626,7 @@ describe("self-contained Workcell registry", () => {
       },
       reviewer: {
         mode: "subagent",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.1,
         options: { reasoningEffort: "high", textVerbosity: "medium" },
         promptHash: null,
@@ -635,7 +635,7 @@ describe("self-contained Workcell registry", () => {
       },
       committer: {
         mode: "subagent",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         temperature: 0.1,
         options: { reasoningEffort: "low", textVerbosity: "low" },
         promptHash: null,
