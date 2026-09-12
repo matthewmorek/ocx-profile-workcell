@@ -2,7 +2,7 @@
   "$schema": "https://ocx.kdco.dev/schemas/v2/registry.json",
   "name": "matthewmorek",
   "author": "Matthew Morek",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "opencode": "1.18.25",
   "ocx": "2.0.14",
   "components": [
