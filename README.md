@@ -82,6 +82,25 @@ implementation. See
 [docs/debug-mode.md](docs/debug-mode.md) and the packaged
 [`debug-investigation`](files/skills/debug-investigation/SKILL.md) skill.
 
+### Committer approvals (0.3.2 hotfix)
+
+The user-authorized 0.3.2 hotfix changes only the committer's Bash fallback
+from `deny` to `ask`; all explicit committer allow/ask/deny entries and all
+other agent tool permissions remain unchanged. This is separate from the
+merged PR22 changes. In normal mode, unlisted shell commands use native
+approval prompts; a connected-TUI Auto session automatically approves eligible
+native asks, while explicit denials remain blocked. This broader unattended
+shell/API capability is intentional: it provides no blanket read-only or
+sandbox guarantee, and commit, push, and pull-request actions still require
+explicit task authorization.
+
+For diagnostics, `gh api` reads must intentionally be nonmutating GETs.
+Mutation flags or fields require task authorization and are not automatically
+safe. The reviewed batch contained unlisted `gh api` and `ls` commands; it did
+not establish a compound-parser bug. Reload or restart the installed profile
+to change running rules; doing so does not override explicit hard denies.
+Static tests do not establish live runtime behavior.
+
 ### Notifications
 
 In Workcell 0.3.1, notifications are restricted to the current persisted root

@@ -931,7 +931,7 @@ describe("self-contained Workcell registry", () => {
         options: { reasoningEffort: "low", textVerbosity: "low" },
         promptHash: null,
         permissionHash:
-          "1996492edbd6929aa27e772435d67b5e880771fa6419622c2cdf63d196fc5bfd",
+          "0a48c259d61f42b3f751fa9f81714bda53f16349c824b0082292853b88c2641c",
       },
       metadata: {
         mode: "subagent",
@@ -983,7 +983,7 @@ describe("self-contained Workcell registry", () => {
     expect(
       Object.entries(profileConfig.agent.committer.permission.bash),
     ).toEqual([
-      ["*", "deny"],
+      ["*", "ask"],
       ["git status*", "allow"],
       ["git diff*", "allow"],
       ["git log*", "allow"],
