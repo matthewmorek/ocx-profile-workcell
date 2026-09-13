@@ -54,13 +54,57 @@ agents, or claim package-cache cleanup.
 
 ## Debug mode
 
-Workcell 0.3.0 uses an observation-first `debug` primary for bounded diagnosis;
-the `debugger` child remains a distinct repair path. The primary reads existing
-evidence, compares known-good behavior, ranks falsifiable hypotheses, and asks
-before shell, external-path, authenticated-service, or local scratch probes. It
-does not edit tracked source or mutate remote services. See
+Workcell uses an observation-first `debug` primary for bounded diagnosis; the
+`debugger` child remains a distinct repair path. The primary reads existing
+evidence, compares known-good behavior, ranks falsifiable hypotheses, and uses
+native approvals for bounded shell, external-path, authenticated-service, and
+local scratch probes rather than a duplicate conversational gate. Debug handles
+bounded log/process checks and may restart an identified user-owned local
+development process, desktop application, or application-specific user-session
+service by default when ownership, launch procedure, before evidence, and impact
+are established. It does not enable, disable, or reconfigure services, make
+persistent source/configuration fixes, or mutate remote services. The primary
+owns targeted launcher/system reads; a native external-directory hard deny is not
+a chat approval and cannot be bypassed through Bash or children. Record exact
+available tool, target, error, and rule evidence, marking unknown details unknown.
+For networking failures, it also inspects relevant interfaces, routes, neighbors,
+DNS/resolver and proxy state plus targeted project configuration, then infers
+relevant LAN targets rather than enumerating a subnet. Bounded DNS, TCP, TLS,
+and non-mutating HTTP checks use existing tools and native authorization without
+a ritual approval question for each host or connection. Connections are not
+remote mutations: no credential guessing, disruptive probes, remote writes,
+configuration changes, or privilege escalation. Targets, ports, timeouts,
+retries, concurrency, output, and exposure remain bounded; see
+[docs/debug-mode.md](docs/debug-mode.md) for the limits and acceptance notes.
+Persistent fixes use a separate report-only Build handoff with proposed bounded
+requirements and operational state; the user switches to Build and requests
+implementation. See
 [docs/debug-mode.md](docs/debug-mode.md) and the packaged
 [`debug-investigation`](files/skills/debug-investigation/SKILL.md) skill.
+
+### Notifications
+
+In Workcell 0.3.1, notifications are restricted to the current persisted root
+session for the `debug`, `plan`, or `build` primary. Child sessions are always
+silent. The restriction covers desktop notifications and sounds, cmux
+notifications and status, and terminal title/status animations, including
+permission and question events and tool questions. Session lookup is
+fail-closed: unknown or unavailable session ownership suppresses the event, and
+authorization is not retained in a stale positive cache. The plugin serializes
+source processing and cleans up stale animation state it owns.
+
+The optional `notifyChildSessions` setting in
+`~/.config/opencode/kdco-notify.json` is deprecated and ignored; it cannot
+enable child notifications. Ownership is checked from the current persisted
+session returned by the pinned OpenCode 1.18.25 server; its installed legacy
+SDK typing omits the wire-level `agent` field, so the plugin validates that
+field from the response rather than trusting the legacy type. Because
+historical event payloads do not always include an agent, this is a current-
+session ownership contract rather than an absolute historical attribution
+guarantee. After installing or changing the profile, quit and start a fresh
+`ocx oc -p workcell` session; the plugin is not hot reloaded. Repository tests
+cover the restriction, but no live notification UI verification is claimed
+here.
 
 The pinned selector is `opencode --agent debug`. After configuration-time changes
 restart OpenCode; after installation launch a fresh `ocx oc -p workcell` session

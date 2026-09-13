@@ -9,7 +9,7 @@
  * - Auto-detects terminal emulator (Ghostty, Kitty, iTerm, WezTerm, etc.)
  * - Suppresses notifications when terminal is focused (like Ghostty does)
  * - Click notification to focus terminal
- * - Parent session only by default (no spam from sub-tasks)
+ * - Only debug, plan, and build primary sessions; child activity is always silent
  *
  * Uses cmux CLI first (if available), then node-notifier fallback:
  * - cmux: `cmux notify --title ... --subtitle ... --body ...`
@@ -45,7 +45,7 @@ import {
 import { parseOscTitleContext, writeOscTitleBestEffort } from "./notify/title"
 
 interface NotifyConfig {
-	/** Notify for child/sub-session events (default: false) */
+	/** @deprecated Ignored: Workcell never notifies for child sessions. */
 	notifyChildSessions: boolean
 	/** Sound configuration per event type */
 	sounds: {
@@ -216,17 +216,22 @@ function isQuietHours(config: NotifyConfig): boolean {
 }
 
 // ==========================================
-// PARENT SESSION DETECTION
+// SOURCE SESSION OWNERSHIP
 // ==========================================
 
-async function isParentSession(client: OpencodeClient, sessionID: string): Promise<boolean> {
+async function getNotificationSession(client: OpencodeClient, sessionID: string) {
 	try {
-		const session = await client.session.get({ path: { id: sessionID } })
-		// No parentID means this IS the parent/root session
-		return !session.data?.parentID
+		const { data, error } = await client.session.get({ path: { id: sessionID } })
+		// OpenCode 1.18.25 returns persisted Session.agent on GET /session/:id.
+		// Its legacy SDK omits that field (the v2 Session schema includes it).
+		// Validate the wire field rather than casting the legacy client to v2.
+		// This is current session identity, not historical event-time attribution.
+		if (error || !data || data.id !== sessionID || data.parentID !== undefined) return null
+		if (!("agent" in data)) return null
+		if (data.agent !== "debug" && data.agent !== "plan" && data.agent !== "build") return null
+		return data
 	} catch {
-		// If we can't fetch, assume it's a parent to be safe (notify rather than miss)
-		return true
+		return null
 	}
 }
 
@@ -423,34 +428,16 @@ async function sendNotification(
 // ==========================================
 
 async function handleSessionIdle(
-	client: OpencodeClient,
-	sessionID: string,
+	sessionTitle: string,
 	config: NotifyConfig,
 	terminalInfo: TerminalInfo,
 	notificationRuntime: NotificationRuntime,
 ): Promise<void> {
-	// Check if we should notify for this session
-	if (!config.notifyChildSessions) {
-		const isParent = await isParentSession(client, sessionID)
-		if (!isParent) return
-	}
-
 	// Check quiet hours
 	if (isQuietHours(config)) return
 
 	// Check if terminal is focused (suppress notification if user is already looking)
 	if (await isTerminalFocused(terminalInfo)) return
-
-	// Get session info for context
-	let sessionTitle = "Task"
-	try {
-		const session = await client.session.get({ path: { id: sessionID } })
-		if (session.data?.title) {
-			sessionTitle = session.data.title.slice(0, 50)
-		}
-	} catch {
-		// Use default title
-	}
 
 	await sendNotification(
 		{
@@ -466,19 +453,11 @@ async function handleSessionIdle(
 }
 
 async function handleSessionError(
-	client: OpencodeClient,
-	sessionID: string,
 	error: string | undefined,
 	config: NotifyConfig,
 	terminalInfo: TerminalInfo,
 	notificationRuntime: NotificationRuntime,
 ): Promise<void> {
-	// Check if we should notify for this session
-	if (!config.notifyChildSessions) {
-		const isParent = await isParentSession(client, sessionID)
-		if (!isParent) return
-	}
-
 	// Check quiet hours
 	if (isQuietHours(config)) return
 
@@ -503,9 +482,6 @@ async function handlePermissionUpdated(
 	terminalInfo: TerminalInfo,
 	notificationRuntime: NotificationRuntime,
 ): Promise<void> {
-	// Always notify for permission events - AI is blocked waiting for human
-	// No parent check needed: permissions always need human attention
-
 	// Check quiet hours
 	if (isQuietHours(config)) return
 
@@ -895,7 +871,7 @@ const NotifyPlugin: Plugin = async (ctx) => {
 		await handleQuestionAsked(config, terminalInfo, notificationRuntime)
 	}
 
-	const notifySessionReadyIfNeeded = async (sessionID: unknown): Promise<void> => {
+	const notifySessionReadyIfNeeded = async (sessionID: unknown, title: string): Promise<void> => {
 		const normalizedSessionID = toNonEmptyString(sessionID)
 		if (!normalizedSessionID) return
 
@@ -909,8 +885,7 @@ const NotifyPlugin: Plugin = async (ctx) => {
 		}
 
 		await handleSessionIdle(
-			client as OpencodeClient,
-			normalizedSessionID,
+			title.slice(0, 50) || "Task",
 			config,
 			terminalInfo,
 			notificationRuntime,
@@ -934,59 +909,103 @@ const NotifyPlugin: Plugin = async (ctx) => {
 		await handlePermissionUpdated(config, terminalInfo, notificationRuntime)
 	}
 
+	// Serialize lookup AND effects per source, so a slow busy lookup cannot
+	// overtake idle/deletion. These promises are not an authorization cache.
+	const sourceQueues = new Map<string, Promise<void>>()
+	const forgetSource = (sessionID: string): void => {
+		// Only retire state this source previously owned; a child cannot clear
+		// its parent's status or reset an otherwise untouched terminal title.
+		if (titleSessionLogicalStates.has(sessionID)) {
+			stopBusyOscTitleForSession(sessionID)
+			titleSessionLogicalStates.delete(sessionID)
+		}
+		if (cmuxSessionLogicalStates.has(sessionID)) {
+			applyCmuxSessionStatusTransition({ sessionID, logicalState: "idle" })
+		}
+	}
+	const withNotificationSource = (
+		sourceID: unknown,
+		deleted: boolean,
+		action: (title: string) => Promise<void>,
+	): Promise<void> => {
+		const sessionID = toNonEmptyString(sourceID)
+		if (!sessionID) return Promise.resolve()
+		const previous = sourceQueues.get(sessionID) ?? Promise.resolve()
+		const next = previous.catch(() => {}).then(async () => {
+			const session = deleted ? null : await getNotificationSession(client, sessionID)
+			if (!session) {
+				forgetSource(sessionID)
+				return
+			}
+			await action(session.title)
+		})
+		sourceQueues.set(sessionID, next)
+		return next.finally(() => {
+			if (sourceQueues.get(sessionID) === next) sourceQueues.delete(sessionID)
+		})
+	}
+
 	return {
 		"tool.execute.before": async (input: { tool: string; sessionID: string; callID: string }) => {
 			if (input.tool === "question") {
-				applyRuntimeSessionStatusTransition(
-					buildCmuxSessionStatusTransitionForQuestionTool(input.sessionID),
-				)
-				await notifyQuestionIfNeeded(buildQuestionToolDedupeKey(input.sessionID, input.callID))
+				await withNotificationSource(input.sessionID, false, async () => {
+					applyRuntimeSessionStatusTransition(
+						buildCmuxSessionStatusTransitionForQuestionTool(input.sessionID),
+					)
+					await notifyQuestionIfNeeded(buildQuestionToolDedupeKey(input.sessionID, input.callID))
+				})
 			}
 		},
 		event: async ({ event }: { event: Event }): Promise<void> => {
 			const runtimeEvent = event as { type: string; properties: Record<string, unknown> }
+			if (!runtimeEvent.properties || typeof runtimeEvent.properties !== "object") return
+			const lifecycle =
+				runtimeEvent.type === "session.updated" || runtimeEvent.type === "session.deleted"
+			const info = runtimeEvent.properties.info
+			const sourceID =
+				lifecycle && info && typeof info === "object" && "id" in info
+					? info.id
+					: runtimeEvent.properties.sessionID
 			const runtimeSessionStatusTransition = buildCmuxSessionStatusTransitionForEvent(
 				runtimeEvent.type,
 				runtimeEvent.properties,
 			)
-			applyRuntimeSessionStatusTransition(runtimeSessionStatusTransition)
+			if (!lifecycle && !runtimeSessionStatusTransition) return
+			await withNotificationSource(sourceID, runtimeEvent.type === "session.deleted", async (title) => {
+				applyRuntimeSessionStatusTransition(runtimeSessionStatusTransition)
 
-			switch (runtimeEvent.type) {
-				case "session.status":
-				case "session.idle": {
-					if (runtimeSessionStatusTransition?.logicalState === "idle") {
-						await notifySessionReadyIfNeeded(runtimeSessionStatusTransition.sessionID)
+				switch (runtimeEvent.type) {
+					case "session.status":
+					case "session.idle": {
+						if (runtimeSessionStatusTransition?.logicalState === "idle") {
+							await notifySessionReadyIfNeeded(runtimeSessionStatusTransition.sessionID, title)
+						}
+						break
 					}
-					break
-				}
-				case "session.error": {
-					const sessionID = toNonEmptyString(runtimeEvent.properties.sessionID)
-					const error = runtimeEvent.properties.error
-					const errorMessage = typeof error === "string" ? error : error ? String(error) : undefined
-					if (sessionID) {
+					case "session.error": {
+						const error = runtimeEvent.properties.error
+						const errorMessage = typeof error === "string" ? error : error ? String(error) : undefined
 						await handleSessionError(
-							client as OpencodeClient,
-							sessionID,
 							errorMessage,
 							config,
 							terminalInfo,
 							notificationRuntime,
 						)
+						break
 					}
-					break
-				}
 
-				case "permission.updated":
-				case "permission.asked": {
-					await notifyPermissionIfNeeded(runtimeEvent.properties)
-					break
+					case "permission.updated":
+					case "permission.asked": {
+						await notifyPermissionIfNeeded(runtimeEvent.properties)
+						break
+					}
+					case "question.asked": {
+						const dedupeKey = buildQuestionEventDedupeKey(runtimeEvent.properties)
+						await notifyQuestionIfNeeded(dedupeKey)
+						break
+					}
 				}
-				case "question.asked": {
-					const dedupeKey = buildQuestionEventDedupeKey(runtimeEvent.properties)
-					await notifyQuestionIfNeeded(dedupeKey)
-					break
-				}
-			}
+			})
 		},
 	}
 }

@@ -40,12 +40,41 @@ Status: Draft—not submitted
 - Conflicting, negative, or failed findings:
 - Alternatives and unknowns:
 
-## Approved probes
-- Exact probe, approval, effect, cleanup, and artifact path:
+## Probes and operational actions
+- Exact command/target, native authorization outcome, effect, cleanup, artifact path:
+- Denied observation, if any: exact tool/path/native error as observed; executing agent and relevant rule if available (otherwise unknown); unavailable evidence and independent allowed findings:
+- Restart, if any: pre-restart evidence, interruption, timeout, before/after outcome, final process/application/user-service state:
+- Network probes, if any: target-selection evidence, hostname, resolved/tested address, route/interface or unknown, port/protocol, DNS/TCP/TLS/HTTP outcomes, timeout/retry/traffic/output bounds, relevant resolver/proxy/remote-log exposure (no secrets):
 
 ## Next action
 - Proposed observation or verification criteria (not an approved fix plan):
+- If persistent source/configuration/dependency repair is needed: link to Build handoff; user switches to Build and requests implementation.
 ```
+
+## Build handoff (only when persistent repair is needed)
+
+This is a compact report section, not implementation or approval. Link it from
+the issue draft's next action; do not automatically switch modes or dispatch
+tools/repair children. Debug's task and plan tools remain denied.
+
+```markdown
+## Build handoff
+Status: Not implemented—not an approved fix plan
+- Failure: expected versus actual behavior:
+- Evidence references and negative/failed findings:
+- Root-cause confidence and remaining unknowns:
+- Exact files/components requiring repair (or explicitly unknown):
+- Proposed bounded repair requirements and constraints:
+- Acceptance criteria and exact verification commands (mark unavailable commands/requirements unknown rather than inventing them):
+- Operational actions already taken and post-operation process/application/user-service state (including stopped or unknown):
+- Accepted-plan task references (only if supplied; otherwise omit—bounded user requirements suffice):
+- Unverified risks:
+- Next action: Switch to Build and request implementation of the bounded repair.
+```
+
+Do not call `plan_read`, invent task references, or mandate a plan to fill this
+report. Include enough evidence and constraints for Build to assess the repair
+without treating the handoff itself as an approved fix plan.
 
 Before collection, minimize scope and sensitive data. The workflow does not
 guarantee redaction before content enters a model transcript, so do not collect

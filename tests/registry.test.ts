@@ -12,6 +12,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -20,7 +21,11 @@ import { parse } from "jsonc-parser";
 
 import BackgroundAgentsPlugin from "../files/plugins/background-agents";
 import { getProjectId } from "../files/plugins/kdco-primitives/get-project-id";
+import NotifyPlugin from "../files/plugins/notify";
+import * as notifyBackend from "../files/plugins/notify/backend";
+import * as notifyCmux from "../files/plugins/notify/cmux";
 import { buildCmuxSessionStatusTransitionForEvent } from "../files/plugins/notify/status";
+import * as notifyTitle from "../files/plugins/notify/title";
 import { sanitizeOscTitleText } from "../files/plugins/notify/title";
 import WorkspacePlugin from "../files/plugins/workspace-plugin";
 import WorktreePlugin from "../files/plugins/worktree";
@@ -59,6 +64,297 @@ import {
 } from "../scripts/smoke-install";
 
 const repositoryRoot = join(import.meta.dir, "..");
+
+// Exercise the real plugin hooks, replacing only external I/O and the clock.
+async function notificationHarness(osc = false) {
+  const notifications: unknown[] = [];
+  const statuses: string[] = [];
+  const titles: string[] = [];
+  const timers = new Map<number, () => void>();
+  let timerID = 0;
+  let lookup: (id: string) => Promise<any> = async (id) => ({
+    data: { id, title: "Task", agent: "build" },
+  });
+  const originalRead = fsPromises.readFile;
+  const spies = [
+    spyOn(Bun, "spawn").mockImplementation((() => {
+      throw new Error("No real commands in notification tests");
+    }) as any),
+    spyOn(fsPromises, "readFile").mockImplementation(((
+      path: any,
+      ...args: any[]
+    ) =>
+      String(path).endsWith("kdco-notify.json")
+        ? Promise.resolve(
+            JSON.stringify({
+              notifyChildSessions: true,
+              terminal: "unknown-test-terminal",
+            }),
+          )
+        : (originalRead as any)(path, ...args)) as any),
+    spyOn(notifyBackend, "sendNotificationWithFallback").mockImplementation(
+      async (options) => {
+        await options.tryCmuxNotify();
+      },
+    ),
+    spyOn(notifyCmux, "canUseCmuxNotification").mockReturnValue(true),
+    spyOn(notifyCmux, "sendCmuxNotification").mockImplementation(
+      async (options) => {
+        notifications.push(options);
+        return true;
+      },
+    ),
+    spyOn(notifyCmux, "sendCmuxStatus").mockImplementation(
+      async ({ key, text }) => {
+        statuses.push(`${key}:${text}`);
+        return true;
+      },
+    ),
+    spyOn(notifyCmux, "clearCmuxStatus").mockImplementation(async ({ key }) => {
+      statuses.push(`${key}:clear`);
+      return true;
+    }),
+    spyOn(notifyTitle, "parseOscTitleContext").mockReturnValue(
+      osc ? ({ baseTitle: "Workcell", mayWriteOscTitle: true } as any) : null,
+    ),
+    spyOn(notifyTitle, "writeOscTitleBestEffort").mockImplementation(
+      (title) => {
+        titles.push(title);
+      },
+    ),
+    spyOn(globalThis, "setInterval").mockImplementation(((
+      callback: () => void,
+    ) => {
+      timers.set(++timerID, callback);
+      return timerID;
+    }) as any),
+    spyOn(globalThis, "clearInterval").mockImplementation(((id: number) => {
+      timers.delete(id);
+    }) as any),
+  ];
+  const hooks = await NotifyPlugin({
+    client: { session: { get: ({ path }: any) => lookup(path.id) } },
+  } as any);
+  return {
+    notifications,
+    statuses,
+    titles,
+    timers,
+    lookup(fn: typeof lookup) {
+      lookup = fn;
+    },
+    event(type: string, properties: any) {
+      return hooks.event!({ event: { type, properties } } as any);
+    },
+    question(sessionID: string, callID = "call") {
+      return hooks["tool.execute.before"]!(
+        { tool: "question", sessionID, callID },
+        { args: {} },
+      );
+    },
+    restore() {
+      for (const spy of spies.reverse()) spy.mockRestore();
+    },
+  };
+}
+
+describe("notification source ownership", () => {
+  test("only current debug/plan/build roots notify, across every source event and question hook", async () => {
+    for (const osc of [false, true]) {
+      const h = await notificationHarness(osc);
+      try {
+        const sources = [
+          ...["debug", "plan", "build"].map((agent) => ({
+            agent,
+            allowed: true,
+          })),
+          ...["coder", "general", "custom", "Build", "", undefined].map(
+            (agent) => ({ agent, allowed: false }),
+          ),
+          { agent: "build", parentID: "root", allowed: false },
+          { agent: "debug", parentID: "root", allowed: false },
+          { agent: "plan", parentID: "root", allowed: false },
+        ];
+        for (const [index, source] of sources.entries()) {
+          const sessionID = `source-${index}`;
+          h.lookup(async (id) => ({ data: { id, title: "Task", ...source } }));
+          const before = h.notifications.length;
+          const statusBefore = h.statuses.length;
+          const titleBefore = h.titles.length;
+          await h.event("session.status", {
+            sessionID,
+            status: { type: "busy" },
+          });
+          expect(h.timers.size).toBe(source.allowed ? 1 : 0);
+          await h.event("session.status", {
+            sessionID,
+            status: { type: "idle" },
+          });
+          await h.event("session.idle", { sessionID }); // same ready notification
+          await h.event("session.error", { sessionID, error: "failure" });
+          await h.event("permission.asked", {
+            sessionID,
+            id: `${sessionID}-permission`,
+          });
+          await h.event("permission.updated", {
+            sessionID,
+            id: `${sessionID}-permission`,
+          });
+          await h.question(sessionID);
+          await h.event("question.asked", {
+            sessionID,
+            id: "question",
+            tool: { callID: "call" },
+          });
+          expect(h.notifications.length - before).toBe(source.allowed ? 4 : 0);
+          expect(h.timers.size).toBe(0);
+          if (!source.allowed) {
+            expect(h.statuses.length).toBe(statusBefore);
+            expect(h.titles.length).toBe(titleBefore);
+          }
+        }
+      } finally {
+        h.restore();
+      }
+    }
+  });
+
+  test("unknown sources fail closed, recover without cached denial, and revoke only their own animation", async () => {
+    for (const osc of [false, true]) {
+      const h = await notificationHarness(osc);
+      try {
+        for (const result of [
+          undefined,
+          {},
+          { error: "missing" },
+          { data: { id: "wrong", agent: "build" } },
+          { data: { id: "root" } },
+        ]) {
+          h.lookup(async () => result);
+          for (const type of [
+            "session.idle",
+            "session.error",
+            "permission.asked",
+            "permission.updated",
+            "question.asked",
+            "session.status",
+          ]) {
+            await h.event(type, {
+              sessionID: "root",
+              status: { type: "busy" },
+            });
+            await h.event(type, {});
+          }
+          await h.question("root");
+          await h.question("");
+        }
+        h.lookup(async () => {
+          throw new Error("unavailable");
+        });
+        await h.question("root");
+        expect([
+          h.notifications.length,
+          h.statuses.length,
+          h.titles.length,
+          h.timers.size,
+        ]).toEqual([0, 0, 0, 0]);
+        h.lookup(async (id) => ({
+          data: {
+            id,
+            title: "Task",
+            agent: "build",
+            ...(id === "child" ? { parentID: "root" } : {}),
+          },
+        }));
+        await h.event("session.status", {
+          sessionID: "root",
+          status: { type: "busy" },
+        });
+        expect(h.timers.size).toBe(1);
+        const outputs = [h.statuses.length, h.titles.length];
+        await h.event("session.deleted", { info: { id: "child" } });
+        await h.question("child");
+        expect([h.statuses.length, h.titles.length]).toEqual(outputs);
+        expect(h.timers.size).toBe(1);
+        h.lookup(async (id) => ({
+          data: { id, title: "Task", agent: "coder" },
+        }));
+        await h.event("session.updated", { info: { id: "root" } });
+        expect(h.timers.size).toBe(0);
+        await h.question("root");
+        expect(h.notifications).toHaveLength(0);
+        h.lookup(async (id) => ({
+          data: { id, title: "Task", agent: "plan" },
+        }));
+        await h.question("root");
+        expect(h.notifications).toHaveLength(1);
+        await h.event("session.status", {
+          sessionID: "root",
+          status: { type: "busy" },
+        });
+        h.lookup(async () => {
+          throw new Error("lookup failed after authorization");
+        });
+        await h.event("session.updated", { info: { id: "root" } });
+        expect(h.timers.size).toBe(0);
+        h.lookup(async (id) => ({
+          data: { id, title: "Task", agent: "debug" },
+        }));
+        await h.event("session.status", {
+          sessionID: "root",
+          status: { type: "busy" },
+        });
+        expect(h.timers.size).toBe(1);
+        await h.event("session.deleted", { info: { id: "root" } });
+        expect(h.timers.size).toBe(0);
+        expect(osc ? h.titles.at(-1) : h.statuses.at(-1)).toBe(
+          osc ? "Workcell" : "opencode.session.root:clear",
+        );
+      } finally {
+        h.restore();
+      }
+    }
+  });
+
+  test("serializes delayed source lookups so busy cannot overtake idle", async () => {
+    for (const osc of [false, true]) {
+      const h = await notificationHarness(osc);
+      try {
+        let resolveBusy!: (value: any) => void;
+        const delayed = new Promise((resolve) => {
+          resolveBusy = resolve;
+        });
+        let calls = 0;
+        h.lookup(async (id) =>
+          ++calls === 1
+            ? delayed
+            : { data: { id, title: "Task", agent: "debug" } },
+        );
+        const busy = h.event("session.status", {
+          sessionID: "root",
+          status: { type: "busy" },
+        });
+        const idle = h.event("session.status", {
+          sessionID: "root",
+          status: { type: "idle" },
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(calls).toBe(1);
+        resolveBusy({ data: { id: "root", title: "Task", agent: "debug" } });
+        await Promise.all([busy, idle]);
+        expect(calls).toBe(2);
+        expect(h.notifications).toHaveLength(1);
+        expect(h.timers.size).toBe(0);
+        expect(osc ? h.titles.at(-1) : h.statuses.at(-1)).toBe(
+          osc ? "Workcell" : "opencode.session.root:clear",
+        );
+      } finally {
+        h.restore();
+      }
+    }
+  });
+});
 const registry = parse(
   await readFile(join(repositoryRoot, "registry.jsonc"), "utf8"),
 ) as any;
@@ -561,7 +857,7 @@ describe("self-contained Workcell registry", () => {
         temperature: 0.3,
         options: { reasoningEffort: "high", textVerbosity: "medium" },
         promptHash:
-          "38c498ef8439f0843dbe0ce5c0d13c7db16d0488fa4d223c7297154bf0ebdba5",
+          "85a4b4ac61e743cf16333ce2336df0e68967d3d76c8ba73f732373ac46297c58",
         permissionHash:
           "49482be84b314c4389174fd8aeff044f16db0dabf5187b133e4f121540f1a74d",
       },
@@ -785,7 +1081,7 @@ describe("self-contained Workcell registry", () => {
     }
   });
 
-  test("keeps debug fail-closed with bounded approval gates and only the diagnostic skill", () => {
+  test("keeps debug fail-closed with native authorization and only the diagnostic skill", () => {
     expect(
       Object.entries(profileConfig.agent)
         .filter(([, agent]: [string, any]) => agent.mode === "primary")
