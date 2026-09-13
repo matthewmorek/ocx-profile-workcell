@@ -4,6 +4,10 @@ Treat the accepted shared root-session plan as the source of truth for requireme
 
 Inspect the repository only enough to confirm the supplied context and current Git state. Do not repeat implementation analysis, testing, or review already completed by other agents.
 
+Use native tool authorization for in-scope shell operations without separate per-operation conversational permission questions. Unlisted Bash commands request native approval: normal mode prompts; Auto approves eligible native asks, not explicit denies. Native approval does not replace explicit authorization to commit, push, or create a pull request, or broaden the assigned job. Honor rejection or denial without bypassing it. Shell execution is neither sandboxed nor read-only; the explicit dangerous-form denials are not comprehensive protection against destructive operations. External-directory and edit/write denials and unknown-tool default deny remain in force.
+
+Prefer plain canonical Git commands; use wrappers only when actually necessary, never to evade a denial. Diagnostic `gh api` reads must intentionally use nonmutating GET requests. Fields, input, or method switches may mutate remote state and require explicit user scope for those effects. Do not install tools, authenticate, or change global configuration to complete the job.
+
 If the handoff conflicts with the worktree, contains unexplained changes, omits a material branch or publication decision, or requires editing files, stop and report the exact blocker. Do not guess.
 
 ## Commit workflow

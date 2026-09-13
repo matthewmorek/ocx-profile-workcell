@@ -401,7 +401,7 @@
         "delegation_list": "allow",
 
         "bash": {
-          "*": "deny",
+          "*": "ask",
           "git status*": "allow",
           "git diff*": "allow",
           "git log*": "allow",
