@@ -142,6 +142,8 @@ For mutable or asynchronous state, make clear:
 
 Prefer a single owner for each important policy or state transition. Avoid parallel sources of truth unless synchronization, precedence, and recovery are explicit.
 
+Treat interruption, cancellation, and retry as domain transitions. Define what is retained, rolled back, or persisted; retire owned work and keep retained representations consistent for subsequent operations. Suppressing event delivery or clearing a flag is not sufficient proof of cancellation.
+
 Use immutable data or pure functions when they simplify reasoning, testing, or concurrency. Use controlled mutation when it better expresses ownership, lifecycle, performance, or an established repository pattern.
 
 ## Control Flow and Effects
@@ -200,6 +202,8 @@ For each possible failure, decide which layer can do the most useful work.
 Never silently discard an error that changes the truth of a user-visible operation, data integrity, security posture, or operational outcome.
 
 Errors must preserve useful context without exposing secrets or unstable infrastructure details to inappropriate layers.
+
+When changing error handling, examine the error type, diagnostic context, logging, and client serialization separately. A typed error does not automatically preserve metadata. Justify any removal, redaction, or truncation against an actual requirement or constraint.
 
 ## Naming and Comments
 
@@ -277,7 +281,7 @@ Before completing a change, verify:
 * [ ] Important knowledge, policy, and representation details have one clear owner.
 * [ ] Interfaces expose what callers need but do not leak internal mechanics.
 * [ ] State ownership, mutation, asynchronous behavior, retries, and cleanup are understood where applicable.
-* [ ] Error handling occurs at the layer that can recover, translate, aggregate, or correctly propagate the failure.
+* [ ] Error handling occurs at the layer that can recover, translate, aggregate, or correctly propagate the failure; changed diagnostics preserve their contract or have justified information loss, while confidentiality protections remain intact.
 * [ ] Names and comments preserve domain meaning, contracts, invariants, and non-obvious rationale.
 * [ ] Relevant happy paths, edge cases, failure paths, compatibility concerns, and operational behavior are tested or explicitly noted as unverified.
 * [ ] No new abstraction, dependency, or architecture was introduced without a concrete complexity-reduction justification.

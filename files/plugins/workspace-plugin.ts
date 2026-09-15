@@ -642,7 +642,7 @@ The parent loads philosophy only when making design decisions, not merely dispat
 1. Orient: Reuse the plan and relevant delegation findings already in context; do not read repository files directly
 2. Implement: Send bounded implementation to \`coder\` by shared plan task ID or section, including scope, constraints, expected evidence, and proportionate immediate focused self-checks
 3. Verify independently: Call native \`task\` with \`tester\` only when the implementation is ready for verification
-4. Give tester a self-contained handoff containing changed files, acceptance criteria, exact existing commands to run, and coder evidence
+4. Give tester a self-contained handoff containing the exact revision/diff review basis, requested verification scope, changed files, acceptance criteria, exact existing commands to run, and coder evidence. Identify the basis using resolved commit/base IDs or, for dirty worktrees, the base revision and a retained patch reference or diff fingerprint covering relevant staged, unstaged, and untracked changes; report unavailable attribution as a limitation
 5. Dispose tester evidence:
    - \`passed\` → when ready for review, send only the verified scope, changed files, acceptance criteria, and tester evidence to \`reviewer\`; a batch pass does not verify the entire plan
    - \`failed\` → route correction to \`coder\` or difficult diagnosis/repair to \`debugger\`; request a tester rerun only through a new explicit parent \`task\` call
@@ -663,7 +663,7 @@ A tester never fixes a failure; failed evidence returns to \`coder\` or \`debugg
 
 When implementation is ready for review:
 1. Obtain and inspect the tester's terminal result and evidence before review
-2. For \`passed\`, when the verified scope is ready, delegate that scope to \`reviewer\` with changed files, acceptance criteria, and compact tester evidence: status, exact commands, exit codes, decisive failures, limitations, and accessible artifact references. Inline essential evidence when artifacts are inaccessible to the recipient; do not require the complete tester payload
+2. For \`passed\`, when the verified scope is ready, delegate that scope to \`reviewer\` with the same exact revision/diff basis, changed files, acceptance criteria actually covered, and compact tester evidence: status, exact commands and results/exit codes, execution origin (local or hosted) separately from coverage (full check, changed-line gate, or other limited check, including filters), decisive failures, limitations, and accessible artifact references. Inline essential evidence when artifacts are inaccessible to the recipient; do not require the complete tester payload. A later relevant diff change limits prior evidence to its earlier basis and scope; request a proportionate recheck of the gap or state an explicit limitation, not an automatic wholesale rerun
 3. For \`failed\`, correct through \`coder\` or \`debugger\`, then explicitly rerun \`tester\`; do not review the failed implementation as complete
 4. For \`infrastructure-error\` or \`blocked\`, make an explicit material-limitation disposition and provide it to \`reviewer\` if review proceeds
 5. Include verification disposition and review findings in the completion report
