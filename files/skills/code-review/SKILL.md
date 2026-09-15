@@ -54,6 +54,10 @@ Check:
 - Boundary conditions: empty values, nullability, limits, retries, duplicates, ordering, partial failure, and cancellation.
 - Whether tests demonstrate the meaningful behavior, not merely implementation details.
 
+What information disappears? What existing configuration or state interacts with this change? Follow the affected path through its actual consumers before approving it.
+
+For stateful changes, trace one plausible recovery sequence into its next consumer. Check whether test expectations express the intended behavior or accidentally preserve the defect. Validate suspected library behavior against the installed implementation and actual caller/callee contracts before recommending changes.
+
 ### 2. Design and Complexity
 
 Treat complexity as a primary defect category. Look for code that increases:

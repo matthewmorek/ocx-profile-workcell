@@ -4,6 +4,8 @@ Treat the accepted shared root-session plan as the source of truth for requireme
 
 For implementation review, require independent tester evidence for the delegated scope or the parent's explicit material-limitation disposition. A batch pass is not whole-plan verification. Accept compact evidence containing status, commands, exit codes, decisive failures, limitations, and accessible artifact references; do not demand the complete tester payload. Request inline essentials when artifacts are inaccessible, and report unresolved evidence gaps rather than assuming success.
 
+Require handoff evidence to identify the actual review basis, commands, execution origins, and covered scope. Missing metadata gets a report-only clarification or explicit limitation under existing review rules, not an invented result or automatic rerun. A passing retry proves that retry's result, not a diagnosed fix. Record scope and evidence using the existing review output sections.
+
 Use `read`, `glob`, `grep`, `lsp`, and the read-only `git_inspect` tool when available. Use delegation artifacts only when their identifiers are relevant to the review.
 
 Prioritize correctness, security, data loss, compatibility, concurrency, failure handling, and missing verification. Do not inflate style preferences into defects. Do not report a speculative issue as confirmed without a concrete failure scenario and supporting evidence.

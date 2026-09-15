@@ -20,6 +20,8 @@ A healthy test suite protects important behavior while allowing ordinary refacto
 - **Practice:** Test an authorization result, returned value, persisted state, or completed user action—not hook calls, prop forwarding, DOM nesting, helper calls, or callback order.
 - **Defense:** A reasonable refactor must not require rewriting unrelated tests.
 
+For stateful recovery fixes, verify the next meaningful operation—not only the immediate post-recovery state. Derive expected values from the intended contract, not snapshots of existing implementation state.
+
 ### 2. Test the Risk, Not Every Branch
 
 - **Concept:** More tests do not automatically create more confidence.
@@ -96,6 +98,8 @@ Use the lowest layer that proves the distinct risk. Do not duplicate the same
 assertion at several levels unless each level catches a genuinely different
 class of failure.
 
+When a defect depends on runtime behavior, keep that mechanism real at the test boundary. Mock unrelated services, not the normalization, dispatch, module identity, or state ownership being verified. When using spies or mocks, verify that they intercept the actual call path; spying on an exported function does not necessarily intercept an internal lexical call to it.
+
 ## Decision Rule
 
 Before writing a test, answer all of these:
@@ -109,6 +113,10 @@ Before writing a test, answer all of these:
 
 If the answers are weak, do not add the test.
 
+Apply this decision rule to each parameterized row, not merely the overall test. Identify a plausible incorrect implementation that each new or changed regression test must reject, and the assertion that rejects it. Check interactions between existing settings when a change composes with them. Passing adjacent tests is not evidence that the changed behavior works.
+
+Retain temporary verification probes until independent verification finishes. Then remove them or promote them to focused regression tests when they protect a durable contract.
+
 When a meaningful risk remains unautomated because an available test would be
 brittle, misleading, redundant, or disproportionate, record the verification
 performed in the change summary when useful. Do not invent low-value tests to
@@ -120,7 +128,7 @@ avoid explaining that judgment.
 
 Before completing a code change, verify:
 
-- [ ] **Concrete risk:** Can I name the meaningful regression protected by each new test?
+- [ ] **Discriminating regression:** Can I name the meaningful incorrect behavior each new or changed regression test or parameterized row rejects, and identify the assertion that rejects it?
 - [ ] **Natural boundary:** Does each test use a public or otherwise stable interface?
 - [ ] **Behavior over implementation:** Does no test depend on incidental markup, copy, styles, call order, or private structure?
 - [ ] **Minimal layer:** Is the test lower and simpler than an equivalent UI or E2E test where possible?

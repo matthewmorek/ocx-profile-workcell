@@ -64,6 +64,16 @@ LIMITATIONS: checks not run and why
 CONFIDENCE: what evidence does and does not cover
 ```
 
+Report the following details in the existing fields:
+
+- `COMMANDS`: exact command, exit code/status, execution origin (local or hosted), and whether it is a full check, changed-line gate, or other limited check; identify any filter or gate that narrows coverage.
+- `FAILURES`: original failures and retry outcomes; call a problem diagnosed/fixed only when evidence identifies the cause, corrective change, and verification of that correction.
+- `ARTIFACTS`: relevant report or diff references; for hosted CI, run/job reference and tested revision when available.
+- `LIMITATIONS`: missing commands, revision attribution, unavailable CI detail, or scope not verified; do not infer a hosted pass from a local pass.
+- `CONFIDENCE`: exact verified revision/diff basis and files, tasks, or acceptance criteria actually covered; distinguish that scope from the overall plan.
+
+A moving branch name or bare `git diff` command does not identify the exact tested content. Use resolved commit/base identifiers for committed changes; for dirty worktrees, include the base revision and a retained patch reference or diff fingerprint covering relevant staged, unstaged, and untracked changes. Do not commit verification artifacts or introduce snapshot infrastructure. If content attribution cannot be established, report the limitation rather than implying exact coverage.
+
 Choose exactly one `RESULT` value. Keep command spelling exact, include every
 exit code, classify failures without repairing them, and use `none` only when
 that field genuinely has nothing to report. A pass applies only to the verified
