@@ -368,7 +368,17 @@
 
         "edit": "deny",
         "write": "deny",
-        "bash": "deny",
+        "bash": {
+          "*": "deny",
+          "gh pr view *": "allow",
+          "gh pr diff *": "allow",
+          "gh pr checks *": "allow",
+          // Last match wins; these exclusions must follow the allows.
+          "gh pr * --web*": "deny",
+          "gh pr * -w*": "deny",
+          "gh pr * --watch*": "deny",
+          "gh pr * --allow-escape-sequences*": "deny",
+        },
         "external_directory": "deny",
         "task": "deny",
         "delegate": "deny",

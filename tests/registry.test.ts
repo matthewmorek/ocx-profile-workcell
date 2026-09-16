@@ -922,7 +922,7 @@ describe("self-contained Workcell registry", () => {
         options: { reasoningEffort: "high", textVerbosity: "medium" },
         promptHash: null,
         permissionHash:
-          "b507ffe358db8b9a1520991e78649c39471796eb0fdd33b8f05c1df03dd43d03",
+          "120149dc920abbee8eae07f32bb8c9c7f4ad0ae05b8db1aca4820f938a5a5d94",
       },
       committer: {
         mode: "subagent",
@@ -979,6 +979,26 @@ describe("self-contained Workcell registry", () => {
       buildSkill: "allow",
       buildTodoRead: "allow",
       reviewerSkill: "allow",
+    });
+    // Ordering is part of the permission contract: the last matching rule wins.
+    expect(
+      Object.entries(profileConfig.agent.reviewer.permission.bash),
+    ).toEqual([
+      ["*", "deny"],
+      ["gh pr view *", "allow"],
+      ["gh pr diff *", "allow"],
+      ["gh pr checks *", "allow"],
+      ["gh pr * --web*", "deny"],
+      ["gh pr * -w*", "deny"],
+      ["gh pr * --watch*", "deny"],
+      ["gh pr * --allow-escape-sequences*", "deny"],
+    ]);
+    expect(profileConfig.agent.reviewer.permission).toMatchObject({
+      edit: "deny",
+      write: "deny",
+      external_directory: "deny",
+      task: "deny",
+      delegate: "deny",
     });
     expect(
       Object.entries(profileConfig.agent.committer.permission.bash),

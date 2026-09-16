@@ -1,5 +1,5 @@
 ---
-description: Run a risk-based code review on a change, file, or directory
+description: Run a risk-based code review on a PR, change, file, or directory
 ---
 
 Delegate to the `reviewer` agent to perform an independent code review using the `code-review` skill.
@@ -10,6 +10,11 @@ Delegate to the `reviewer` agent to perform an independent code review using the
 
 Resolve the scope as follows:
 
+* A GitHub PR URL:
+    * Review that exact PR using the reviewer's read-only GitHub evidence workflow; preserve the URL in the handoff.
+* `pr <number>`:
+    * Review that PR in the repository established through existing read-only Git inspection. Include the number and explicit `[HOST/]OWNER/REPO` in the handoff; request a PR URL if repository identity is ambiguous.
+    * Only the explicit `pr` prefix selects a numeric PR; a bare number retains the revision/path interpretation below.
 * No arguments:
     * Review staged changes using `git diff --cached`.
     * Include the staged file list and relevant staged tests/configuration.
@@ -26,6 +31,8 @@ Resolve the scope as follows:
     * Exclude generated files, dependencies, build artifacts, vendored code, and lockfiles unless they are directly relevant to the requested review.
 
 If the supplied scope is ambiguous, choose the interpretation that reviews the most relevant change with the least unrelated code, and state the interpretation in the review scope.
+
+Delegate asynchronously to `reviewer` with the exact resolved target and repository context, including available local repository identity and HEAD evidence. For PR scope, require the PR URL and reviewed head SHA in the result, a head-SHA recheck before finalizing, and explicit limitations for local HEAD mismatch, stale or incomplete evidence, or CLI/access failures. Do not checkout/fetch or execute PR code/tests to fill gaps. Findings remain local; do not publish to GitHub. Preserve the existing local review modes and use read-only Git inspection rather than granting the reviewer general shell access.
 
 ## Reviewer Instructions
 

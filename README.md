@@ -38,6 +38,32 @@ Workcell 0.3.0 supports Apple Silicon macOS with Bun 1.4.1 and OpenCode
 2.0.15 CLI. Configured MCP servers are limited to Context7, Exa, and GitHub
 Grep.
 
+## GitHub PR review
+
+The reviewer can inspect a specified pull request with the preinstalled,
+already-authenticated `gh` CLI:
+
+```text
+/review <GitHub PR URL>
+/review pr <number>
+```
+
+This is a local, read-only inspection. It reads PR metadata, the diff, and
+checks; it does not publish comments or reviews, check out or change files,
+execute code or tests, or change GitHub state. Findings remain local. The
+review records the PR head SHA and reports when local context is unavailable,
+the evidence is incomplete, or the PR changes during review; it does not
+silently substitute the local checkout for the PR.
+
+The reviewer policy allows only the supported `gh pr view`, `gh pr diff`, and
+`gh pr checks` command families. This is a configuration policy, not a shell
+sandbox or a complete parser for every invocation, alias, or shell construct.
+Missing authentication, access, or context is reported as a limitation rather
+than resolved by broadening permissions. Repository edits do not automatically
+update an installed profile, and smoke verification does not verify live
+reviewer runtime permissions. After updating an installed profile, start a
+fresh `ocx oc -p workcell` session.
+
 ## DCP configuration and smoke verification
 
 Workcell owns the profile-root `tui.jsonc`. It pins external AGPL-3.0-or-later
