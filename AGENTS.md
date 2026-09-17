@@ -46,7 +46,8 @@ bun run smoke
 ```
 
 `build` runs `scripts/build-registry.ts`; `test` runs
-`bun test tests/registry.test.ts`; `smoke` runs `scripts/smoke-install.ts`.
+`bun test tests/registry.test.ts tests/review*.test.ts`; `smoke` runs
+`scripts/smoke-install.ts`.
 
 Smoke npm policy is isolated to the smoke sandbox. It uses
 `min-release-age=7` and `engine-strict=false`, filters inherited npm settings,

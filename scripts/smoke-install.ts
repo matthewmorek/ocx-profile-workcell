@@ -19,7 +19,7 @@ const profileTargets = [
 const expectedReceiptComponents = expectedComponents.filter(
   (name) => name !== "workcell",
 );
-const expectedReceiptComponentCount = 24;
+const expectedReceiptComponentCount = 26;
 
 export const npmPolicyContent = "min-release-age=7\nengine-strict=false\n";
 export const expectedDirectNpmDependencies = Object.freeze({

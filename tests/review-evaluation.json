@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "status": "prepared-not-run",
+  "protocol": "Compare one comprehensive reviewer with risk-selected 1–4 reviewers on the same pinned fixture. Blind-adjudicate supported unique findings and false positives. Record missed defects, duplicate root causes, coverage, latency and tokens. Do not score exact wording or infer superiority from these three cases. Patches are fixture input, never executed by the review runtime.",
+  "cases": [
+    {
+      "id": "cohesive-limit",
+      "prompt": "Review this cohesive validation change against the contract: values 0 through 100 inclusive are valid.",
+      "files": {
+        "limit.ts": "export const valid = (n: number) => Number.isFinite(n) && n >= 0 && n <= 100;\n"
+      },
+      "patch": "-export const valid = (n: number) => Number.isFinite(n) && n >= 0 && n <= 100;\n+export const valid = (n: number) => Number.isFinite(n) && n > 0 && n < 100;\n",
+      "risks": ["behavior/specification"],
+      "expectedUniqueFindings": [
+        "Both documented endpoints are incorrectly rejected; one root cause."
+      ],
+      "rejectUnsupported": [
+        "Claims about performance or missing integer validation: neither is in the contract."
+      ]
+    },
+    {
+      "id": "tenant-cache-interaction",
+      "prompt": "Review the cache/auth interaction. A document ID can exist in multiple tenants. Authorization must apply on cache hits and misses.",
+      "files": {
+        "load.ts": "export async function load(user, id, db, cache) { const hit = cache.get(id); if (hit) return hit; const doc = await db.find(user.tenant, id); if (!doc) throw Error('not found'); cache.set(id, doc); return doc; }\n"
+      },
+      "risks": ["security/trust", "state/concurrency/failure"],
+      "expectedUniqueFindings": [
+        "Cache identity omits tenant and the cache hit bypasses tenant-scoped lookup, disclosing another tenant's document."
+      ],
+      "rejectUnsupported": [
+        "Treating missing tenant key and cache-hit authorization as two independent defects without explaining distinct remedies."
+      ]
+    },
+    {
+      "id": "cross-file-response-contract",
+      "prompt": "Review the server/client change. The public response must remain compatible with the existing client. CI checks only the producer's shape.",
+      "files": {
+        "server.ts": "export const response = () => ({ records: [], nextCursor: null });\n",
+        "client.ts": "export const consume = (response) => response.items.map(item => item.id);\n",
+        "server.test.ts": "// Existing hosted check asserts response().records is an array.\n"
+      },
+      "risks": [
+        "behavior/specification",
+        "integration/compatibility/verification"
+      ],
+      "expectedUniqueFindings": [
+        "The producer renamed items to records without updating or versioning the consumer contract; existing client throws."
+      ],
+      "rejectUnsupported": [
+        "CI green proves end-to-end compatibility or local tests were run."
+      ]
+    }
+  ]
+}

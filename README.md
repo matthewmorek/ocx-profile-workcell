@@ -40,18 +40,13 @@ Grep.
 
 ## GitHub PR review
 
-The reviewer can inspect a specified pull request with the preinstalled,
-already-authenticated `gh` CLI:
-
-```text
-/review <GitHub PR URL>
-/review pr <number>
-```
-
-This is a local, read-only inspection. It reads PR metadata, the diff, and
-checks; it does not publish comments or reviews, check out or change files,
-execute code or tests, or change GitHub state. Findings remain local. The
-review records the PR head SHA and reports when local context is unavailable,
+Standalone `reviewer` assignments can inspect a specified pull request with the
+preinstalled, already-authenticated `gh` CLI. This path is a local, read-only
+inspection. It reads PR metadata, the diff, and checks; it does not publish
+comments or reviews, create or check out a
+dedicated worktree, change files, execute code or tests, or change GitHub state.
+Findings remain local. The review records the PR head SHA and reports when local
+context is unavailable,
 the evidence is incomplete, or the PR changes during review; it does not
 silently substitute the local checkout for the PR.
 
@@ -63,6 +58,11 @@ than resolved by broadening permissions. Repository edits do not automatically
 update an installed profile, and smoke verification does not verify live
 reviewer runtime permissions. After updating an installed profile, start a
 fresh `ocx oc -p workcell` session.
+
+The dedicated `review` primary is different: `/review <GitHub PR URL>` or
+`/review pr <number>` starts a separate coordinator session with a private,
+detached PR worktree. Its review-bound tools keep the source checkout unchanged;
+workers remain read-only and cannot write source, use a shell, or publish results.
 
 ## DCP configuration and smoke verification
 
@@ -107,6 +107,41 @@ requirements and operational state; the user switches to Build and requests
 implementation. See
 [docs/debug-mode.md](docs/debug-mode.md) and the packaged
 [`debug-investigation`](files/skills/debug-investigation/SKILL.md) skill.
+
+## Review mode
+
+`review` is a dedicated read-only primary. It is separate from the capable
+`reviewer` leaf: the primary owns scope, evidence, fan-out, adjudication and
+the report; `reviewer` workers independently inspect assigned risks. Natural
+language review requests, top-level `code-review`, and `/review` use the same
+entry and start a separate root review session rather than reviewing in the
+initiating conversation. Select one comprehensive reviewer for a cohesive
+change, or 2–4 reviewers only when distinct behavior/specification,
+state/concurrency/failure, security/trust, or integration/compatibility risks
+justify the cost. Four is a limit, not a checklist. The coordinator may use
+review-bound tools to create and inspect a private, detached PR worktree; this
+does not grant workers source-write, shell, or publication access.
+
+`/review` accepts no arguments (staged changes), `recent`, a committed
+revision/range, a file or directory, `path:<path>`, a path array, a PR URL, or
+explicit `pr <number>` / `#123` / `pr:123` for the verified local origin. A bare
+numeric argument retains its revision/path meaning and is not treated as a PR.
+Range endpoints may be empty
+(`..HEAD` or `HEAD..`) and then mean `HEAD`. The underlying entry also accepts
+`review_start` with a string or string-array `scope`, an optional bounded
+`handoff` containing requirements, constraints and evidence references, and
+`discard: true` for explicitly authorized cleanup. Lifecycle commands use an
+opaque ID: `resume <ID>`, `status <ID>`, `recover <ID>`, and `close <ID>`;
+`recover create` is the stopped-owner recovery route for a failed project
+creation lock.
+Reports are delivered through a concise notification and remain retrievable
+with `review_start` status; they are not silently injected into the original
+conversation. Reporting does not close the review. Workspaces and state stay
+private and retained across rounds and OpenCode restarts until explicit close.
+Unchanged input reuses code coverage but creates an evidence-only round to
+refresh mutable PR evidence and produce a new summary without redispatch.
+See [docs/review-mode.md](docs/review-mode.md) for trust boundaries, limits,
+recovery and rollback.
 
 ### Committer approvals (0.3.2 hotfix)
 

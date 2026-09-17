@@ -1,57 +1,12 @@
 ---
-description: Run a risk-based code review on a PR, change, file, or directory
+description: Start, resume, inspect or close an isolated PR or local code review
+agent: review
 ---
 
-Delegate to the `reviewer` agent to perform an independent code review using the `code-review` skill.
+Call `review_start` with scope `$ARGUMENTS` and a `handoff` object: `requirements` (essential caller specification), `constraints` (bounded strings), and `evidence` (objects with `reference` and essential `summary`). On resume, supply a revised handoff only when the caller's brief changed. The new root cannot assume access to this conversation's shared plan. Return the review ID and dedicated session reference; do not delegate directly to `reviewer` from this entry or review in the initiating conversation.
 
-## Scope
+No arguments means staged changes. `recent` means HEAD's change (all tracked files for an initial commit). A revision/range selects committed changes; file/directory scopes select current content. Bare numbers retain revision/path meaning. Use `path:<path>` or a path array when ambiguous.
 
-**Requested scope:** `$ARGUMENTS`
+A GitHub PR URL selects that exact PR. `pr <number>` (also `#123` or `pr:123`) selects a PR against this project's verified origin, never the current branch's implicit PR. Preserve the target and known repository identity in the handoff; request a PR URL when repository identity is ambiguous. The dedicated coordinator verifies identity, pins the PR head in private Git storage, and rechecks freshness before reporting. It never substitutes the initiating checkout for a mismatched PR head. Report unavailable or stale evidence explicitly; findings stay local. Standalone reviewer assignments retain their separate read-only GitHub evidence workflow.
 
-Resolve the scope as follows:
-
-* A GitHub PR URL:
-    * Review that exact PR using the reviewer's read-only GitHub evidence workflow; preserve the URL in the handoff.
-* `pr <number>`:
-    * Review that PR in the repository established through existing read-only Git inspection. Include the number and explicit `[HOST/]OWNER/REPO` in the handoff; request a PR URL if repository identity is ambiguous.
-    * Only the explicit `pr` prefix selects a numeric PR; a bare number retains the revision/path interpretation below.
-* No arguments:
-    * Review staged changes using `git diff --cached`.
-    * Include the staged file list and relevant staged tests/configuration.
-* `recent`:
-    * Review changes introduced by `HEAD` using `git diff HEAD^ HEAD`.
-    * If `HEAD` has no parent, review all tracked files in `HEAD` and state that this is an initial-commit review.
-* A commit, branch, tag, range, or revision expression:
-    * Review the diff represented by that revision or range.
-* One or more file paths:
-    * Review the current contents of those files.
-    * Also inspect relevant callers, callees, tests, types, configuration, and interfaces as needed to make a defensible assessment.
-* A directory path:
-    * Review the current contents of source files within that directory.
-    * Exclude generated files, dependencies, build artifacts, vendored code, and lockfiles unless they are directly relevant to the requested review.
-
-If the supplied scope is ambiguous, choose the interpretation that reviews the most relevant change with the least unrelated code, and state the interpretation in the review scope.
-
-Delegate asynchronously to `reviewer` with the exact resolved target and repository context, including available local repository identity and HEAD evidence. For PR scope, require the PR URL and reviewed head SHA in the result, a head-SHA recheck before finalizing, and explicit limitations for local HEAD mismatch, stale or incomplete evidence, or CLI/access failures. Do not checkout/fetch or execute PR code/tests to fill gaps. Findings remain local; do not publish to GitHub. Preserve the existing local review modes and use read-only Git inspection rather than granting the reviewer general shell access.
-
-## Reviewer Instructions
-
-The reviewer must:
-
-1. Load and follow the `code-review` skill as the sole authority for review methodology, finding classification, and output format.
-2. Read applicable repository guidance such as `AGENTS.md`, contribution documentation, local conventions, and the relevant task or change description when available.
-3. Establish the intended behavior and risk profile before judging the implementation.
-4. Inspect enough surrounding context to support findings; do not evaluate changed lines in isolation.
-5. Prioritize evidence-backed defects and material complexity introduced by the change:
-    * Incorrect or incompatible behavior.
-    * Security, privacy, data-integrity, availability, and operational risks.
-    * Leaky abstractions, shallow modules, duplicated policy, unnecessary dependencies, and change amplification.
-    * Missing or misleading tests, contracts, comments, and error handling.
-6. Keep review comments proportionate:
-    * Block only confirmed Critical or Major findings.
-    * Clearly label non-blocking findings, strong concerns, investigation questions, suggestions, and nits.
-    * Do not invent positive observations.
-    * Do not report generic checklist advice without a concrete, change-specific consequence.
-7. Do not modify files.
-
-Return the complete review exactly in the `code-review` skill’s output format.
+Use `resume <ID>`, `status <ID>` or explicit `close <ID>` for retained reviews. Keep the response concise. Reporting does not close workspaces. Do not publish findings, change the source checkout/index/refs, or execute target code/tests.

@@ -26,6 +26,7 @@ type Component = { name?: unknown; files?: unknown };
 type Registry = { version?: unknown; components?: unknown[] };
 export const expectedComponents = [
   "workcell-primitives",
+  "workcell-review-plugin",
   "workcell-background-agents",
   "workcell-workspace-plugin",
   "workcell-agent-coder",
@@ -34,6 +35,7 @@ export const expectedComponents = [
   "workcell-agent-explore",
   "workcell-agent-researcher",
   "workcell-agent-scribe",
+  "workcell-agent-review",
   "workcell-agent-reviewer",
   "workcell-agent-committer",
   "workcell-agent-metadata",

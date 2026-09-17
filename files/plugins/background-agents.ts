@@ -34,6 +34,7 @@ import * as path from "node:path";
 import { adjectives, animals, colors, uniqueNamesGenerator } from "unique-names-generator";
 import { getProjectId } from "./kdco-primitives/get-project-id";
 import type { OpencodeClient } from "./kdco-primitives/types";
+import { reviewRoute } from "./review/bridge";
 
 // ==========================================
 // ROUTING POLICY
@@ -2065,6 +2066,7 @@ class DelegationManager {
 interface DelegateArgs {
   prompt: string;
   agent: string;
+  review_slot?: string;
 }
 
 function createDelegate(manager: DelegationManager): ReturnType<typeof tool> {
@@ -2080,6 +2082,9 @@ function createDelegate(manager: DelegationManager): ReturnType<typeof tool> {
       "Do not use this tool for agents that write files, execute unrestricted shell commands, or perform external mutations.",
     ].join("\n"),
     args: {
+      review_slot: tool.schema.string().optional().describe(
+        "Prepared slot ID for a review-bound coordinator; omit for ordinary delegation.",
+      ),
       prompt: tool.schema
         .string()
         .describe("Complete, self-contained English prompt for the child agent."),
@@ -2099,6 +2104,8 @@ function createDelegate(manager: DelegationManager): ReturnType<typeof tool> {
       }
 
       try {
+        const review = await reviewRoute(toolContext);
+        if (review) return await review.delegate(toolContext, args);
         const delegation = await manager.delegate({
           parentSessionID: toolContext.sessionID,
           parentMessageID: toolContext.messageID,
@@ -2152,6 +2159,8 @@ function createDelegationRead(manager: DelegationManager): ReturnType<typeof too
         return "❌ delegation_read requires sessionID. This is a system error.";
       }
 
+      const review = await reviewRoute(toolContext);
+      if (review) return review.read(toolContext, args.id);
       return await manager.readOutput(toolContext.sessionID, args.id);
     },
   });
@@ -2169,6 +2178,8 @@ function createDelegationList(manager: DelegationManager): ReturnType<typeof too
         return "❌ delegation_list requires sessionID. This is a system error.";
       }
 
+      const review = await reviewRoute(toolContext);
+      if (review) return review.read(toolContext);
       const delegations = await manager.listDelegations(toolContext.sessionID);
 
       if (delegations.length === 0) {
