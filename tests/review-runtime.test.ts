@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import { execFile } from "node:child_process";
 import {
   access,
-  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -10,124 +10,100 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { hostname } from "node:os";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { createOpencodeClient } from "@opencode-ai/sdk";
 import { parse } from "jsonc-parser";
 
-import { fingerprint } from "../files/plugins/review/contracts";
-import { git } from "../files/plugins/review/process";
-import { sessionRules } from "../files/plugins/review/session";
-import { newId, ReviewStore } from "../files/plugins/review/store";
+const exec = promisify(execFile);
+type Message = { role: string; content: string | { text?: string }[] };
+const text = (m: Message) =>
+  typeof m.content === "string"
+    ? m.content
+    : (m.content ?? []).map((p) => p.text ?? "").join("\n");
 
-type ModelMessage = {
-  role: string;
-  content: string | { type: string; text?: string }[];
-};
-function text(message: ModelMessage): string {
-  return typeof message.content === "string"
-    ? message.content
-    : (message.content ?? []).map((p) => p.text ?? "").join("\n");
-}
-async function treeFingerprint(root: string): Promise<string> {
-  const files: [string, string][] = [];
-  async function visit(path: string) {
-    for (const name of (await readdir(path)).sort()) {
-      const full = join(path, name),
-        info = await lstat(full);
-      if (info.isDirectory()) await visit(full);
-      else
-        files.push([
-          full.slice(root.length),
-          (await readFile(full)).toString("base64"),
-        ]);
-    }
-  }
-  await visit(root);
-  return fingerprint(files);
-}
-
-// Real pinned runtime, shipped agent prompts/permissions, real public tools and local Git.
-// Only model/provider and external plugin services are replaced by deterministic local fixtures.
-test("OpenCode 1.18.25 public review lifecycle preserves caller context, restrictions, recovery, reuse and source state", async () => {
+// Deterministic provider scripts only the agent choices. Native tools, permission checks,
+// ordinary delegation, Git worktrees, app-file persistence and restart are real.
+test("native review handoff, ordinary reviewer inspection, agent ledger, restart/reuse and cleanup", async () => {
   await mkdir(resolve(".tmp"), { recursive: true });
-  const root = await realpath(await mkdtemp(resolve(".tmp/review-runtime-")));
-  const project = join(root, "project");
+  const root = await realpath(
+    await mkdtemp(resolve(".tmp/review-native-runtime-")),
+  );
+  const project = join(root, "source");
   await mkdir(project);
-  await git(project, ["init", "--template=", "-b", "main"]);
-  await writeFile(join(project, "file.txt"), "fixture\n");
-  await git(project, ["add", "file.txt"]);
-  await git(project, [
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "-m",
-    "fixture",
-  ]);
-  await writeFile(join(project, "file.txt"), "dirty caller content\n");
-  const handoff = {
-    requirements: "Fixture must preserve tenant isolation.",
-    constraints: ["No target execution"],
-    evidence: [
-      {
-        reference: "caller-only-plan",
-        summary: "The caller's plan requires tenant-scoped caching.",
-      },
-    ],
-  };
-  const context = {
-    specification: "Caller tenant-isolation contract",
-    instructions: "No additional instructions",
-    testEvidence: "No local tests",
-    risk: "behavior",
-  };
-  const observed: { role: string; tools: string[] }[] = [];
-  const seenAssignments: unknown[] = [];
-  const failures: string[] = [];
-  let call = 0;
+  const git = async (...args: string[]) =>
+    (
+      await exec(
+        "git",
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          ...args,
+        ],
+        { cwd: project },
+      )
+    ).stdout.trim();
+  await git("init", "--template=", "-b", "main");
+  await writeFile(join(project, "file.txt"), "pinned content\n");
+  await git("add", "file.txt");
+  await git("commit", "-m", "pinned");
+  const pin = await git("rev-parse", "HEAD");
+  await writeFile(join(project, "file.txt"), "source branch\n");
+  await git("add", "file.txt");
+  await git("commit", "-m", "source");
+  const head = await git("rev-parse", "HEAD");
+  await writeFile(join(project, "file.txt"), "staged caller\n");
+  await git("add", "file.txt");
+  const index = await readFile(join(project, ".git/index"));
+  await writeFile(join(project, "file.txt"), "dirty caller\n");
+  const observations: { role: string; tools: string[]; results: string[] }[] =
+    [];
+  const errors: string[] = [];
+  let calls = 0,
+    delegates = 0;
   const model = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
       const body = (await request.json()) as {
-        messages: ModelMessage[];
+        messages: Message[];
         tools?: { function: { name: string } }[];
       };
-      let index = -1;
-      body.messages.forEach((m, i) => {
-        if (
-          m.role === "user" &&
-          /Runtime acceptance:|Standalone permission probe|Coordinate review [a-f0-9]{32}|Review [a-f0-9]{32}, round|All reviewer slots for review/.test(
-            text(m),
-          )
-        )
-          index = i;
-      });
-      const prompt = index >= 0 ? text(body.messages[index]) : "";
-      const outputs = body.messages
-        .slice(index + 1)
+      const messages = body.messages,
+        users = messages
+          .map((m, i) => ({ m, i }))
+          .filter(({ m }) => m.role === "user");
+      const last = users.at(-1),
+        prompt = last ? text(last.m) : "";
+      const requestText =
+        users
+          .map(({ m }) => text(m))
+          .filter((s) => s.includes("Review workspace "))
+          .at(-1) ?? "";
+      const id = /Review workspace ([a-f0-9]{32})/.exec(requestText)?.[1];
+      const ledger = /Ledger: (.+?)\. Checkout/.exec(requestText)?.[1] ?? "";
+      const checkout =
+        /Checkout \(if pinned\): (.+?)\. Use/.exec(requestText)?.[1] ?? "";
+      const outputs = messages
+        .slice((last?.i ?? -1) + 1)
         .filter((m) => m.role === "tool")
-        .map((m) => text(m));
-      const decoded = outputs.map((value) => {
-        try {
-          return JSON.parse(value);
-        } catch {
-          return value;
-        }
-      });
-      const role = prompt.includes("Runtime acceptance:")
+        .map(text);
+      const role = prompt.includes("Native origin:")
         ? "origin"
-        : prompt.includes("Standalone permission probe")
-          ? "standalone"
-          : /Review [a-f0-9]{32}, round/.test(prompt)
-            ? "worker"
-            : "coordinator";
-      observed.push({
+        : prompt.includes("Fixture worker:")
+          ? "worker"
+          : id
+            ? "review"
+            : "other";
+      observations.push({
         role,
         tools: body.tools?.map((t) => t.function.name) ?? [],
+        results: outputs,
       });
       let operation: { name: string; args: unknown } | undefined;
       try {
@@ -135,120 +111,106 @@ test("OpenCode 1.18.25 public review lifecycle preserves caller context, restric
           operation = {
             name: "review_start",
             args: JSON.parse(
-              prompt
-                .slice(
-                  prompt.indexOf("Runtime acceptance:") +
-                    "Runtime acceptance:".length,
-                )
-                .trim(),
+              prompt.slice(prompt.indexOf("Native origin:") + 14).trim(),
             ),
           };
-        else if (role === "worker") {
-          const round = Number(/, round (\d+)/.exec(prompt)![1]);
-          const actions = [
+        if (role === "worker") {
+          const target = /Fixture worker: (.+)/.exec(prompt)![1].trim();
+          operation = [
+            { name: "read", args: { filePath: join(target, "file.txt") } },
+            { name: "glob", args: { pattern: "*.txt", path: target } },
+            { name: "grep", args: { pattern: "pinned content", path: target } },
             {
               name: "bash",
               args: {
-                command: `touch ${join(root, "executed")}`,
-                description: "Denied permission sentinel",
+                command: `git -C ${JSON.stringify(target)} rev-parse HEAD`,
+                description: "Read pinned revision",
               },
             },
-            {
-              name: "review_state",
-              args: { input: { action: "assignment", round } },
-            },
-            {
-              name: "review_inspect",
-              args: { round, request: { kind: "diff" } },
-            },
-            {
-              name: "review_state",
-              args: {
-                input: {
-                  action: "submit",
-                  round,
-                  outcome: "succeeded",
-                  coverage: ["Pinned fixture and caller contract"],
-                  limitations: ["No target tests run"],
-                  candidates: [],
-                },
-              },
-            },
-          ];
-          operation = actions[outputs.length];
-          for (const value of decoded)
-            if (value && typeof value === "object" && "handoff" in value)
-              seenAssignments.push(value.handoff);
-        } else if (index >= 0 && role === "coordinator") {
-          const wake = prompt.includes("All reviewer slots for review");
-          if (!outputs.length)
-            operation = {
-              name: "review_state",
-              args: { input: { action: "status" } },
-            };
-          else if (wake) {
-            if (outputs.length === 1)
-              operation = {
-                name: "review_state",
-                args: { input: { action: "adjudicate", dispositions: [] } },
-              };
-            if (outputs.length === 2)
-              operation = {
-                name: "review_state",
+          ][outputs.length];
+        }
+        if (role === "review") {
+          const resumed = requestText.includes("Resume fixture");
+          const notified = prompt.includes("<task-notification>");
+          const report = resumed
+            ? "APPROVE. Native ledger baseline reused."
+            : "APPROVE. Native pinned review complete.";
+          const content = `# Review ledger\nTarget: fixture\nHead: ${pin}\nLast completed baseline: ${pin}\nFindings: none\nDispositions: none\n${resumed ? "Unchanged code reused; mutable evidence rechecked." : "Independent reviewer evidence adjudicated."}\n${report}\n`;
+          if (resumed) {
+            operation = [
+              { name: "read", args: { filePath: ledger } },
+              {
+                name: "bash",
                 args: {
-                  input: {
-                    action: "complete",
-                    report:
-                      "APPROVE. Complete/current fixture coverage; no target tests run.",
-                  },
+                  command: `git -C ${JSON.stringify(checkout)} rev-parse HEAD`,
+                  description: "Compare pinned baseline",
                 },
-              };
+              },
+              { name: "write", args: { filePath: ledger, content } },
+              {
+                name: "review_start",
+                args: { action: "return", id, request: report },
+              },
+            ][outputs.length];
+            if (
+              outputs.length >= 2 &&
+              (!outputs[0].includes(pin) || !outputs[1].includes(pin))
+            )
+              throw new Error(`Baseline comparison failed: ${outputs}`);
+          } else if (notified) {
+            const all = messages.map(text).join("\n");
+            const delegation =
+              /Delegation started: ([a-z0-9-]+)/.exec(all)?.[1] ??
+              /<task-id>([^<]+)<\/task-id>/.exec(all)?.[1];
+            if (!delegation)
+              throw new Error("No ordinary delegation ID in notification");
+            operation = [
+              { name: "delegation_read", args: { id: delegation } },
+              { name: "write", args: { filePath: ledger, content } },
+              {
+                name: "review_start",
+                args: { action: "return", id, request: report },
+              },
+            ][outputs.length];
           } else {
-            if (outputs.length === 1)
-              operation = {
-                name: "review_state",
-                args: { input: { action: "prepare", context } },
-              };
-            const prepared = decoded[1] as { reused?: boolean } | undefined;
-            if (outputs.length === 2)
-              operation = prepared?.reused
-                ? {
-                    name: "review_state",
-                    args: {
-                      input: {
-                        action: "complete",
-                        report:
-                          "APPROVE. Code coverage reused; current evidence rechecked.",
-                      },
-                    },
-                  }
-                : {
-                    name: "review_state",
-                    args: {
-                      input: {
-                        action: "plan",
-                        lenses: ["comprehensive behavior and contract"],
-                      },
-                    },
-                  };
-            if (outputs.length === 3 && !prepared?.reused) {
-              const slots = decoded[2] as { id: string }[];
-              if (!Array.isArray(slots) || !slots[0]?.id)
-                throw new Error(`Plan did not return slots: ${outputs[2]}`);
-              operation = {
+            operation = [
+              { name: "skill", args: { name: "code-review" } },
+              { name: "worktree_review", args: { id, head: pin } },
+              {
+                name: "write",
+                args: {
+                  filePath: join(project, "forbidden.txt"),
+                  content: "must be denied",
+                },
+              },
+              {
+                name: "write",
+                args: {
+                  filePath: join(checkout, "notes/forbidden.txt"),
+                  content:
+                    "target edits must be denied even under a notes directory",
+                },
+              },
+              {
+                name: "write",
+                args: {
+                  filePath: ledger,
+                  content: `# Review ledger\nTarget head: ${pin}\nCoverage pending\n`,
+                },
+              },
+              {
                 name: "delegate",
                 args: {
                   agent: "reviewer",
-                  review_slot: slots[0].id,
-                  prompt:
-                    "Review the caller's tenant-isolation contract against this pinned fixture.",
+                  prompt: `Fixture worker: ${checkout}`,
                 },
-              };
-            }
+              },
+            ][outputs.length];
+            if (operation?.name === "delegate") delegates++;
           }
         }
       } catch (error) {
-        failures.push(String(error));
+        errors.push(String(error));
       }
       const delta = operation
         ? {
@@ -256,7 +218,7 @@ test("OpenCode 1.18.25 public review lifecycle preserves caller context, restric
             tool_calls: [
               {
                 index: 0,
-                id: `call_${++call}`,
+                id: `call_${++calls}`,
                 type: "function",
                 function: {
                   name: operation.name,
@@ -265,7 +227,13 @@ test("OpenCode 1.18.25 public review lifecycle preserves caller context, restric
               },
             ],
           }
-        : { role: "assistant", content: "done" };
+        : {
+            role: "assistant",
+            content:
+              role === "worker"
+                ? `INDEPENDENT_RESULT ${pin}: pinned fixture inspected with native tools; no findings.`
+                : "done",
+          };
       const chunk = {
         id: "fixture",
         object: "chat.completion.chunk",
@@ -281,10 +249,6 @@ test("OpenCode 1.18.25 public review lifecycle preserves caller context, restric
   });
   const profile = parse(
     await readFile(resolve("files/profiles/workcell/opencode.jsonc"), "utf8"),
-  );
-  expect(profile.agent.reviewer.permission.bash["gh pr view *"]).toBe("allow");
-  expect(profile.agent.reviewer.permission.bash["gh pr checks *"]).toBe(
-    "allow",
   );
   for (const [name, agent] of Object.entries(profile.agent) as [
     string,
@@ -308,13 +272,12 @@ test("OpenCode 1.18.25 public review lifecycle preserves caller context, restric
       $schema: profile.$schema,
       agent: profile.agent,
       permission: profile.permission,
-      subagent_depth: profile.subagent_depth,
+      subagent_depth: 1,
+      snapshot: false,
       plugin: [
-        new URL("../files/plugins/review.ts", import.meta.url).href,
         new URL("../files/plugins/background-agents.ts", import.meta.url).href,
       ],
       skills: { paths: [resolve("files/skills/code-review")] },
-      snapshot: false,
       provider: {
         "review-test": {
           npm: "@ai-sdk/openai-compatible",
@@ -324,7 +287,7 @@ test("OpenCode 1.18.25 public review lifecycle preserves caller context, restric
             apiKey: "fixture",
           },
           models: {
-            mock: { name: "mock", limit: { context: 100000, output: 2000 } },
+            mock: { name: "mock", limit: { context: 100000, output: 4000 } },
           },
         },
       },
@@ -332,239 +295,237 @@ test("OpenCode 1.18.25 public review lifecycle preserves caller context, restric
       small_model: "review-test/mock",
     }),
   );
-  const child = Bun.spawn(
-    [
-      resolve("node_modules/.bin/opencode"),
-      "serve",
-      "--hostname",
-      "127.0.0.1",
-      "--port",
-      "0",
-    ],
-    {
-      cwd: project,
-      env: {
-        PATH: process.env.PATH,
-        HOME: root,
-        XDG_DATA_HOME: join(root, "data"),
-        XDG_CONFIG_HOME: join(root, "config"),
-        XDG_CACHE_HOME: join(root, "cache"),
-        XDG_STATE_HOME: join(root, "state"),
-        OPENCODE_DISABLE_MODELS_FETCH: "1",
-        OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
-        OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
-        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
+  async function server() {
+    const child = Bun.spawn(
+      [
+        resolve("node_modules/.bin/opencode"),
+        "serve",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        "0",
+      ],
+      {
+        cwd: project,
+        env: {
+          PATH: process.env.PATH,
+          HOME: root,
+          XDG_DATA_HOME: join(root, "data"),
+          XDG_CONFIG_HOME: join(root, "config"),
+          XDG_CACHE_HOME: join(root, "cache"),
+          XDG_STATE_HOME: join(root, "state"),
+          OPENCODE_DISABLE_MODELS_FETCH: "1",
+          OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
+          OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+          OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
       },
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
-  let logs = "";
-  void (async () => {
-    for await (const bytes of child.stderr)
-      logs += new TextDecoder().decode(bytes);
-  })();
-  const timeout = setTimeout(() => child.kill(), 60000);
-  try {
-    let stdout = "";
+    );
+    let logs = "",
+      output = "";
+    void (async () => {
+      for await (const chunk of child.stderr)
+        logs += new TextDecoder().decode(chunk);
+    })();
     const reader = child.stdout.getReader();
-    while (!/http:\/\/127\.0\.0\.1:\d+/.test(stdout)) {
+    while (!/http:\/\/127\.0\.0\.1:\d+/.test(output)) {
       const { value, done } = await reader.read();
-      if (done) throw new Error(`Runtime failed: ${logs}`);
-      stdout += new TextDecoder().decode(value);
+      if (done) throw new Error(logs);
+      output += new TextDecoder().decode(value);
     }
-    const client = createOpencodeClient({
-      baseUrl: stdout.match(/http:\/\/127\.0\.0\.1:\d+/)![0],
-    });
+    return {
+      child,
+      client: createOpencodeClient({
+        baseUrl: output.match(/http:\/\/127\.0\.0\.1:\d+/)![0],
+      }),
+    };
+  }
+  let running = await server();
+  const timeout = setTimeout(() => running.child.kill(), 60000);
+  try {
+    let client = running.client;
     const origin = (
       await client.session.create({
-        body: { title: "Runtime acceptance origin" },
+        body: { title: "Origin" },
         query: { directory: project },
       })
     ).data!;
-    const before = await treeFingerprint(project);
-    async function invoke(args: unknown): Promise<string> {
+    async function invoke(args: unknown) {
       const result = await client.session.prompt({
         path: { id: origin.id },
         query: { directory: project },
         body: {
           agent: "build",
           parts: [
-            {
-              type: "text",
-              text: `Runtime acceptance: ${JSON.stringify(args)}`,
-            },
+            { type: "text", text: `Native origin: ${JSON.stringify(args)}` },
           ],
         },
       });
-      if (result.error)
-        throw new Error(
-          `Origin prompt failed: ${JSON.stringify(result.error)}`,
-        );
-      const messages = await client.session.messages({
-        path: { id: origin.id },
-        query: { directory: project },
-      });
-      const part = messages.data
-        ?.flatMap((m) => m.parts)
-        .filter((p) => p.type === "tool" && p.tool === "review_start")
-        .at(-1);
-      if (!part || part.type !== "tool" || part.state.status !== "completed")
-        throw new Error(
-          `Public entry failed: ${JSON.stringify(part)}; model failures: ${failures}`,
-        );
-      return part.state.output;
-    }
-    const started = JSON.parse(await invoke({ scope: "recent", handoff }));
-    const store = await ReviewStore.open(
-      project,
-      join(root, ".local/share/workcell/reviews"),
-    );
-    async function completed(number: number) {
-      for (let i = 0; i < 300; i++) {
-        const m = await store.load(started.review);
-        if (m.lastCompleted === number) return m;
-        await Bun.sleep(50);
-      }
-      const m = await store.load(started.review);
-      const transcripts = await Promise.all(
-        m.managedSessions.map(
-          async (id) =>
-            (
-              await client.session.messages({
-                path: { id },
-                query: { directory: project },
-              })
-            ).data,
-        ),
-      );
-      throw new Error(
-        `Round ${number} incomplete: ${JSON.stringify(m)}\n${JSON.stringify(transcripts)}\n${failures}`,
-      );
-    }
-    const first = await completed(1);
-    expect(first.handoff).toEqual(handoff);
-    expect(seenAssignments).toContainEqual(handoff);
-    const coordinator = (
-      await client.session.get({
-        path: { id: started.session },
-        query: { directory: project },
-      })
-    ).data as unknown as { parentID?: string; permission: unknown };
-    expect(coordinator.parentID).toBeUndefined();
-    expect(coordinator.permission).toEqual(sessionRules(false));
-    const workerID = first.rounds[0].slots[0].session;
-    const worker = (
-      await client.session.get({
-        path: { id: workerID },
-        query: { directory: project },
-      })
-    ).data as unknown as { parentID: string; permission: unknown };
-    expect(worker.parentID).toBe(started.session);
-    expect(worker.permission).toEqual(sessionRules(true));
-    expect(
-      JSON.parse(await invoke({ scope: `status ${started.review}` })).report,
-    ).toContain("APPROVE");
-    // Unrelated damaged inventory and a stranded create.lock must not disable public recovery.
-    const incomplete = newId();
-    await mkdir(store.directory(incomplete), { mode: 0o700 });
-    const partition = join(
-      root,
-      ".local/share/workcell/reviews",
-      fingerprint(project),
-    );
-    const stopped = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
-    await stopped.exited;
-    await writeFile(
-      join(partition, "create.lock"),
-      JSON.stringify({ pid: stopped.pid, host: hostname(), token: newId() }),
-    );
-    expect(await invoke({ scope: "recover create" })).toContain("recovered");
-    expect(JSON.parse(await invoke({ scope: "list" })).issues).toContainEqual({
-      id: incomplete,
-      state: "unavailable",
-    });
-    await invoke({ scope: `resume ${started.review}` });
-    const second = await completed(2);
-    expect(second.rounds[1].basis).toBe("reused");
-    expect(second.rounds[1].slots[0].session).toBe(workerID);
-    expect(
-      JSON.parse(await invoke({ scope: `status ${started.review}` })).report,
-    ).toContain("reused");
-    expect(await invoke({ scope: `close ${started.review}` })).toContain(
-      "closed",
-    );
-    await expect(lstat(store.directory(started.review))).rejects.toThrow();
-    expect(
-      (
-        await client.session.get({
+      if (result.error) throw new Error(JSON.stringify(result.error));
+      const messages = (
+        await client.session.messages({
           path: { id: origin.id },
           query: { directory: project },
         })
-      ).data?.id,
-    ).toBe(origin.id);
-    for (const id of second.managedSessions)
-      expect(
-        (
-          await client.session.get({
-            path: { id },
-            query: { directory: project },
-          })
-        ).response.status,
-      ).toBe(404);
-    // The same shipped reviewer keeps its upstream gh command capability when not review-bound.
-    // Inspect actual offered tools, without issuing any shell command or contacting GitHub.
-    const standalone = (
-      await client.session.create({
-        body: {
-          title: "Standalone reviewer permission probe",
-          parentID: origin.id,
-        },
+      ).data!;
+      const part = messages
+        .flatMap((m) => m.parts)
+        .filter((p) => p.type === "tool" && p.tool === "review_start")
+        .at(-1)!;
+      if (part.type !== "tool" || part.state.status !== "completed")
+        throw new Error(JSON.stringify(part));
+      return part.state.output;
+    }
+    const started = JSON.parse(
+      await invoke({
+        action: "start",
+        request: `Fixture pin ${pin}; inspect independently and keep a ledger.`,
+      }),
+    );
+    async function waitReport(fragment: string) {
+      for (let i = 0; i < 400; i++) {
+        const messages =
+          (
+            await client.session.messages({
+              path: { id: origin.id },
+              query: { directory: project },
+            })
+          ).data ?? [];
+        const status =
+          (await client.session.status({ query: { directory: project } }))
+            .data ?? {};
+        if (
+          messages.some((m) =>
+            m.parts.some((p) => p.type === "text" && p.text.includes(fragment)),
+          ) &&
+          (!status[started.session] || status[started.session].type === "idle")
+        )
+          return;
+        await Bun.sleep(50);
+      }
+      const messages = (
+        await client.session.messages({
+          path: { id: started.session },
+          query: { directory: project },
+        })
+      ).data;
+      throw new Error(
+        `Missing ${fragment}: ${errors}\n${JSON.stringify(messages)}`,
+      );
+    }
+    await waitReport("Native pinned review complete");
+    const transcript = (
+      await client.session.messages({
+        path: { id: started.session },
         query: { directory: project },
       })
     ).data!;
-    const probe = await client.session.prompt({
-      path: { id: standalone.id },
-      query: { directory: project },
-      body: {
-        agent: "reviewer",
-        parts: [{ type: "text", text: "Standalone permission probe" }],
-      },
-    });
-    expect(probe.error).toBeUndefined();
     expect(
-      observed.some(
-        (entry) => entry.role === "standalone" && entry.tools.includes("bash"),
-      ),
+      transcript
+        .flatMap((message) => message.parts)
+        .some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "skill" &&
+            part.state.status === "completed" &&
+            part.state.input.name === "code-review",
+        ),
     ).toBe(true);
-    await client.session.delete({
-      path: { id: standalone.id },
-      query: { directory: project },
-    });
-    expect(await treeFingerprint(project)).toBe(before);
-    for (const { role, tools } of observed.filter(
-      (c) => c.role === "worker" || c.role === "coordinator",
-    )) {
-      for (const forbidden of [
-        "bash",
-        "read",
-        "glob",
-        "grep",
-        "task",
-        "lsp",
-        "edit",
-        "write",
-      ])
-        expect(tools).not.toContain(forbidden);
-      if (role === "worker") expect(tools).not.toContain("delegate");
+    expect(await readFile(started.ledger, "utf8")).toContain(
+      `Last completed baseline: ${pin}`,
+    );
+    expect(await readFile(join(started.checkout, "file.txt"), "utf8")).toBe(
+      "pinned content\n",
+    );
+    const children = (
+      await client.session.children({
+        path: { id: started.session },
+        query: { directory: project },
+      })
+    ).data!;
+    expect(children).toHaveLength(1);
+    expect(children[0].directory).toBe(project);
+    expect(
+      (
+        await client.session.get({
+          path: { id: started.session },
+          query: { directory: project },
+        })
+      ).data?.parentID,
+    ).toBeUndefined();
+    expect(
+      (await readdir(started.artifacts)).filter((p) => p.endsWith(".md")),
+    ).toHaveLength(1);
+    const inspected = observations.find(
+      (o) => o.role === "worker" && o.results.length === 4,
+    )!;
+    expect(inspected.results[0]).toContain("pinned content");
+    expect(inspected.results[1]).toContain("file.txt");
+    expect(inspected.results[2]).toContain("pinned content");
+    expect(inspected.results[3]).toContain(pin);
+    for (const tool of ["read", "grep", "glob", "bash"])
+      expect(
+        observations.some((o) => o.role === "worker" && o.tools.includes(tool)),
+      ).toBe(true);
+    for (const observation of observations.filter((o) => o.role === "worker")) {
+      for (const tool of ["write", "edit", "task", "delegate"])
+        expect(observation.tools).not.toContain(tool);
     }
-    await expect(access(join(root, "executed"))).rejects.toThrow();
-    expect(failures).toEqual([]);
+    for (const observation of observations.filter((o) => o.role === "review"))
+      expect(observation.tools).not.toContain("task");
+    await expect(access(join(project, "forbidden.txt"))).rejects.toThrow();
+    await expect(
+      access(join(started.checkout, "notes/forbidden.txt")),
+    ).rejects.toThrow();
+    running.child.kill();
+    await running.child.exited;
+    running = await server();
+    client = running.client;
+    const resumed = JSON.parse(
+      await invoke({
+        action: "resume",
+        id: started.id,
+        request:
+          "Resume fixture: compare native ledger and pin before deciding reuse.",
+      }),
+    );
+    expect(resumed.session).toBe(started.session);
+    await waitReport("Native ledger baseline reused");
+    expect(delegates).toBe(1);
+    expect(await readFile(started.ledger, "utf8")).toContain(
+      "Unchanged code reused",
+    );
+    await invoke({ action: "close", id: started.id });
+    await expect(access(started.root)).rejects.toThrow();
+    const ordinaryArtifacts = await readdir(
+      join(root, ".local/share/opencode/delegations"),
+      { recursive: true },
+    );
+    expect(ordinaryArtifacts.filter((name) => name.endsWith(".md"))).toEqual(
+      [],
+    );
+    expect(
+      (
+        await client.session.get({
+          path: { id: started.session },
+          query: { directory: project },
+        })
+      ).data?.id,
+    ).toBe(started.session); // host history retained
+    expect(await git("rev-parse", "HEAD")).toBe(head);
+    expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+    expect(await readFile(join(project, ".git/index"))).toEqual(index);
+    expect(await readFile(join(project, "file.txt"), "utf8")).toBe(
+      "dirty caller\n",
+    );
+    expect(errors).toEqual([]);
   } finally {
     clearTimeout(timeout);
-    child.kill();
-    await child.exited;
+    running.child.kill();
+    await running.child.exited;
     model.stop(true);
     await rm(root, { recursive: true, force: true });
   }
-}, 65000);
+}, 70000);

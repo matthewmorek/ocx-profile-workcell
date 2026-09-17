@@ -1,722 +1,737 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
+import { execFile } from "node:child_process";
 import {
-  lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   realpath,
   rm,
-  symlink,
   writeFile,
 } from "node:fs/promises";
-import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
 
-import {
-  GitHub,
-  ReviewCore,
-  ReviewStore,
-  fingerprint,
-  newId,
-  parseScope,
-  repositoryFromRemote,
-  safePath,
-  type Actor,
-  type Candidate,
-} from "../files/plugins/review/index";
-import { execute, git, type Transport } from "../files/plugins/review/process";
+import type { PluginInput } from "@opencode-ai/plugin";
 
-const roots: string[] = [];
-const context = {
-  specification: "Fixture contract",
-  instructions: "Review evidence only",
-  testEvidence: "Not run",
-  risk: "state",
-};
-const repository = { host: "github.com", owner: "example", name: "repo" };
-const drained = {
-  drain: async () => {},
-  deliver: async () => {},
-  retire: async () => {},
-};
-afterEach(async () => {
-  for (const root of roots.splice(0))
-    await rm(root, { recursive: true, force: true });
-});
-async function fixture() {
-  const parent = join(import.meta.dir, "../.tmp");
-  await mkdir(parent, { recursive: true });
-  const root = await realpath(await mkdtemp(join(parent, "review-")));
-  roots.push(root);
+import BackgroundAgentsPlugin from "../files/plugins/background-agents";
+import { ReviewWorkspaces } from "../files/plugins/worktree/review";
+
+const exec = promisify(execFile);
+
+test.each(["idle", "timeout", "cancel"] as const)(
+  "%s finalization does not settle a delayed worker transport or release its workspace",
+  async (finalization) => {
+    const f = await fixture();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let closing: Promise<string> | undefined;
+    try {
+      const resources = await ReviewWorkspaces.open(
+        f.project,
+        join(f.root, "storage"),
+      );
+      const owner = await resources.create("origin");
+      owner.sessions.push("coordinator");
+      await resources.save(owner);
+      let requested = false,
+        aborted = false,
+        closed = false,
+        inspected = "";
+      const client = {
+        app: {
+          agents: async () => ({
+            data: [{ name: "reviewer", mode: "subagent" }],
+          }),
+        },
+        session: {
+          get: async ({ path }: { path: { id: string } }) => ({
+            data: {
+              id: path.id,
+              ...(path.id === "worker" ? { parentID: "coordinator" } : {}),
+              ...(path.id === "coordinator"
+                ? {
+                    metadata: {
+                      workcellReviewWorkspace: {
+                        id: owner.id,
+                        project: f.project,
+                      },
+                    },
+                  }
+                : {}),
+            },
+          }),
+          create: async () => ({ data: { id: "worker" } }),
+          prompt: async ({ path }: { path: { id: string } }) => {
+            if (path.id !== "worker") return { data: { parts: [] } };
+            requested = true;
+            await gate; // Request/response remains in flight despite an idle/abort/delete acknowledgment.
+            inspected = await readFile(
+              join(resources.paths(owner.id).checkout, "file.txt"),
+              "utf8",
+            );
+            return { data: { parts: [{ type: "text", text: inspected }] } };
+          },
+          abort: async () => {
+            aborted = true;
+            return { data: true };
+          },
+          delete: async () => ({ data: true }),
+          status: async () => ({ data: {} }),
+          messages: async () => ({ data: [] }),
+        },
+      };
+      const base = join(f.root, "ordinary");
+      await mkdir(base);
+      const Manager = BackgroundAgentsPlugin.testInternals.DelegationManager;
+      const manager = new Manager(
+        client as unknown as PluginInput["client"],
+        base,
+        {
+          async debug() {},
+          async info() {},
+          async warn() {},
+          async error() {},
+        },
+        {
+          reviewWorkspaces: resources,
+          idGenerator: () => "delayed-blue-otter",
+          idleFinalizationGraceMs: 1,
+          maxRunTimeMs: finalization === "timeout" ? 1 : 60000,
+          readPollIntervalMs: 1,
+          terminalWaitGraceMs: 1,
+        },
+      );
+      await manager.pinReview({ id: owner.id, head: f.pinned, discard: false });
+      const delegation = await manager.delegate({
+        parentSessionID: "coordinator",
+        parentMessageID: "message",
+        parentAgent: "review",
+        prompt: "inspect",
+        agent: "reviewer",
+      });
+      for (let i = 0; i < 100 && !requested; i++) await Bun.sleep(10);
+      expect(requested).toBe(true);
+      if (finalization !== "cancel") {
+        if (finalization === "idle") await manager.handleSessionIdle("worker");
+        await manager.readOutput("coordinator", delegation.id);
+        expect(delegation.status).toBe(
+          finalization === "idle" ? "complete" : "timeout",
+        );
+      }
+      expect(delegation.promptPending).toBe(true);
+      await expect(
+        manager.pinReview({ id: owner.id, head: f.head, discard: false }),
+      ).rejects.toThrow("Wait for review workers");
+      closing = manager
+        .review(
+          {
+            action: "close",
+            id: owner.id,
+            request: "",
+            separate: false,
+            discard: false,
+          },
+          {
+            sessionID: "origin",
+            messageID: "close",
+            directory: f.project,
+            worktree: f.project,
+            agent: "build",
+            abort: new AbortController().signal,
+            metadata() {},
+            async ask() {},
+          },
+        )
+        .then((result) => {
+          closed = true;
+          return result;
+        });
+      for (
+        let i = 0;
+        i < 300 &&
+        (!aborted ||
+          delegation.status !==
+            (finalization === "cancel"
+              ? "cancelled"
+              : finalization === "idle"
+                ? "complete"
+                : "timeout"));
+        i++
+      )
+        await Bun.sleep(10);
+      expect(aborted).toBe(true);
+      expect(delegation.status).toBe(
+        finalization === "cancel"
+          ? "cancelled"
+          : finalization === "idle"
+            ? "complete"
+            : "timeout",
+      );
+      expect(delegation.promptPending).toBe(true);
+      await Bun.sleep(150);
+      expect(closed).toBe(false);
+      expect(
+        await readFile(
+          join(resources.paths(owner.id).checkout, "file.txt"),
+          "utf8",
+        ),
+      ).toBe("pinned content\n");
+      release();
+      await closing;
+      expect(inspected).toBe("pinned content\n");
+      expect(delegation.promptPending).toBe(false);
+      await expect(
+        readFile(join(resources.paths(owner.id).root, "owner.json")),
+      ).rejects.toThrow();
+    } finally {
+      release();
+      await closing?.catch(() => undefined);
+      await rm(f.root, { recursive: true, force: true });
+    }
+  },
+);
+async function fixture(pinnedContent = "pinned content\n") {
+  await mkdir(resolve(".tmp"), { recursive: true });
+  const root = await realpath(await mkdtemp(resolve(".tmp/native-review-")));
   const project = join(root, "source");
   await mkdir(project);
-  await git(project, ["init", "--template=", "-b", "main"]);
-  await writeFile(join(project, "file.txt"), "base\n");
-  await git(project, ["add", "file.txt"]);
-  await commit(project, "base");
-  const base = (await git(project, ["rev-parse", "HEAD"])).trim();
-  await writeFile(join(project, "file.txt"), "head\n");
-  await git(project, ["add", "file.txt"]);
-  await commit(project, "head");
-  const head = (await git(project, ["rev-parse", "HEAD"])).trim();
-  const store = await ReviewStore.open(project, join(root, "reviews"));
-  const actor: Actor = { project, session: "initiator", agent: "build" };
-  const coordinator: Actor = {
-    project,
-    session: "coordinator",
-    agent: "review",
-  };
-  const core = new ReviewCore(store);
-  return { root, project, base, head, store, actor, coordinator, core };
+  const git = async (...args: string[]) =>
+    (
+      await exec(
+        "git",
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          ...args,
+        ],
+        { cwd: project },
+      )
+    ).stdout.trim();
+  await git("init", "--template=", "-b", "main");
+  await writeFile(join(project, "file.txt"), pinnedContent);
+  await writeFile(join(project, ".gitattributes"), "file.txt filter=fixture\n");
+  await git("add", "file.txt", ".gitattributes");
+  await git("commit", "-m", "pinned");
+  const pinned = await git("rev-parse", "HEAD");
+  await writeFile(join(project, "file.txt"), "source branch content\n");
+  await git("add", "file.txt");
+  await git("commit", "-m", "source");
+  const head = await git("rev-parse", "HEAD");
+  await writeFile(join(project, "file.txt"), "staged caller content\n");
+  await git("add", "file.txt");
+  const index = await readFile(join(project, ".git/index"));
+  await writeFile(join(project, "file.txt"), "dirty caller content\n");
+  await writeFile(join(project, "untracked.txt"), "untracked caller\n");
+  return { root, project, git, pinned, head, index };
 }
-async function commit(project: string, message: string) {
-  await git(project, [
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "-m",
-    message,
-  ]);
-}
-async function treeFingerprint(root: string): Promise<string> {
-  const entries: unknown[] = [];
-  async function visit(path: string) {
-    for (const name of (await readdir(path)).sort()) {
-      const full = join(path, name),
-        info = await lstat(full);
-      if (info.isDirectory()) await visit(full);
-      else
-        entries.push([
-          full.slice(root.length),
-          (await readFile(full)).toString("base64"),
-        ]);
+
+test.each(["process", "clean-smudge"] as const)(
+  "raw review refresh and close consistently disable configured host %s filters",
+  async (driver) => {
+    const raw = "pointer:pinned content\n";
+    const f = await fixture(raw);
+    const previousLocks = process.env.GIT_OPTIONAL_LOCKS;
+    // Force real content comparisons, not a timing-dependent cached-stat fast path. Status must
+    // not refresh the zeroed index stat data before worktree remove runs its internal status.
+    process.env.GIT_OPTIONAL_LOCKS = "0";
+    try {
+      const workspaces = await ReviewWorkspaces.open(
+        f.project,
+        join(f.root, "storage"),
+      );
+      const owner = await workspaces.create("origin");
+      const paths = workspaces.paths(owner.id);
+      const marker = join(f.root, "filter-invocations");
+      const script = join(f.root, "host-filter.sh");
+      await writeFile(
+        script,
+        `#!/bin/sh\nprintf '%s\\n' "$1" >> '${marker}'\ncase "$1" in\n  clean) sed 's/^/pointer:/' ;;\n  smudge) sed 's/^pointer://' ;;\n  process) exit 42 ;;\nesac\n`,
+      );
+      // The executable is trusted host configuration, not a command from the reviewed tree.
+      const command = `sh '${script}'`;
+      await f.git("config", "filter.fixture.required", "true");
+      if (driver === "process")
+        await f.git("config", "filter.fixture.process", `${command} process`);
+      else {
+        await f.git("config", "filter.fixture.clean", `${command} clean`);
+        await f.git("config", "filter.fixture.smudge", `${command} smudge`);
+        const control = join(f.root, "normal-checkout");
+        await f.git("worktree", "add", "--detach", control, f.pinned);
+        expect(await readFile(join(control, "file.txt"), "utf8")).toBe(
+          "pinned content\n",
+        );
+        expect(await f.git("-C", control, "status", "--porcelain=v1")).toBe("");
+        await f.git("worktree", "remove", control);
+        await rm(marker, { force: true });
+      }
+      await workspaces.use(owner.id, (o) => workspaces.pin(o, f.pinned));
+      expect(await readFile(join(paths.checkout, "file.txt"), "utf8")).toBe(
+        raw,
+      );
+      await expect(readFile(marker)).rejects.toThrow();
+      const blob = await f.git("rev-parse", `${f.pinned}:file.txt`);
+      const invalidateStat = () =>
+        f.git(
+          "-C",
+          paths.checkout,
+          "update-index",
+          "--cacheinfo",
+          `100644,${blob},file.txt`,
+        );
+      await invalidateStat();
+      const argv = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "submodule.recurse=false",
+        "worktree",
+        "remove",
+        paths.checkout,
+      ];
+      const diagnostic = await exec("git", argv, { cwd: f.project }).then(
+        () => ({ code: 0, stderr: "" }),
+        (error: { code: number; stderr: string }) => ({
+          code: error.code,
+          stderr: error.stderr,
+        }),
+      );
+      expect(diagnostic.code).toBe(128);
+      expect(diagnostic.stderr).toContain(
+        driver === "process"
+          ? "failed to run 'git status'"
+          : "contains modified or untracked files",
+      );
+      expect(await readFile(marker, "utf8")).toContain(
+        driver === "process" ? "process" : "clean",
+      );
+      await rm(marker);
+      await invalidateStat();
+      // Same raw checkout, same host configuration: the helper must not re-enable transforms
+      // on refresh or close, and must not hide the mismatch by unconditionally forcing removal.
+      await workspaces.use(owner.id, (o) => workspaces.pin(o, f.pinned));
+      await expect(readFile(marker)).rejects.toThrow();
+      await writeFile(
+        join(paths.checkout, "file.txt"),
+        "real unexpected edit\n",
+      );
+      await expect(
+        workspaces.use(owner.id, (o) => workspaces.pin(o, f.pinned)),
+      ).rejects.toThrow("explicit discard");
+      await expect(
+        workspaces.use(owner.id, (o) => workspaces.remove(o, false)),
+      ).rejects.toThrow("explicit discard");
+      expect(await readFile(join(paths.checkout, "file.txt"), "utf8")).toBe(
+        "real unexpected edit\n",
+      );
+      await writeFile(join(paths.checkout, "file.txt"), raw);
+      await invalidateStat();
+      await workspaces.use(owner.id, (o) => workspaces.remove(o, false));
+      await expect(readFile(join(paths.root, "owner.json"))).rejects.toThrow();
+      await expect(readFile(marker)).rejects.toThrow();
+      expect(await f.git("config", "--get", "filter.fixture.required")).toBe(
+        "true",
+      );
+      expect(await f.git("rev-parse", "HEAD")).toBe(f.head);
+      expect(await f.git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+      expect(await readFile(join(f.project, ".git/index"))).toEqual(f.index);
+      expect(await readFile(join(f.project, "file.txt"), "utf8")).toBe(
+        "dirty caller content\n",
+      );
+    } finally {
+      if (previousLocks === undefined) delete process.env.GIT_OPTIONAL_LOCKS;
+      else process.env.GIT_OPTIONAL_LOCKS = previousLocks;
+      await rm(f.root, { recursive: true, force: true });
     }
-  }
-  await visit(root);
-  return fingerprint(entries);
-}
-async function begin(
-  f: Awaited<ReturnType<typeof fixture>>,
-  scope: Parameters<ReviewCore["start"]>[2] = { kind: "recent" },
-) {
-  const m = await f.core.start(f.actor, "request", scope);
-  await f.core.bind(m.id, f.actor, f.coordinator.session);
-  const prepared = await f.core.prepare(m.id, f.coordinator, context);
-  return { id: m.id, ...prepared };
-}
-async function finish(
-  f: Awaited<ReturnType<typeof fixture>>,
-  id: string,
-  round: number,
-  session: string,
-) {
-  await f.core.dispatch(id, f.coordinator, [
-    { session, lens: "Comprehensive" },
-  ]);
-  await f.core.submit(id, { ...f.actor, agent: "reviewer", session }, round, {
-    outcome: "succeeded",
-    coverage: ["Changed behavior and dependencies"],
-    limitations: [],
-    candidates: [],
-  });
-  await f.core.adjudicate(id, f.coordinator, []);
-  return f.core.complete(
-    id,
-    f.coordinator,
-    "No supported findings; tests not run.",
-  );
-}
+  },
+);
 
-test("scope parsing rejects transport/path injection and resolves repository identity", () => {
-  expect(parseScope("", repository)).toEqual({ kind: "staged" });
-  expect(parseScope("#12", repository)).toEqual({
-    kind: "pr",
-    repository,
-    number: 12,
-  });
-  expect(parseScope("pr 12", repository)).toEqual({
-    kind: "pr",
-    repository,
-    number: 12,
-  });
-  expect(parseScope("pr:12", repository)).toEqual({
-    kind: "pr",
-    repository,
-    number: 12,
-  });
-  expect(
-    parseScope("https://github.com/example/repo/pull/12", repository),
-  ).toEqual({ kind: "pr", repository, number: 12 });
-  expect(parseScope("12", repository)).toEqual({
-    kind: "revision",
-    expression: "12",
-  });
-  expect(parseScope("12")).toEqual({ kind: "revision", expression: "12" });
-  expect(() => parseScope("pr 12")).toThrow();
-  expect(parseScope("recent")).toEqual({ kind: "recent" });
-  expect(repositoryFromRemote("git@github.com:example/repo.git")).toEqual(
-    repository,
-  );
-  expect(parseScope("HEAD~2...HEAD")).toEqual({
-    kind: "revision",
-    expression: "HEAD~2...HEAD",
-  });
-  for (const input of [
-    "--upload-pack=evil",
-    "https://github.com/else/repo/pull/1",
-    "HEAD;touch bad",
-    "https://github.com/example/repo/pull/1?x=y",
-    "pr 0",
-    "pr 12 --repo other/repo",
-    "pr 12;touch bad",
-  ])
-    expect(() => parseScope(input, repository)).toThrow();
-  for (const path of [
-    "../secret",
-    "a/../../secret",
-    "/etc/passwd",
-    ".git/config",
-    "a\\b",
-    "a\0b",
-  ])
-    expect(() => safePath(path)).toThrow();
-});
-
-test("GitHub transport is GET-only, endpoint-bound, validated and truthfully paginated", async () => {
-  const calls: string[][] = [];
-  const transport: Transport = async ({ argv }) => {
-    calls.push(argv);
-    return {
-      code: 0,
-      stderr: Buffer.alloc(0),
-      stdout: Buffer.from(
-        JSON.stringify(Array.from({ length: 100 }, (_, id) => ({ id }))),
-      ),
-    };
-  };
-  const github = new GitHub(import.meta.dir, transport);
-  const result = await github.evidence(
-    repository,
-    12,
-    "a".repeat(40),
-    "comments",
-    2,
-  );
-  expect(result.availability).toBe("available");
-  if (result.availability !== "available")
-    throw new Error("Expected available paginated evidence");
-  expect(result.items).toHaveLength(200);
-  expect(result.truncated).toBe(true);
-  expect(calls).toEqual(
-    [1, 2].map((page) => [
-      "gh",
-      "api",
-      "--hostname",
-      "github.com",
-      "--method",
-      "GET",
-      `repos/example/repo/issues/12/comments?per_page=100&page=${page}`,
-    ]),
-  );
-  await expect(
-    github.evidence(repository, 12, "bad", "comments"),
-  ).rejects.toThrow();
-  await expect(
-    github.evidence(repository, 12, "a".repeat(40), "graphql" as never),
-  ).rejects.toThrow();
-  expect(calls).toHaveLength(2);
-  await expect(github.metadata(repository, 12)).rejects.toThrow();
-  const interrupted = new GitHub(import.meta.dir, async ({ argv }) =>
-    argv.at(-1)?.endsWith("page=1")
-      ? {
-          code: 0,
-          stderr: Buffer.alloc(0),
-          stdout: Buffer.from(
-            JSON.stringify(Array.from({ length: 100 }, (_, id) => ({ id }))),
-          ),
-        }
-      : {
-          code: 1,
-          stderr: Buffer.from("gh: unavailable (HTTP 503)"),
-          stdout: Buffer.alloc(0),
-        },
-  );
-  const missing = await interrupted.evidence(
-    repository,
-    12,
-    "a".repeat(40),
-    "comments",
-    2,
-  );
-  expect(missing.availability).toBe("unavailable");
-  expect(missing).not.toHaveProperty("items");
-  expect(missing).toMatchObject({
-    failure: { category: "service-unavailable", httpStatus: 503 },
-  });
-  expect(Number.isFinite(Date.parse(missing.checkedAt))).toBe(true);
-});
-
-test("initial commits, explicit ranges and staged dependency reads preserve scope semantics", async () => {
+test("a rejected PR refresh preserves retained A; verified B retains both pins through checkout and GC until close", async () => {
   const f = await fixture();
-  const initial = await begin(f, { kind: "revision", expression: f.base });
-  expect(
-    await f.core.inspect(initial.id, f.coordinator, 1, { kind: "diff" }),
-  ).toContain("+base");
-  await f.core.close(initial.id, f.actor, drained);
-  const m = await f.core.start(f.actor, "range", {
-    kind: "revision",
-    expression: `${f.base}..${f.head}`,
-  });
-  await f.core.bind(m.id, f.actor, f.coordinator.session);
-  await f.core.prepare(m.id, f.coordinator, context);
-  expect(
-    await f.core.inspect(m.id, f.coordinator, 1, { kind: "diff" }),
-  ).toContain("+head");
-  const staged = await f.core.start(f.actor, "staged", { kind: "staged" });
-  await f.core.bind(staged.id, f.actor, f.coordinator.session);
-  await f.core.prepare(staged.id, f.coordinator, context);
-  await writeFile(join(f.project, "file.txt"), "unstaged dependency edit");
-  expect(
-    await f.core.inspect(staged.id, f.coordinator, 1, {
-      kind: "file",
-      path: "file.txt",
-    }),
-  ).toEqual({
-    kind: "file",
-    content: Buffer.from("head\n").toString("base64"),
-  });
-});
-
-test("durable authorization, idempotency, independent slots, adjudication and completed baseline", async () => {
-  const f = await fixture(),
-    { id, round } = await begin(f);
-  expect((await f.core.start(f.actor, "request", { kind: "recent" })).id).toBe(
-    id,
-  );
-  await expect(
-    f.core.status(id, { ...f.actor, project: f.root }),
-  ).rejects.toThrow();
-  await expect(
-    f.core.dispatch(
-      id,
-      f.coordinator,
-      Array.from({ length: 5 }, (_, i) => ({
-        lens: `risk${i}`,
-        session: `worker${i}`,
-      })),
-    ),
-  ).rejects.toThrow();
-  await f.core.dispatch(id, f.coordinator, [
-    { lens: "behavior", session: "worker1" },
-    { lens: "security", session: "worker2" },
-  ]);
-  const worker = { ...f.actor, agent: "reviewer", session: "worker1" };
-  await expect(f.core.status(id, worker)).rejects.toThrow();
-  await expect(
-    f.core.submit(id, worker, 1, {
-      outcome: "succeeded",
-      coverage: ["all"],
-      limitations: [],
-      candidates: [],
-      session: "worker2",
-    } as never),
-  ).rejects.toThrow();
-  expect(await f.core.assignment(id, worker, round.number)).not.toHaveProperty(
-    "slots",
-  );
-  await expect(f.core.prepare(id, f.coordinator, context)).rejects.toThrow();
-  const candidate: Candidate = {
-    id: newId(),
-    rootCause: "Missing guard",
-    revision: f.head,
-    path: "file.txt",
-    line: 1,
-    scenario: "Bad input fails",
-    evidence: "Pinned file",
-    severity: "Major",
-    confidence: 1,
-    contract: "Reject bad input",
-    remedy: "Add guard",
-  };
-  await f.core.submit(id, worker, 1, {
-    outcome: "succeeded",
-    coverage: ["behavior"],
-    limitations: [],
-    candidates: [candidate],
-  });
-  await expect(f.core.complete(id, f.coordinator, "report")).rejects.toThrow();
-  await f.core.submit(id, { ...worker, session: "worker2" }, 1, {
-    outcome: "succeeded",
-    coverage: ["security"],
-    limitations: [],
-    candidates: [],
-  });
-  await expect(f.core.complete(id, f.coordinator, "report")).rejects.toThrow();
-  await f.core.adjudicate(id, f.coordinator, [
-    {
-      candidate: candidate.id,
-      disposition: "accepted",
-      reason: "Reproduced from pinned evidence",
-    },
-  ]);
-  await f.core.complete(id, f.coordinator, "Supported finding");
-  const reopened = await ReviewStore.open(f.project, join(f.root, "reviews"));
-  expect((await reopened.discover())[0].lastCompleted).toBe(1);
-  expect((await f.core.prepare(id, f.coordinator, context)).reused).toBe(true);
-  expect((await reopened.load(id)).findings[0].status).toBe("open");
-});
-
-test("private Git keeps source index, refs, objects and dirty files unchanged; symlinks are metadata", async () => {
-  const f = await fixture();
-  await writeFile(join(f.project, "file.txt"), "staged\n");
-  await git(f.project, ["add", "file.txt"]);
-  await writeFile(join(f.project, "file.txt"), "unstaged\n");
-  await writeFile(join(f.project, "untracked"), "keep");
-  await symlink("/etc/passwd", join(f.project, "escape"));
-  await git(f.project, ["add", "escape"]);
-  const beforeGit = await treeFingerprint(join(f.project, ".git"));
-  const { id } = await begin(f, { kind: "staged" });
-  expect(
-    await f.core.inspect(id, f.coordinator, 1, {
-      kind: "file",
-      path: "file.txt",
-    }),
-  ).toEqual({
-    kind: "file",
-    content: Buffer.from("staged\n").toString("base64"),
-  });
-  expect(
-    await f.core.inspect(id, f.coordinator, 1, {
-      kind: "file",
-      path: "escape",
-    }),
-  ).toEqual({ kind: "symlink", content: "/etc/passwd" });
-  await expect(
-    f.core.inspect(id, f.coordinator, 1, { kind: "file", path: "../escape" }),
-  ).rejects.toThrow();
-  await finish(f, id, 1, "worker");
-  await f.core.close(id, f.actor, drained);
-  expect(await treeFingerprint(join(f.project, ".git"))).toBe(beforeGit);
-  expect(await readFile(join(f.project, "file.txt"), "utf8")).toBe(
-    "unstaged\n",
-  );
-  expect(await readFile(join(f.project, "untracked"), "utf8")).toBe("keep");
-  await f.core.close(id, f.actor, drained);
-});
-
-test("mutable paths invalidate completion; scoped files never follow symlink ancestors", async () => {
-  const f = await fixture();
-  const { id } = await begin(f, { kind: "paths", paths: ["file.txt"] });
-  await f.core.dispatch(id, f.coordinator, [
-    { lens: "all", session: "worker" },
-  ]);
-  await f.core.submit(
-    id,
-    { ...f.actor, agent: "reviewer", session: "worker" },
-    1,
-    {
-      outcome: "succeeded",
-      coverage: ["file"],
-      limitations: [],
-      candidates: [],
-    },
-  );
-  await writeFile(join(f.project, "file.txt"), "changed\n");
-  await expect(f.core.complete(id, f.coordinator, "report")).rejects.toThrow();
-  expect((await f.store.load(id)).lastCompleted).toBeUndefined();
-  expect((await f.store.load(id)).rounds[0].freshness).toBe("stale");
-  await f.core.interrupt(id, f.coordinator, drained.drain);
-  const next = await f.core.prepare(id, f.coordinator, context);
-  expect(next.round.basis).toBe("full");
-  await symlink(f.root, join(f.project, "outside"));
-  const second = await f.core.start(f.actor, "second", {
-    kind: "paths",
-    paths: ["outside/source/file.txt"],
-  });
-  await f.core.bind(second.id, f.actor, "other-coordinator");
-  await expect(
-    f.core.prepare(
-      second.id,
-      { ...f.coordinator, session: "other-coordinator" },
-      context,
-    ),
-  ).rejects.toThrow();
-});
-
-test("restart interrupts unknown work, retains successful slots, and serializes operations", async () => {
-  const f = await fixture(),
-    { id } = await begin(f);
-  await f.core.dispatch(id, f.coordinator, [
-    { lens: "a", session: "one" },
-    { lens: "b", session: "two" },
-  ]);
-  await f.core.submit(
-    id,
-    { ...f.actor, agent: "reviewer", session: "one" },
-    1,
-    { outcome: "succeeded", coverage: ["a"], limitations: [], candidates: [] },
-  );
-  await f.store.recover(id, async () => "unknown");
-  await expect(f.core.prepare(id, f.coordinator, context)).rejects.toThrow();
-  await f.core.interrupt(id, f.coordinator, drained.drain);
-  const m = await f.store.load(id);
-  expect(m.lifecycle).toBe("interrupted");
-  expect(m.lastCompleted).toBeUndefined();
-  expect(m.rounds[0].slots.map((s) => s.outcome)).toEqual([
-    "succeeded",
-    "interrupted",
-  ]);
-  await f.core.retry(id, f.coordinator, [
-    { slot: m.rounds[0].slots[1].id, session: "replacement" },
-  ]);
-  await f.core.submit(
-    id,
-    { ...f.actor, agent: "reviewer", session: "replacement" },
-    1,
-    { outcome: "succeeded", coverage: ["b"], limitations: [], candidates: [] },
-  );
-  await f.core.complete(id, f.coordinator, "Recovered coverage");
-  let release!: () => void, entered!: () => void;
-  const barrier = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const ready = new Promise<void>((resolve) => {
-    entered = resolve;
-  });
-  const active = f.store.transaction(id, async () => {
-    entered();
-    await barrier;
-  });
-  await ready;
-  await expect(f.core.close(id, f.actor, drained)).rejects.toThrow();
-  await expect(f.store.recoverLock(id)).rejects.toThrow();
-  release();
-  await active;
-  await f.core.prepare(id, f.coordinator, context);
-});
-
-test("hostile hooks, filters and symlinks never execute during private checkout or inspection", async () => {
-  const f = await fixture();
-  const sentinel = join(f.root, "executed");
-  await mkdir(join(f.project, ".git/hooks"));
-  await writeFile(
-    join(f.project, ".git/hooks/post-checkout"),
-    `#!/bin/sh\ntouch '${sentinel}'\n`,
-    { mode: 0o755 },
-  );
-  await writeFile(
-    join(f.project, ".gitattributes"),
-    "file.txt filter=hostile diff=hostile\n",
-  );
-  await symlink("/etc/passwd", join(f.project, "escape"));
-  await git(f.project, ["add", ".gitattributes", "escape"]);
-  await commit(f.project, "hostile attributes");
-  await git(f.project, [
-    "config",
-    "filter.hostile.smudge",
-    `touch '${sentinel}'`,
-  ]);
-  await git(f.project, [
-    "config",
-    "filter.hostile.process",
-    `touch '${sentinel}'`,
-  ]);
-  await git(f.project, [
-    "config",
-    "diff.hostile.textconv",
-    `touch '${sentinel}'`,
-  ]);
-  await git(f.project, ["config", "core.fsmonitor", `touch '${sentinel}'`]);
-  const before = await treeFingerprint(join(f.project, ".git"));
-  const { id } = await begin(f);
-  expect(
-    await f.core.inspect(id, f.coordinator, 1, {
-      kind: "file",
-      path: "escape",
-    }),
-  ).toEqual({ kind: "symlink", content: "/etc/passwd" });
-  await f.core.inspect(id, f.coordinator, 1, { kind: "diff" });
-  await expect(lstat(sentinel)).rejects.toThrow();
-  await f.core.close(id, f.actor, drained);
-  expect(await treeFingerprint(join(f.project, ".git"))).toBe(before);
-});
-
-test("accessed dependency fingerprints and ownership tampering fail closed", async () => {
-  const f = await fixture();
-  await writeFile(join(f.project, "dependency.txt"), "contract\n");
-  const { id } = await begin(f, { kind: "paths", paths: ["file.txt"] });
-  expect(
-    await f.core.inspect(id, f.coordinator, 1, {
-      kind: "file",
-      path: "dependency.txt",
-    }),
-  ).toEqual({
-    kind: "file",
-    content: Buffer.from("contract\n").toString("base64"),
-  });
-  await f.core.dispatch(id, f.coordinator, [
-    { session: "worker", lens: "all" },
-  ]);
-  await f.core.submit(
-    id,
-    { ...f.actor, session: "worker", agent: "reviewer" },
-    1,
-    {
-      outcome: "succeeded",
-      coverage: ["file and dependency"],
-      limitations: [],
-      candidates: [],
-    },
-  );
-  await writeFile(join(f.project, "dependency.txt"), "changed\n");
-  await expect(f.core.complete(id, f.coordinator, "report")).rejects.toThrow();
-  const owner = join(f.store.directory(id), "owner");
-  await writeFile(owner, newId());
-  await expect(f.core.close(id, f.actor, drained, true)).rejects.toThrow();
-  expect((await lstat(f.store.directory(id))).isDirectory()).toBe(true);
-});
-
-test("stopped-owner acquisition gates and operation locks recover without losing state", async () => {
-  const f = await fixture(),
-    { id } = await begin(f);
-  const child = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
-  const pid = child.pid;
-  await child.exited;
-  const partition = dirname(f.store.directory(id));
-  for (const suffix of ["gate", "lock"])
-    await writeFile(
-      join(partition, `${id}.${suffix}`),
-      JSON.stringify({ pid, host: hostname(), token: newId() }),
-      { mode: 0o600 },
+  try {
+    const workspaces = await ReviewWorkspaces.open(
+      f.project,
+      join(f.root, "storage"),
     );
-  await f.store.recoverLock(id);
-  expect((await f.core.prepare(id, f.coordinator, context)).round.number).toBe(
-    2,
-  );
-  expect((await f.store.load(id)).lifecycle).toBe("ready");
+    const owner = await workspaces.create("origin");
+    await f.git("remote", "add", "origin", f.project);
+    await f.git("update-ref", "refs/pull/7/head", f.pinned);
+    await workspaces.use(owner.id, (o) => workspaces.pin(o, f.pinned, 7));
+    const retainedA = `refs/workcell-review/${owner.id}/${f.pinned}`;
+    const moved = await f.git(
+      "commit-tree",
+      await f.git("rev-parse", `${f.head}^{tree}`),
+      "-m",
+      "force-pushed PR",
+    );
+    await f.git("update-ref", "refs/pull/7/head", moved);
+    await expect(
+      workspaces.use(owner.id, (o) => workspaces.pin(o, f.pinned, 7)),
+    ).rejects.toThrow("PR head moved");
+    expect(await f.git("rev-parse", retainedA)).toBe(f.pinned);
+    expect(
+      await f.git(
+        "for-each-ref",
+        "--format=%(refname)",
+        `refs/workcell-review/${owner.id}`,
+      ),
+    ).toBe(retainedA);
+    expect((await workspaces.load(owner.id)).refs).toEqual([retainedA]);
+    expect(
+      await readFile(
+        join(workspaces.paths(owner.id).checkout, "file.txt"),
+        "utf8",
+      ),
+    ).toBe("pinned content\n");
+    await workspaces.use(owner.id, (o) => workspaces.pin(o, moved, 7));
+    await f.git("gc", "--prune=now");
+    const retainedB = `refs/workcell-review/${owner.id}/${moved}`;
+    expect(await f.git("rev-parse", retainedA)).toBe(f.pinned);
+    expect(await f.git("rev-parse", retainedB)).toBe(moved);
+    expect(
+      (
+        await f.git(
+          "for-each-ref",
+          "--format=%(refname)",
+          `refs/workcell-review/${owner.id}`,
+        )
+      )
+        .split("\n")
+        .sort(),
+    ).toEqual([retainedA, retainedB].sort());
+    expect((await workspaces.load(owner.id)).refs.sort()).toEqual(
+      [retainedA, retainedB].sort(),
+    );
+    await workspaces.use(owner.id, (o) => workspaces.remove(o, false));
+    expect(
+      await f.git(
+        "for-each-ref",
+        "--format=%(refname)",
+        `refs/workcell-review/${owner.id}`,
+      ),
+    ).toBe("");
+    expect(await f.git("rev-parse", "HEAD")).toBe(f.head);
+    expect(await readFile(join(f.project, ".git/index"))).toEqual(f.index);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
 });
 
-test("close fails closed on dirty checkout, blocks late writes, retries drain and removes only owned resources", async () => {
-  const f = await fixture(),
-    { id } = await begin(f);
-  await f.core.dispatch(id, f.coordinator, [
-    { lens: "all", session: "worker" },
-  ]);
-  await writeFile(
-    join(f.store.directory(id), "checkout/file.txt"),
-    "unexpected",
-  );
-  let drains = 0;
-  const adapter = {
-    ...drained,
-    drain: async () => {
-      drains++;
-      if (drains === 1) throw new Error("Worker has not stopped");
-    },
-  };
-  await expect(f.core.close(id, f.actor, adapter)).rejects.toThrow();
-  expect((await f.store.load(id)).lifecycle).toBe("cleanup_failed");
-  await expect(
-    f.core.submit(id, { ...f.actor, agent: "reviewer", session: "worker" }, 1, {
-      outcome: "succeeded",
-      coverage: ["all"],
-      limitations: [],
-      candidates: [],
-    }),
-  ).rejects.toThrow();
-  await expect(f.core.close(id, f.actor, adapter)).rejects.toThrow();
-  await f.core.close(id, f.actor, adapter, true);
-  await expect(lstat(f.store.directory(id))).rejects.toThrow();
-  expect(drains).toBe(3);
-  await f.core.close(id, f.actor, adapter);
-  expect(drains).toBe(3);
-});
-
-test("fork PR pins, delta reuse, force-push fallback and moved head rejection use private storage", async () => {
+test("review worktree pins without source edits/hooks/filters; dirty and ownership checks protect cleanup", async () => {
   const f = await fixture();
-  await git(f.project, [
-    "remote",
-    "add",
-    "origin",
-    "https://github.com/example/repo.git",
-  ]);
-  await git(f.project, ["update-ref", "refs/pull/12/head", f.head]);
-  let head = f.head;
-  const github = new GitHub(f.project, async ({ argv }) => ({
-    code: 0,
-    stderr: Buffer.alloc(0),
-    stdout: Buffer.from(
-      JSON.stringify(
-        argv.at(-1)?.endsWith("/pulls/12")
-          ? {
-              number: 12,
-              title: "Fork change",
-              body: null,
-              state: "open",
-              base: {
-                sha: f.base,
-                ref: "main",
-                repo: {
-                  full_name: "example/repo",
-                  html_url: "https://github.com/example/repo",
-                },
-              },
-              head: { sha: head },
-            }
-          : argv.at(-1)?.includes("check-runs")
-            ? { check_runs: [] }
-            : [],
-      ),
-    ),
-  }));
-  const transport: Transport = (command) =>
-    execute({
-      ...command,
-      argv: command.argv.map((arg) =>
-        arg === "https://github.com/example/repo.git"
-          ? `file://${f.project}`
-          : arg,
-      ),
+  try {
+    const workspaces = await ReviewWorkspaces.open(
+      f.project,
+      join(f.root, "storage"),
+    );
+    const owner = await workspaces.create("origin");
+    const otherProcess = Bun.spawn(["sleep", "10"], {
+      stdout: "ignore",
+      stderr: "ignore",
     });
-  f.core = new ReviewCore(f.store, github, transport);
-  const before = await treeFingerprint(join(f.project, ".git"));
-  const { id } = await begin(f, { kind: "pr", repository, number: 12 });
-  expect(await treeFingerprint(join(f.project, ".git"))).toBe(before);
-  await finish(f, id, 1, "first");
-  expect((await f.core.prepare(id, f.coordinator, context)).reused).toBe(true);
-  await f.core.complete(
-    id,
-    f.coordinator,
-    "Stored coverage, refreshed evidence.",
-  );
-  await writeFile(join(f.project, "file.txt"), "next\n");
-  await git(f.project, ["add", "file.txt"]);
-  await commit(f.project, "next");
-  head = (await git(f.project, ["rev-parse", "HEAD"])).trim();
-  await git(f.project, ["update-ref", "refs/pull/12/head", head]);
-  const delta = await f.core.prepare(id, f.coordinator, {
-    ...context,
-    affectedScope: {
-      reliable: true,
-      rationale: "Only the fixture text and its consumers are affected",
-      paths: ["file.txt"],
-    },
-  });
-  expect(delta.round.basis).toBe("delta");
-  expect(delta.round.deltaBase).toBe(f.head);
-  expect(
-    await f.core.inspect(id, f.coordinator, 3, { kind: "diff" }),
-  ).toContain("+next");
-  await finish(f, id, 3, "second");
-  head = f.head;
-  await git(f.project, ["update-ref", "refs/pull/12/head", head]);
-  expect((await f.core.prepare(id, f.coordinator, context)).round.basis).toBe(
-    "full",
-  );
-  head = f.base; // Metadata says a different SHA than the fetched PR head.
-  await expect(f.core.prepare(id, f.coordinator, context)).rejects.toThrow();
-  expect((await f.store.load(id)).lastCompleted).toBe(3);
+    try {
+      owner.pid = otherProcess.pid;
+      await workspaces.save(owner);
+      await expect(workspaces.use(owner.id, async () => {})).rejects.toThrow(
+        "Another OpenCode process",
+      );
+    } finally {
+      otherProcess.kill();
+      await otherProcess.exited;
+    }
+    await mkdir(join(f.project, ".git/hooks"));
+    await writeFile(
+      join(f.project, ".git/hooks/post-checkout"),
+      `#!/bin/sh\ntouch '${join(f.root, "hook-executed")}'`,
+      { mode: 0o755 },
+    );
+    await f.git(
+      "config",
+      "filter.fixture.process",
+      `touch '${join(f.root, "filter-executed")}'`,
+    );
+    await f.git("remote", "add", "origin", f.project);
+    await f.git("update-ref", "refs/pull/7/head", f.pinned);
+    await workspaces.use(owner.id, (o) => workspaces.pin(o, f.pinned, 7));
+    await expect(
+      workspaces.use(owner.id, (o) => workspaces.pin(o, f.head, 7)),
+    ).rejects.toThrow("PR head moved");
+    expect(
+      await readFile(
+        join(workspaces.paths(owner.id).checkout, "file.txt"),
+        "utf8",
+      ),
+    ).toBe("pinned content\n");
+    expect(await f.git("rev-parse", "HEAD")).toBe(f.head);
+    expect(await f.git("rev-parse", "refs/pull/7/head")).toBe(f.pinned);
+    expect(await f.git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+    expect(await readFile(join(f.project, ".git/index"))).toEqual(f.index);
+    expect(await readFile(join(f.project, "file.txt"), "utf8")).toBe(
+      "dirty caller content\n",
+    );
+    expect(await readdir(f.root)).not.toContain("hook-executed");
+    expect(await readdir(f.root)).not.toContain("filter-executed");
+    await expect(workspaces.load("../source")).rejects.toThrow();
+    const marker = join(workspaces.paths(owner.id).checkout, ".git"),
+      original = await readFile(marker, "utf8");
+    await writeFile(marker, `gitdir: ${join(f.project, ".git")}\n`);
+    await expect(
+      workspaces.use(owner.id, (o) => workspaces.remove(o, true)),
+    ).rejects.toThrow("owned");
+    await writeFile(marker, original);
+    await writeFile(
+      join(workspaces.paths(owner.id).checkout, "file.txt"),
+      "unexpected edit",
+    );
+    await expect(
+      workspaces.use(owner.id, (o) => workspaces.remove(o, false)),
+    ).rejects.toThrow("discard");
+    await workspaces.use(owner.id, (o) => workspaces.remove(o, true));
+    expect(
+      await f.git(
+        "for-each-ref",
+        "--format=%(refname)",
+        `refs/workcell-review/${owner.id}`,
+      ),
+    ).toBe("");
+    expect(await f.git("rev-parse", "HEAD")).toBe(f.head);
+    expect(await readFile(join(f.project, ".git/index"))).toEqual(f.index);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("ordinary delegation uses disposable review artifacts across restart and cannot recreate them after active close", async () => {
+  const f = await fixture();
+  try {
+    const resources = await ReviewWorkspaces.open(
+      f.project,
+      join(f.root, "storage"),
+    );
+    const owner = await resources.create("origin");
+    owner.sessions.push("coordinator");
+    await resources.save(owner);
+    const sessions = new Map<
+      string,
+      { id: string; parentID?: string; metadata?: Record<string, unknown> }
+    >([
+      [
+        "coordinator",
+        {
+          id: "coordinator",
+          metadata: {
+            workcellReviewWorkspace: { id: owner.id, project: f.project },
+          },
+        },
+      ],
+      ["origin", { id: "origin" }],
+    ]);
+    let count = 0,
+      busy = false,
+      release: (() => void) | undefined;
+    let parentPending = false,
+      notePath = "";
+    let releaseParent: (() => void) | undefined;
+    const client = {
+      app: {
+        agents: async () => ({
+          data: [{ name: "reviewer", mode: "subagent" }],
+        }),
+      },
+      session: {
+        get: async ({ path }: { path: { id: string } }) => ({
+          data: sessions.get(path.id),
+        }),
+        update: async ({
+          path,
+          body,
+        }: {
+          path: { id: string };
+          body: { title?: string; metadata?: Record<string, unknown> };
+        }) => {
+          const prior = sessions.get(path.id);
+          if (!prior) throw new Error("Missing fixture session");
+          const data = { ...prior, ...body };
+          sessions.set(path.id, data);
+          return { data };
+        },
+        create: async ({ body }: { body: { parentID?: string } }) => {
+          const id = `worker-${++count}`;
+          sessions.set(id, { id, parentID: body.parentID });
+          return { data: { id } };
+        },
+        prompt: async ({
+          path,
+          body,
+        }: {
+          path: { id: string };
+          body: { parts: { text: string }[]; noReply?: boolean };
+        }) => {
+          if (path.id === "direct" && body.noReply === false) {
+            parentPending = true;
+            await new Promise<void>((resolve) => {
+              releaseParent = resolve;
+            });
+            // Model/file-tool effects can occur after a delayed prompt reaches the server.
+            await mkdir(dirname(notePath), { recursive: true });
+            await writeFile(notePath, "coordinator update");
+            parentPending = false;
+          }
+          if (!path.id.startsWith("worker-")) return { data: { parts: [] } };
+          if (body.parts[0].text === "wait") {
+            busy = true;
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            busy = false;
+          }
+          return {
+            data: {
+              parts: [{ type: "text", text: "private finding sentinel" }],
+            },
+          };
+        },
+        abort: async () => {
+          release?.();
+          return { data: true };
+        },
+        status: async () => ({
+          data: busy ? { "worker-2": { type: "busy" } } : {},
+        }),
+        messages: async () => ({ data: [] }),
+      },
+    };
+    const base = join(f.root, "ordinary");
+    await mkdir(base);
+    let enrichments = 0;
+    const options = {
+      reviewWorkspaces: resources,
+      allCompleteQuietPeriodMs: 10,
+      idGenerator: () => (count ? "second-blue-otter" : "first-blue-otter"),
+      metadataGenerator: async () => {
+        enrichments++;
+        return { title: "private", description: "private" };
+      },
+    };
+    const log = {
+      async debug() {},
+      async info() {},
+      async warn() {},
+      async error() {},
+    };
+    const Manager = BackgroundAgentsPlugin.testInternals.DelegationManager;
+    const manager = new Manager(
+      client as unknown as PluginInput["client"],
+      base,
+      log,
+      options,
+    );
+    const input = {
+      parentSessionID: "coordinator",
+      parentMessageID: "message",
+      parentAgent: "review",
+      prompt: "inspect",
+      agent: "reviewer",
+    };
+    const first = await manager.delegate(input);
+    expect(await manager.readOutput("coordinator", first.id)).toContain(
+      "private finding sentinel",
+    );
+    expect(first.promptPending).toBe(false);
+    const restarted = new Manager(
+      client as unknown as PluginInput["client"],
+      base,
+      log,
+      options,
+    );
+    expect(await restarted.readOutput("coordinator", first.id)).toContain(
+      "private finding sentinel",
+    );
+    const second = await restarted.delegate({ ...input, prompt: "wait" });
+    for (let i = 0; i < 100 && !busy; i++) await Bun.sleep(10);
+    expect(busy).toBe(true);
+    await restarted.review(
+      {
+        action: "close",
+        id: owner.id,
+        request: "",
+        separate: false,
+        discard: false,
+      },
+      {
+        sessionID: "origin",
+        messageID: "message",
+        directory: f.project,
+        worktree: f.project,
+        agent: "build",
+        abort: new AbortController().signal,
+        metadata() {},
+        async ask() {},
+      },
+    );
+    await expect(
+      restarted.readOutput("coordinator", second.id),
+    ).rejects.toThrow();
+    await expect(restarted.delegate(input)).rejects.toThrow();
+    await expect(
+      readFile(join(resources.paths(owner.id).artifacts, `${second.id}.md`)),
+    ).rejects.toThrow();
+    expect(
+      (await readdir(base)).filter(
+        (name) => name !== "background-agents-debug.log",
+      ),
+    ).toEqual([]);
+    expect(
+      await readFile(join(base, "background-agents-debug.log"), "utf8"),
+    ).not.toContain("private finding sentinel");
+    expect(enrichments).toBe(0);
+    sessions.set("direct", { id: "direct" });
+    const directContext = {
+      sessionID: "direct",
+      messageID: "direct-message",
+      directory: f.project,
+      worktree: f.project,
+      agent: "review",
+      abort: new AbortController().signal,
+      metadata() {},
+      async ask() {},
+    };
+    const request = {
+      action: "start" as const,
+      request: "recent",
+      separate: false,
+      discard: false,
+    };
+    const direct = JSON.parse(await restarted.review(request, directContext));
+    expect(direct.session).toBe("direct");
+    expect(JSON.parse(await restarted.review(request, directContext)).id).toBe(
+      direct.id,
+    );
+    expect(count).toBe(2); // No third SDK session: direct review mode keeps its legitimate root.
+    notePath = join(resources.paths(direct.id).notes, "late.md");
+    const third = await restarted.delegate({
+      ...input,
+      parentSessionID: "direct",
+    });
+    await restarted.readOutput("direct", third.id);
+    for (let i = 0; i < 100 && !parentPending; i++) await Bun.sleep(10);
+    expect(parentPending).toBe(true);
+    setTimeout(() => releaseParent?.(), 150);
+    await restarted.review(
+      { ...request, action: "close", id: direct.id },
+      { ...directContext, sessionID: "origin", agent: "build" },
+    );
+    await Bun.sleep(200);
+    await expect(readFile(notePath)).rejects.toThrow();
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
 });

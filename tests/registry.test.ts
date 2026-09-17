@@ -765,7 +765,6 @@ describe("self-contained Workcell registry", () => {
     }
 
     const expectedRuntimeDependencies: Record<string, string[]> = {
-      "workcell-review-plugin": ["@opencode-ai/plugin@1.18.25", "zod@4.3.5"],
       "workcell-background-agents": [
         "@opencode-ai/plugin@1.18.25",
         "unique-names-generator@4.7.1",
@@ -794,7 +793,6 @@ describe("self-contained Workcell registry", () => {
       )
       .map((candidate: any) => candidate.name);
     expect(pluginOwners).toEqual([
-      "workcell-review-plugin",
       "workcell-background-agents",
       "workcell-workspace-plugin",
       "workcell-worktree",
@@ -843,7 +841,7 @@ describe("self-contained Workcell registry", () => {
         options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash: null,
         permissionHash:
-          "cc601f8d00b7f3bebf8eefbb99c56ad9fbbb947dcb1b078261d054d66eca4cf8",
+          "1083e55961d91871e74c8075bb5587501ed9640555ad68958fa79fd691cfe9f3",
       },
       plan: {
         mode: "primary",
@@ -933,10 +931,10 @@ describe("self-contained Workcell registry", () => {
         mode: "subagent",
         model: "openai/gpt-6-astra",
         temperature: 0.1,
-        options: { reasoningEffort: "high", textVerbosity: "medium" },
+        options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash: null,
         permissionHash:
-          "120149dc920abbee8eae07f32bb8c9c7f4ad0ae05b8db1aca4820f938a5a5d94",
+          "ee42d47207e739816b38e207d81ed3a8221fbe84f625023dea98bfcb00c4c6d3",
       },
       committer: {
         mode: "subagent",
@@ -999,6 +997,15 @@ describe("self-contained Workcell registry", () => {
       Object.entries(profileConfig.agent.reviewer.permission.bash),
     ).toEqual([
       ["*", "deny"],
+      ["git -C * status*", "allow"],
+      ["git -C * diff *", "allow"],
+      ["git -C * log *", "allow"],
+      ["git -C * show *", "allow"],
+      ["git -C * rev-parse *", "allow"],
+      ["git -C * ls-tree *", "allow"],
+      ["git -C * merge-base *", "allow"],
+      ["git -C * cat-file *", "allow"],
+      ["git -C * config --get *", "allow"],
       ["gh pr view *", "allow"],
       ["gh pr diff *", "allow"],
       ["gh pr checks *", "allow"],
@@ -1010,7 +1017,10 @@ describe("self-contained Workcell registry", () => {
     expect(profileConfig.agent.reviewer.permission).toMatchObject({
       edit: "deny",
       write: "deny",
-      external_directory: "deny",
+      external_directory: {
+        "*": "deny",
+        "~/.local/share/workcell/review-workspaces/**": "allow",
+      },
       task: "deny",
       delegate: "deny",
     });
@@ -1109,7 +1119,13 @@ describe("self-contained Workcell registry", () => {
       "researcher",
     ]) {
       expect(profileConfig.agent[agent].permission).toMatchObject({
-        external_directory: "deny",
+        external_directory:
+          agent === "reviewer"
+            ? {
+                "*": "deny",
+                "~/.local/share/workcell/review-workspaces/**": "allow",
+              }
+            : "deny",
         plan_read: ["explore", "researcher"].includes(agent) ? "deny" : "allow",
       });
     }
@@ -1125,7 +1141,6 @@ describe("self-contained Workcell registry", () => {
     expect(header?.match(/^agent:\s*(\S+)\s*$/m)?.[1]).toBe("review");
     expect(profileConfig.agent.review.mode).toBe("primary");
     expect(profileConfig.agent.review.permission.review_start).toBe("allow");
-    expect(command).toContain("`review_start`");
     expect(command).not.toMatch(/^(<<<<<<<|=======|>>>>>>>)/m);
   });
 
@@ -1193,7 +1208,11 @@ describe("self-contained Workcell registry", () => {
       "researcher",
       "reviewer",
     ]);
-    expect([...routing.orchestratorAgents]).toEqual(["plan", "build"]);
+    expect([...routing.orchestratorAgents]).toEqual([
+      "plan",
+      "build",
+      "review",
+    ]);
     expect([...routing.taskAgents]).toEqual([
       "coder",
       "debugger",

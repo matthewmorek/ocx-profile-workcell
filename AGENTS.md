@@ -60,6 +60,15 @@ default profile remains, and then cleans the sandbox. It does not launch
 OpenCode, resolve, import, activate, or render DCP, verify `/dcp`, validate
 runtime tools or agents, or claim package-cache cleanup.
 
+Review mode is agent-guided and uses OpenCode-native tools and permissions, not
+a custom review engine. The review primary writes its ledger with native file
+tools; `worktree/review.ts` owns detached pinning, retained refs, ownership and
+cleanup. Ordinary reviewer delegations remain read-only and use returned paths.
+Native permissions are not an OS sandbox. Preserve source files, the index and
+branches; normal review Git metadata, objects and refs may be written. Close
+legacy engine reviews with the previous version before upgrading; do not migrate
+or delete them automatically.
+
 The repository-only migration sequence is to install and validate Workcell
 0.5.0 additively alongside the prior known-good profile. If DCP should be Workcell-only, optionally remove a duplicate
 user-global DCP TUI declaration after validation. Do not perform these machine-

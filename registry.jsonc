@@ -52,55 +52,13 @@
     {
       "name": "workcell-review-plugin",
       "type": "plugin",
-      "description": "Restricted review sessions, private Git workspaces and durable incremental findings.",
+      "description": "Safe detached review worktree ownership used by ordinary delegation.",
       "files": [
-        { "path": "plugins/review.ts", "target": "plugins/review.ts" },
         {
-          "path": "plugins/review/index.ts",
-          "target": "plugins/review/index.ts",
-        },
-        {
-          "path": "plugins/review/contracts.ts",
-          "target": "plugins/review/contracts.ts",
-        },
-        {
-          "path": "plugins/review/core.ts",
-          "target": "plugins/review/core.ts",
-        },
-        {
-          "path": "plugins/review/github.ts",
-          "target": "plugins/review/github.ts",
-        },
-        {
-          "path": "plugins/review/process.ts",
-          "target": "plugins/review/process.ts",
-        },
-        {
-          "path": "plugins/review/store.ts",
-          "target": "plugins/review/store.ts",
-        },
-        {
-          "path": "plugins/review/workspace.ts",
-          "target": "plugins/review/workspace.ts",
-        },
-        {
-          "path": "plugins/review/session.ts",
-          "target": "plugins/review/session.ts",
-        },
-        {
-          "path": "plugins/review/bridge.ts",
-          "target": "plugins/review/bridge.ts",
-        },
-        {
-          "path": "plugins/review/auth.ts",
-          "target": "plugins/review/auth.ts",
-        },
-        {
-          "path": "plugins/review/runtime.ts",
-          "target": "plugins/review/runtime.ts",
+          "path": "plugins/worktree/review.ts",
+          "target": "plugins/worktree/review.ts",
         },
       ],
-      "npmDependencies": ["@opencode-ai/plugin@1.18.25", "zod@4.3.5"],
     },
     {
       "name": "workcell-background-agents",
