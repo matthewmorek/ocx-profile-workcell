@@ -33,7 +33,7 @@ intentionally replace the current Workcell installation.
 
 ## Support baseline
 
-Workcell 0.3.0 supports Apple Silicon macOS with Bun 1.4.1 and OpenCode
+Workcell 0.5.0 supports Apple Silicon macOS with Bun 1.4.1 and OpenCode
 1.18.25. The registry targets OCX 2.0.14. Repository validation uses the OCX
 2.0.15 CLI. Configured MCP servers are limited to Context7, Exa, and GitHub
 Grep.
@@ -193,7 +193,7 @@ CLI selector is not asserted.
 
 ## Migration and rollback
 
-For a repository-only migration, install and validate Workcell 0.3.0 additively
+For a repository-only migration, install and validate Workcell 0.5.0 additively
 alongside the prior known-good profile first. If
 DCP should be Workcell-only, optionally remove a duplicate user-global DCP TUI
 declaration after validation. Do not make these machine-level changes as part
