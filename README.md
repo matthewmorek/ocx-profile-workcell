@@ -33,36 +33,25 @@ intentionally replace the current Workcell installation.
 
 ## Support baseline
 
-Workcell 0.3.0 supports Apple Silicon macOS with Bun 1.4.1 and OpenCode
+Workcell 0.5.0 supports Apple Silicon macOS with Bun 1.4.1 and OpenCode
 1.18.25. The registry targets OCX 2.0.14. Repository validation uses the OCX
 2.0.15 CLI. Configured MCP servers are limited to Context7, Exa, and GitHub
 Grep.
 
 ## GitHub PR review
 
-The reviewer can inspect a specified pull request with the preinstalled,
-already-authenticated `gh` CLI:
+Standalone `reviewer` assignments use the preinstalled `gh` CLI for local,
+read-only PR evidence: `gh pr view`, `gh pr diff`, and `gh pr checks`. They do not
+create a review worktree, edit files, run code or tests, or publish GitHub
+changes. Missing access or incomplete evidence is reported as a limitation.
 
-```text
-/review <GitHub PR URL>
-/review pr <number>
-```
-
-This is a local, read-only inspection. It reads PR metadata, the diff, and
-checks; it does not publish comments or reviews, check out or change files,
-execute code or tests, or change GitHub state. Findings remain local. The
-review records the PR head SHA and reports when local context is unavailable,
-the evidence is incomplete, or the PR changes during review; it does not
-silently substitute the local checkout for the PR.
-
-The reviewer policy allows only the supported `gh pr view`, `gh pr diff`, and
-`gh pr checks` command families. This is a configuration policy, not a shell
-sandbox or a complete parser for every invocation, alias, or shell construct.
-Missing authentication, access, or context is reported as a limitation rather
-than resolved by broadening permissions. Repository edits do not automatically
-update an installed profile, and smoke verification does not verify live
-reviewer runtime permissions. After updating an installed profile, start a
-fresh `ocx oc -p workcell` session.
+The dedicated `review` primary is different. `/review <GitHub PR URL>` and
+`/review pr <number>` start a separate root and use review workspace tools to pin
+and inspect a detached checkout. Native OpenCode permissions authorize the
+agent's Read/Grep/Glob/Bash/Git/`gh` actions; these restrictions are not an OS
+sandbox. Source files, the source index, and source branches are not changed,
+although normal review Git metadata, objects, refs, and workspace files may be
+created. Workers remain ordinary read-only delegations.
 
 ## DCP configuration and smoke verification
 
@@ -107,6 +96,38 @@ requirements and operational state; the user switches to Build and requests
 implementation. See
 [docs/debug-mode.md](docs/debug-mode.md) and the packaged
 [`debug-investigation`](files/skills/debug-investigation/SKILL.md) skill.
+
+## Review mode
+
+`review` is a dedicated read-only primary, separate from the capable `reviewer`
+leaf. Natural-language review requests, top-level `code-review`, and `/review`
+share the review entry, but a skill cannot switch agents: the entry starts or
+reuses the appropriate root session. Other modes start a separate review root;
+direct review may reuse its legitimate review root. Build's existing
+Build → tester → reviewer gate is unchanged.
+
+The primary uses native tools and an agent-written ledger. Select one
+comprehensive reviewer for a cohesive change, or 2–4 ordinary reviewer
+delegations only for distinct behavior, state, security, or integration risks.
+Independence, adjudication, stable finding IDs, evidence/freshness checks, and
+incremental reuse are review-agent and `code-review` guidance—not a custom
+review engine or runtime completion gate.
+
+`/review` accepts staged changes, `recent`, revisions/ranges, files/directories,
+`path:<path>`, path arrays, a PR URL, or explicit `pr <number>` / `#123` /
+`pr:123` for the verified local origin. A bare numeric argument remains a local
+revision/path, not a PR. The entry also accepts a bounded text request and
+optional workspace ID for resume, status, return, and explicit close.
+
+Each workspace returns paths for `owner.json`, `notes/ledger.md`, `artifacts/`,
+and `checkout/` beneath the review-workspaces root. The agent writes notes with
+native file tools. Close drains workers, removes owned state, worktree and
+artifacts, and retains host conversation history. Dirty or tampered resources,
+stale locks, and live owners are refused rather than guessed around. Old engine
+reviews must be closed with the previous version; there is no automatic
+migration or legacy deletion.
+See [docs/review-mode.md](docs/review-mode.md) for trust boundaries, limits,
+recovery and rollback.
 
 ### Committer approvals (0.3.2 hotfix)
 
@@ -158,7 +179,7 @@ CLI selector is not asserted.
 
 ## Migration and rollback
 
-For a repository-only migration, install and validate Workcell 0.3.0 additively
+For a repository-only migration, install and validate Workcell 0.5.0 additively
 alongside the prior known-good profile first. If
 DCP should be Workcell-only, optionally remove a duplicate user-global DCP TUI
 declaration after validation. Do not make these machine-level changes as part

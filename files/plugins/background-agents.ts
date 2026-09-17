@@ -34,6 +34,7 @@ import * as path from "node:path";
 import { adjectives, animals, colors, uniqueNamesGenerator } from "unique-names-generator";
 import { getProjectId } from "./kdco-primitives/get-project-id";
 import type { OpencodeClient } from "./kdco-primitives/types";
+import { ReviewWorkspaces, type ReviewOwner } from "./worktree/review";
 
 // ==========================================
 // ROUTING POLICY
@@ -43,7 +44,7 @@ const ASYNC_AGENT_DEFAULTS = ["explore", "researcher", "reviewer"] as const;
 
 const TASK_AGENT_DEFAULTS = ["coder", "debugger", "tester", "scribe", "committer"] as const;
 
-const ORCHESTRATOR_AGENT_DEFAULTS = ["plan", "build"] as const;
+const ORCHESTRATOR_AGENT_DEFAULTS = ["plan", "build", "review"] as const;
 
 function parseAgentSet(
   environmentValue: string | undefined,
@@ -466,6 +467,7 @@ interface DelegationRetrievalState {
 
 interface DelegationArtifactState {
   filePath: string;
+  reviewID?: string;
   persistedAt?: Date;
   byteLength?: number;
   persistError?: string;
@@ -517,6 +519,8 @@ interface DelegationListItem {
 }
 
 interface DelegationManagerOptions {
+  reviewProject?: string;
+  reviewWorkspaces?: ReviewWorkspaces;
   maxRunTimeMs?: number;
   readPollIntervalMs?: number;
   terminalWaitGraceMs?: number;
@@ -587,6 +591,8 @@ type Logger = ReturnType<typeof createLogger>;
 // ==========================================
 
 class DelegationManager {
+  private reviewResources?: Promise<ReviewWorkspaces>;
+  private readonly reviewProject?: string;
   private readonly delegations = new Map<string, DelegationRecord>();
   private readonly delegationsBySession = new Map<string, string>();
   private readonly terminalWaiters = new Map<
@@ -601,6 +607,7 @@ class DelegationManager {
   private readonly finalizationLocks = new Set<string>();
   private readonly pendingByParent = new Map<string, Set<string>>();
   private readonly parentNotificationState = new Map<string, ParentNotificationState>();
+  private readonly parentPrompts = new Map<string, number>();
 
   private readonly client: OpencodeClient;
   private readonly baseDir: string;
@@ -620,6 +627,8 @@ class DelegationManager {
     options: DelegationManagerOptions = {},
   ) {
     this.client = client;
+    this.reviewProject = options.reviewProject;
+    if (options.reviewWorkspaces) this.reviewResources = Promise.resolve(options.reviewWorkspaces);
     this.baseDir = baseDir;
     this.log = log;
     this.maxRunTimeMs = options.maxRunTimeMs ?? DEFAULT_MAX_RUN_TIME_MS;
@@ -671,12 +680,148 @@ class DelegationManager {
     return currentID;
   }
 
+  private reviews(): Promise<ReviewWorkspaces> {
+    if (!this.reviewResources) {
+      if (!this.reviewProject) throw new Error("Review workspace tools are unavailable in this context");
+      this.reviewResources = ReviewWorkspaces.open(this.reviewProject);
+    }
+    return this.reviewResources;
+  }
+
+  private async reviewID(rootSessionID: string): Promise<string | undefined> {
+    if (!this.reviewProject && !this.reviewResources) return undefined;
+    const result = await this.client.session.get({ path: { id: rootSessionID } });
+    if (result.error || !result.data) throw new Error("Cannot determine delegation artifact ownership");
+    const metadata = (result.data as unknown as { metadata?: Record<string, unknown> }).metadata;
+    if (metadata?.workcellReview) throw new Error("Old review engine session: close it with the previous version; no automatic migration");
+    const marker = metadata?.workcellReviewWorkspace as { id?: string; project?: string } | undefined;
+    if (!marker) return undefined;
+    const resources = await this.reviews();
+    if (marker.project !== resources.project || typeof marker.id !== "string") throw new Error("Review project ownership mismatch");
+    resources.paths(marker.id); return marker.id;
+  }
+
+  private async attachReview(owner: ReviewOwner, sessionID: string): Promise<void> {
+    const session = await this.client.session.get({ path: { id: sessionID } });
+    if (session.error || !session.data || session.data.parentID) throw new Error("Review coordinator must be a root session");
+    const metadata = (session.data as unknown as { metadata?: Record<string, unknown> }).metadata ?? {};
+    // Pinned V1 server accepts metadata, although its legacy SDK body omits this field.
+    const body = { title: `Review ${owner.id}`, metadata: { ...metadata, workcellReviewWorkspace: { id: owner.id, project: owner.project } } };
+    const updated = await this.client.session.update({ path: { id: sessionID }, body });
+    if (updated.error) throw new Error("Could not attach the review workspace");
+    if (!owner.sessions.includes(sessionID)) owner.sessions.push(sessionID);
+    await (await this.reviews()).save(owner);
+  }
+
+  async review(args: { action: "start" | "resume" | "status" | "return" | "close"; id?: string; request: string; separate: boolean; discard: boolean }, context: ToolContext): Promise<string> {
+    const resources = await this.reviews();
+    if (await fs.realpath(context.directory) !== resources.project) throw new Error("Review belongs to another project");
+    let bound = await this.reviewID(await this.getRootSessionID(context.sessionID));
+    if (bound && args.action === "start" && !args.id) {
+      try { await fs.lstat(resources.paths(bound).root); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; bound = undefined; }
+    }
+    const id = args.id ?? (args.action === "start" && args.separate ? undefined : bound);
+    if (args.action !== "start" && !id) throw new Error("Provide the review workspace ID");
+    if (args.action === "close") {
+      try {
+        await resources.use(id!, async (owner) => {
+          owner.closing = true; await resources.save(owner);
+          await this.stopReview(owner, context.sessionID);
+          await resources.remove(owner, args.discard);
+          for (const [key, record] of this.delegations) if (record.artifact.reviewID === owner.id) this.delegations.delete(key);
+        }, true);
+      } catch (error) {
+        // A missing owner after partial cleanup is not authority to delete an arbitrary directory.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" || await fs.lstat(resources.paths(id!).root).then(() => true, () => false)) throw error;
+        return "No workspace in the current layout; no cleanup performed. Close legacy engine reviews with the previous version. Host history is unchanged.";
+      }
+      return "Review workspace and finding artifacts removed. Host conversations remain retained.";
+    }
+    const owner = id ? await resources.load(id, args.action === "status") : await resources.create(context.sessionID, context.agent);
+    const view = () => JSON.stringify({ id: owner.id, session: owner.sessions.at(-1), ...resources.paths(owner.id), head: owner.head, closing: owner.closing });
+    if (args.action === "status") return view();
+    if (args.action === "return") {
+      if (!args.request.trim()) throw new Error("Provide the concise review summary");
+      if (owner.origin !== context.sessionID) await this.promptParentWithRetry(owner.origin, owner.originAgent, `Review ${owner.id}\n${args.request}`, true);
+      return "Summary returned. Workspace retained until explicit close.";
+    }
+    if (context.agent === "review" && (!args.separate || (args.action === "resume" && owner.sessions.includes(context.sessionID))) && (!bound || bound === owner.id)) {
+      await resources.use(owner.id, async (current) => { await this.attachReview(current, context.sessionID); owner.sessions = current.sessions; });
+      return view();
+    }
+    const status = await this.client.session.status({});
+    if (status.error || !status.data) throw new Error("Could not check existing review session activity");
+    let coordinator = owner.sessions.at(-1);
+    if (coordinator === context.sessionID && context.agent !== "review") coordinator = undefined;
+    if (coordinator && status.data[coordinator] && status.data[coordinator].type !== "idle") {
+      return JSON.stringify({ id: owner.id, session: coordinator, ...resources.paths(owner.id), busy: true, requestDelivered: false, next: "Wait for the active review, then resume to send this request." });
+    }
+    await resources.use(owner.id, async (current) => {
+      if (!coordinator || (await this.client.session.get({ path: { id: coordinator } })).error) {
+        const created = await this.client.session.create({ body: { title: `Review ${owner.id}` } });
+        if (created.error || !created.data) throw new Error("Could not create a review session");
+        coordinator = created.data.id;
+      }
+      current.origin = context.sessionID;
+      current.originAgent = context.agent;
+      await this.attachReview(current, coordinator!); owner.sessions = current.sessions;
+    });
+    const paths = resources.paths(owner.id);
+    const request = args.request || (args.action === "resume"
+      ? "Resume from the native agent-written ledger; check freshness before reusing coverage."
+      : "Review staged changes in the trusted origin using git diff --cached.");
+    void this.promptParentWithRetry(coordinator!, "review", `Review workspace ${owner.id}. Trusted origin: ${resources.project}. Scratch notes: ${paths.notes}. Ledger: ${paths.ledger}. Checkout (if pinned): ${paths.checkout}. Use code-review and native tools; keep this session in the origin context. Caller request and essential context:\n${request}\nReturn the concise summary with review_start action=return, id=${owner.id}, request=<summary>. Do not close automatically.`, false).catch(() => this.log.warn(`Review session ${coordinator} interrupted; resume workspace ${owner.id}.`));
+    return view();
+  }
+
+  async pinReview(args: { id: string; head: string; pr?: number; discard: boolean }): Promise<string> {
+    const resources = await this.reviews();
+    return resources.use(args.id, async (owner) => {
+      const status = await this.client.session.status({});
+      if (status.error || !status.data || owner.workers.some((id) => status.data?.[id] && status.data[id].type !== "idle") || [...this.delegations.values()].some((d) => d.artifact.reviewID === owner.id && (isActiveStatus(d.status) || d.promptPending || this.finalizationLocks.has(d.id)))) throw new Error("Wait for review workers before changing the checkout");
+      await resources.pin(owner, args.head, args.pr, args.discard);
+      return JSON.stringify({ id: owner.id, head: owner.head, ...resources.paths(owner.id) });
+    });
+  }
+
+  private async stopReview(owner: ReviewOwner, currentSession: string): Promise<void> {
+    for (const root of owner.sessions) {
+      const state = this.parentNotificationState.get(root);
+      if (state) this.cancelScheduledAllComplete(state);
+    }
+    const ids = [...owner.workers, ...owner.sessions.filter((id) => id !== currentSession)];
+    for (const id of ids) {
+      const result = await this.client.session.abort({ path: { id } });
+      if (result.error && (await this.client.session.get({ path: { id } })).response.status !== 404) throw new Error("Could not stop a review session; retry close");
+    }
+    for (const d of this.delegations.values()) if (d.artifact.reviewID === owner.id && isActiveStatus(d.status)) await this.finalizeDelegation(d.id, "cancelled", "Review explicitly closed");
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const status = await this.client.session.status({});
+      if (status.error || !status.data) throw new Error("Could not verify review worker termination");
+      if (ids.every((id) => !status.data![id] || status.data![id].type === "idle") && !owner.sessions.some((id) => id !== currentSession && this.parentPrompts.has(id)) && ![...this.delegations.values()].some((d) => d.artifact.reviewID === owner.id && (d.promptPending || this.finalizationLocks.has(d.id)))) {
+        if (owner.sessions.includes(currentSession) && this.parentPrompts.has(currentSession)) throw new Error("Workers stopped. Finish this review turn and close from the origin, or retry after the turn is idle");
+        return;
+      }
+      await sleep(100);
+    }
+    throw new Error("Review workers have not stopped; workspace retained, retry close");
+  }
+
   private async getDelegationsDir(sessionID: string): Promise<string> {
     const rootSessionID = await this.getRootSessionID(sessionID);
+    const reviewID = await this.reviewID(rootSessionID);
+    if (reviewID) {
+      return (await this.reviews()).artifacts(reviewID);
+    }
     return path.join(this.baseDir, rootSessionID);
   }
 
   private async ensureDelegationsDir(sessionID: string): Promise<string> {
+    const reviewID = await this.reviewID(await this.getRootSessionID(sessionID));
+    if (reviewID) return (await this.reviews()).use(reviewID, async () => {
+      return (await this.reviews()).artifacts(reviewID);
+    });
     const directory = await this.getDelegationsDir(sessionID);
     await fs.mkdir(directory, {
       recursive: true,
@@ -952,7 +1097,8 @@ class DelegationManager {
 
     this.updateDelegation(id, (record) => {
       record.status = "finalizing";
-      record.promptPending = false;
+      // Idle, timeout and cancellation can precede transport settlement.
+      // Only markPromptSettled may clear promptPending after session.prompt settles.
     });
 
     return true;
@@ -1196,8 +1342,13 @@ class DelegationManager {
     try {
       const artifactContent = this.buildArtifactContent(delegation, content);
 
-      await fs.writeFile(temporaryPath, artifactContent, "utf8");
-      await fs.rename(temporaryPath, delegation.artifact.filePath);
+      const write = async () => {
+        if (delegation.artifact.reviewID) await (await this.reviews()).artifacts(delegation.artifact.reviewID);
+        await fs.writeFile(temporaryPath, artifactContent, { encoding: "utf8", mode: 0o600 });
+        await fs.rename(temporaryPath, delegation.artifact.filePath);
+      };
+      if (delegation.artifact.reviewID) await (await this.reviews()).use(delegation.artifact.reviewID, write);
+      else await write();
 
       const statistics = await fs.stat(delegation.artifact.filePath);
 
@@ -1232,7 +1383,7 @@ class DelegationManager {
 
     const delegation = this.delegations.get(delegationID);
 
-    if (!delegation || !content.trim()) {
+    if (!delegation || delegation.artifact.reviewID || !content.trim()) {
       return;
     }
 
@@ -1358,6 +1509,13 @@ class DelegationManager {
     cycle: number,
     cycleToken: string,
   ): Promise<void> {
+    try {
+      const reviewID = await this.reviewID(parentSessionID);
+      if (reviewID) await (await this.reviews()).load(reviewID);
+    } catch {
+      // Closed or unavailable ownership must not restart the coordinator from a timer.
+      return;
+    }
     const state = this.getParentNotificationState(parentSessionID);
 
     if (state.allCompleteScheduledCycleToken !== cycleToken) {
@@ -1407,37 +1565,48 @@ class DelegationManager {
     text: string,
     noReply: boolean,
   ): Promise<void> {
-    let lastError: unknown;
+    this.parentPrompts.set(parentSessionID, (this.parentPrompts.get(parentSessionID) ?? 0) + 1);
+    try {
+      let lastError: unknown;
 
-    for (const delay of NOTIFICATION_RETRY_DELAYS_MS) {
-      if (delay > 0) {
-        await sleep(delay);
+      for (const delay of NOTIFICATION_RETRY_DELAYS_MS) {
+        if (delay > 0) {
+          await sleep(delay);
+        }
+
+        const reviewID = await this.reviewID(parentSessionID);
+        if (reviewID) await (await this.reviews()).load(reviewID);
+
+        try {
+          const response = await this.client.session.prompt({
+            path: {
+              id: parentSessionID,
+            },
+            body: {
+              noReply,
+              agent: parentAgent,
+              parts: [
+                {
+                  type: "text",
+                  text,
+                },
+              ],
+            },
+          });
+          if (response?.error) throw new Error("Session notification failed");
+
+          return;
+        } catch (error) {
+          lastError = error;
+        }
       }
 
-      try {
-        await this.client.session.prompt({
-          path: {
-            id: parentSessionID,
-          },
-          body: {
-            noReply,
-            agent: parentAgent,
-            parts: [
-              {
-                type: "text",
-                text,
-              },
-            ],
-          },
-        });
-
-        return;
-      } catch (error) {
-        lastError = error;
-      }
+      throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    } finally {
+      const count = (this.parentPrompts.get(parentSessionID) ?? 1) - 1;
+      if (count) this.parentPrompts.set(parentSessionID, count);
+      else this.parentPrompts.delete(parentSessionID);
     }
-
-    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   private async notifyParent(delegationID: string): Promise<void> {
@@ -1452,6 +1621,7 @@ class DelegationManager {
     }
 
     const remainingCount = this.getPendingCount(delegation.parentSessionID);
+    if (delegation.artifact.reviewID) { try { await (await this.reviews()).load(delegation.artifact.reviewID); } catch { return; } }
 
     try {
       await this.promptParentWithRetry(
@@ -1613,38 +1783,43 @@ class DelegationManager {
 
     const artifactDirectory = await this.ensureDelegationsDir(input.parentSessionID);
     const rootSessionID = await this.getRootSessionID(input.parentSessionID);
+    const reviewID = await this.reviewID(rootSessionID);
     const stableID = await this.generateUniqueDelegationId(artifactDirectory);
     const artifactPath = resolveDelegationArtifactPath(artifactDirectory, stableID);
 
-    const sessionResult = await this.client.session.create({
-      body: {
-        title: `Delegation: ${stableID}`,
-        parentID: input.parentSessionID,
-      },
-    });
+    const launch = async (owner?: ReviewOwner): Promise<DelegationRecord> => {
+      const sessionResult = await this.client.session.create({
+        body: {
+          title: `Delegation: ${stableID}`,
+          parentID: input.parentSessionID,
+        },
+      });
+      if (!sessionResult.data?.id) {
+        throw new Error("Failed to create the delegation session");
+      }
+      if (owner) {
+        owner.workers.push(sessionResult.data.id);
+        await (await this.reviews()).save(owner);
+      }
 
-    if (!sessionResult.data?.id) {
-      throw new Error("Failed to create the delegation session");
-    }
-
-    const delegation = this.registerDelegation({
-      id: stableID,
-      rootSessionID,
-      sessionID: sessionResult.data.id,
-      parentSessionID: input.parentSessionID,
-      parentMessageID: input.parentMessageID,
-      parentAgent: input.parentAgent,
-      prompt: input.prompt,
-      agent: input.agent,
-      artifactPath,
-    });
-
-    this.scheduleTimeout(delegation.id);
-    this.markStarted(delegation.id);
-
-    void this.executeDelegationPrompt(delegation);
-
-    return delegation;
+      const delegation = this.registerDelegation({
+        id: stableID,
+        rootSessionID,
+        sessionID: sessionResult.data.id,
+        parentSessionID: input.parentSessionID,
+        parentMessageID: input.parentMessageID,
+        parentAgent: input.parentAgent,
+        prompt: input.prompt,
+        agent: input.agent,
+        artifactPath,
+      });
+      delegation.artifact.reviewID = reviewID;
+      this.scheduleTimeout(delegation.id);
+      this.markStarted(delegation.id);
+      void this.executeDelegationPrompt(delegation);
+      return delegation;
+    };
+    return reviewID ? (await this.reviews()).use(reviewID, launch) : launch();
   }
 
   private async executeDelegationPrompt(delegation: DelegationRecord): Promise<void> {
@@ -1673,6 +1848,8 @@ class DelegationManager {
           },
         },
       });
+
+      if (response.error) throw new Error("Delegation prompt failed; inspect the host session");
 
       this.markPromptSettled(delegation.id);
 
@@ -2347,7 +2524,7 @@ const BackgroundAgentsPlugin: Plugin = async (context) => {
     recursive: true,
   });
 
-  const manager = new DelegationManager(typedClient, baseDirectory, log);
+  const manager = new DelegationManager(typedClient, baseDirectory, log, { reviewProject: directory });
 
   await manager.debugLog(
     [
@@ -2360,6 +2537,16 @@ const BackgroundAgentsPlugin: Plugin = async (context) => {
 
   return {
     tool: {
+      review_start: tool({
+        description: "Start/resume a review with an agent-written scratch ledger. Other modes get a separate root review session; direct review mode reuses its root unless separate=true. Return sends an agent-written summary to the origin. Close removes owned scratch/worktree/artifacts, not host conversation history.",
+        args: { action: tool.schema.enum(["start", "resume", "status", "return", "close"]).default("start"), id: tool.schema.string().optional(), request: tool.schema.string().max(32000).default(""), separate: tool.schema.boolean().default(false), discard: tool.schema.boolean().default(false) },
+        execute: (args, ctx) => manager.review(args, ctx),
+      }),
+      worktree_review: tool({
+        description: "Pin a full commit SHA in an owned detached review worktree. Optional pr fetches origin's PR head and checks the expected SHA. No development hooks/copies/terminal/snapshot commits. Resolve PR identity through native gh/Git first; wait for reviewers before changing the pin.",
+        args: { id: tool.schema.string(), head: tool.schema.string(), pr: tool.schema.number().int().positive().optional(), discard: tool.schema.boolean().default(false) },
+        execute: async (args) => manager.pinReview(args),
+      }),
       delegate: createDelegate(manager),
       delegation_read: createDelegationRead(manager),
       delegation_list: createDelegationList(manager),

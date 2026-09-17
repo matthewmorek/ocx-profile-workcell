@@ -35,7 +35,7 @@ local profile name is `workcell`; its OCX source is `matthewmorek/workcell`.
 
 ## Development
 
-Supported baseline for Workcell 0.3.0: Apple Silicon macOS, Bun 1.4.1,
+Supported baseline for Workcell 0.5.0: Apple Silicon macOS, Bun 1.4.1,
 registry-target OCX 2.0.14, validation CLI OCX 2.0.15, and OpenCode 1.18.25.
 
 ```sh
@@ -46,7 +46,8 @@ bun run smoke
 ```
 
 `build` runs `scripts/build-registry.ts`; `test` runs
-`bun test tests/registry.test.ts`; `smoke` runs `scripts/smoke-install.ts`.
+`bun test tests/registry.test.ts tests/review*.test.ts`; `smoke` runs
+`scripts/smoke-install.ts`.
 
 Smoke npm policy is isolated to the smoke sandbox. It uses
 `min-release-age=7` and `engine-strict=false`, filters inherited npm settings,
@@ -59,8 +60,17 @@ default profile remains, and then cleans the sandbox. It does not launch
 OpenCode, resolve, import, activate, or render DCP, verify `/dcp`, validate
 runtime tools or agents, or claim package-cache cleanup.
 
+Review mode is agent-guided and uses OpenCode-native tools and permissions, not
+a custom review engine. The review primary writes its ledger with native file
+tools; `worktree/review.ts` owns detached pinning, retained refs, ownership and
+cleanup. Ordinary reviewer delegations remain read-only and use returned paths.
+Native permissions are not an OS sandbox. Preserve source files, the index and
+branches; normal review Git metadata, objects and refs may be written. Close
+legacy engine reviews with the previous version before upgrading; do not migrate
+or delete them automatically.
+
 The repository-only migration sequence is to install and validate Workcell
-0.3.0 additively alongside the prior known-good profile. If DCP should be Workcell-only, optionally remove a duplicate
+0.5.0 additively alongside the prior known-good profile. If DCP should be Workcell-only, optionally remove a duplicate
 user-global DCP TUI declaration after validation. Do not perform these machine-
 level steps as part of repository changes. Roll back by restoring that
 declaration and launching the prior Workcell profile or the existing `ws`

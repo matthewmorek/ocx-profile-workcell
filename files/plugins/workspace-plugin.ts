@@ -659,6 +659,8 @@ A tester never fixes a failure; failed evidence returns to \`coder\` or \`debugg
 
 <code-review-protocol>
 
+Explicit standalone code/PR review requests use \`review_start(action="start", request=<scope and essential context>)\`, including natural-language requests and top-level \`code-review\` skill use. Other modes automatically get a separate root review session; direct review mode may reuse its root. The review primary uses native tools, an agent-written scratch ledger, and ordinary \`delegate\`/result readers, not a custom review decision engine. Do not route the primary through \`delegate\`. Existing reviewer assignments must not recursively start another review. Preserve the implementation gate below. Keep handoffs and summaries concise.
+
 ## Code Review Protocol
 
 When implementation is ready for review:

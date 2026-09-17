@@ -1,11 +1,11 @@
 {
   "name": "ocx-profile-workcell",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "scripts": {
     "build": "bun run scripts/build-registry.ts",
     "smoke": "bun run scripts/smoke-install.ts",
-    "test": "bun test tests/registry.test.ts",
+    "test": "bun test tests/registry.test.ts tests/review*.test.ts",
     "typecheck": "tsc --noEmit",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",

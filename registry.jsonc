@@ -2,7 +2,7 @@
   "$schema": "https://ocx.kdco.dev/schemas/v2/registry.json",
   "name": "matthewmorek",
   "author": "Matthew Morek",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "opencode": "1.18.25",
   "ocx": "2.0.14",
   "components": [
@@ -50,6 +50,17 @@
       ],
     },
     {
+      "name": "workcell-review-plugin",
+      "type": "plugin",
+      "description": "Safe detached review worktree ownership used by ordinary delegation.",
+      "files": [
+        {
+          "path": "plugins/worktree/review.ts",
+          "target": "plugins/worktree/review.ts",
+        },
+      ],
+    },
+    {
       "name": "workcell-background-agents",
       "type": "plugin",
       "description": "Asynchronous delegation tools and background-agent lifecycle management.",
@@ -59,7 +70,7 @@
           "target": "plugins/background-agents.ts",
         },
       ],
-      "dependencies": ["workcell-primitives"],
+      "dependencies": ["workcell-primitives", "workcell-review-plugin"],
       "npmDependencies": [
         "@opencode-ai/plugin@1.18.25",
         "unique-names-generator@4.7.1",
@@ -119,6 +130,17 @@
       "type": "agent",
       "description": "Documentation agent instructions.",
       "files": [{ "path": "agents/scribe.md", "target": "agents/scribe.md" }],
+    },
+    {
+      "name": "workcell-agent-review",
+      "type": "agent",
+      "description": "Dedicated adversarial review coordinator.",
+      "files": [{ "path": "agents/review.md", "target": "agents/review.md" }],
+      "dependencies": [
+        "workcell-review-plugin",
+        "workcell-background-agents",
+        "workcell-skill-code-review",
+      ],
     },
     {
       "name": "workcell-agent-reviewer",
@@ -245,7 +267,7 @@
       "files": [
         { "path": "commands/review.md", "target": "commands/review.md" },
       ],
-      "dependencies": ["workcell-agent-reviewer"],
+      "dependencies": ["workcell-agent-review", "workcell-agent-reviewer"],
     },
     {
       "name": "workcell-notify",
@@ -318,6 +340,7 @@
       "files": [],
       "dependencies": [
         "workcell-primitives",
+        "workcell-review-plugin",
         "workcell-background-agents",
         "workcell-workspace-plugin",
         "workcell-agent-coder",
@@ -327,6 +350,7 @@
         "workcell-agent-researcher",
         "workcell-agent-scribe",
         "workcell-agent-reviewer",
+        "workcell-agent-review",
         "workcell-agent-committer",
         "workcell-agent-metadata",
         "workcell-skill-plan-review",

@@ -728,6 +728,7 @@ describe("self-contained Workcell registry", () => {
       registry.components.find((candidate: any) => candidate.name === name);
     expect(component("workcell-background-agents").dependencies).toEqual([
       "workcell-primitives",
+      "workcell-review-plugin",
     ]);
     expect(component("workcell-workspace-plugin").dependencies).toEqual([
       "workcell-background-agents",
@@ -747,6 +748,7 @@ describe("self-contained Workcell registry", () => {
       "workcell-skill-plan-review",
     ]);
     expect(component("workcell-review-command").dependencies).toEqual([
+      "workcell-agent-review",
       "workcell-agent-reviewer",
     ]);
     expect(component("workcell-philosophy").dependencies).toEqual([
@@ -816,6 +818,7 @@ describe("self-contained Workcell registry", () => {
       permission: { "*": "deny" },
     });
     const expectedAgents = [
+      "review",
       "plan",
       "build",
       "debug",
@@ -831,6 +834,15 @@ describe("self-contained Workcell registry", () => {
     ];
     expect(Object.keys(profileConfig.agent)).toEqual(expectedAgents);
     const expectedAgentMatrix = {
+      review: {
+        mode: "primary",
+        model: "openai/gpt-6-astra",
+        temperature: null,
+        options: { reasoningEffort: "high", textVerbosity: "low" },
+        promptHash: null,
+        permissionHash:
+          "1083e55961d91871e74c8075bb5587501ed9640555ad68958fa79fd691cfe9f3",
+      },
       plan: {
         mode: "primary",
         model: "openai/gpt-6-astra",
@@ -839,7 +851,7 @@ describe("self-contained Workcell registry", () => {
         promptHash:
           "1b9505d51aa4a77167fd6c7ebe786ae99a74eefb368aecadae07af3ac7df3473",
         permissionHash:
-          "a38d357aca6878996cd35d9bf3d890aea290dcbbd5474e7772aae916942821bd",
+          "bc53c01ad86c2e583b99c2d05bc394a040f6dfe872d29f0f7ce6cb19c80debcc",
       },
       build: {
         mode: "primary",
@@ -849,7 +861,7 @@ describe("self-contained Workcell registry", () => {
         promptHash:
           "886bd7a56665bb5701fe3fc3964941018887515da9857bf7cdb8a3df02135c03",
         permissionHash:
-          "0a9b4ecd6b8cb6af1e731c34fe2f836e1fb8e2830796e8a3423008e1469e256e",
+          "19ddc5059cef457c9faa48e97fe5f3622d643b9ab907b7fc4e47073acb3b63e6",
       },
       debug: {
         mode: "primary",
@@ -859,7 +871,7 @@ describe("self-contained Workcell registry", () => {
         promptHash:
           "85a4b4ac61e743cf16333ce2336df0e68967d3d76c8ba73f732373ac46297c58",
         permissionHash:
-          "49482be84b314c4389174fd8aeff044f16db0dabf5187b133e4f121540f1a74d",
+          "46edd6bf8c60998ec117c79397526219259b0d6395b1fe79f264d2e3bf30e22e",
       },
       coder: {
         mode: "subagent",
@@ -919,10 +931,10 @@ describe("self-contained Workcell registry", () => {
         mode: "subagent",
         model: "openai/gpt-6-astra",
         temperature: 0.1,
-        options: { reasoningEffort: "high", textVerbosity: "medium" },
+        options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash: null,
         permissionHash:
-          "120149dc920abbee8eae07f32bb8c9c7f4ad0ae05b8db1aca4820f938a5a5d94",
+          "ee42d47207e739816b38e207d81ed3a8221fbe84f625023dea98bfcb00c4c6d3",
       },
       committer: {
         mode: "subagent",
@@ -985,6 +997,15 @@ describe("self-contained Workcell registry", () => {
       Object.entries(profileConfig.agent.reviewer.permission.bash),
     ).toEqual([
       ["*", "deny"],
+      ["git -C * status*", "allow"],
+      ["git -C * diff *", "allow"],
+      ["git -C * log *", "allow"],
+      ["git -C * show *", "allow"],
+      ["git -C * rev-parse *", "allow"],
+      ["git -C * ls-tree *", "allow"],
+      ["git -C * merge-base *", "allow"],
+      ["git -C * cat-file *", "allow"],
+      ["git -C * config --get *", "allow"],
       ["gh pr view *", "allow"],
       ["gh pr diff *", "allow"],
       ["gh pr checks *", "allow"],
@@ -996,7 +1017,10 @@ describe("self-contained Workcell registry", () => {
     expect(profileConfig.agent.reviewer.permission).toMatchObject({
       edit: "deny",
       write: "deny",
-      external_directory: "deny",
+      external_directory: {
+        "*": "deny",
+        "~/.local/share/workcell/review-workspaces/**": "allow",
+      },
       task: "deny",
       delegate: "deny",
     });
@@ -1095,10 +1119,29 @@ describe("self-contained Workcell registry", () => {
       "researcher",
     ]) {
       expect(profileConfig.agent[agent].permission).toMatchObject({
-        external_directory: "deny",
+        external_directory:
+          agent === "reviewer"
+            ? {
+                "*": "deny",
+                "~/.local/share/workcell/review-workspaces/**": "allow",
+              }
+            : "deny",
         plan_read: ["explore", "researcher"].includes(agent) ? "deny" : "allow",
       });
     }
+  });
+
+  test("routes the review command to the dedicated primary entry", async () => {
+    const command = await readFile(
+      join(repositoryRoot, "files/commands/review.md"),
+      "utf8",
+    );
+    const header = /^---\r?\n([\s\S]*?)\r?\n---/.exec(command)?.[1];
+    // Frontmatter selects the runtime agent; this is not a prose snapshot.
+    expect(header?.match(/^agent:\s*(\S+)\s*$/m)?.[1]).toBe("review");
+    expect(profileConfig.agent.review.mode).toBe("primary");
+    expect(profileConfig.agent.review.permission.review_start).toBe("allow");
+    expect(command).not.toMatch(/^(<<<<<<<|=======|>>>>>>>)/m);
   });
 
   test("keeps debug fail-closed with native authorization and only the diagnostic skill", () => {
@@ -1106,7 +1149,7 @@ describe("self-contained Workcell registry", () => {
       Object.entries(profileConfig.agent)
         .filter(([, agent]: [string, any]) => agent.mode === "primary")
         .map(([name]) => name),
-    ).toEqual(["plan", "build", "debug"]);
+    ).toEqual(["review", "plan", "build", "debug"]);
     const permission = profileConfig.agent.debug.permission;
     expect(Object.entries(permission)[0]).toEqual(["*", "deny"]);
     expect(Object.entries(permission.read)).toEqual([
@@ -1165,7 +1208,11 @@ describe("self-contained Workcell registry", () => {
       "researcher",
       "reviewer",
     ]);
-    expect([...routing.orchestratorAgents]).toEqual(["plan", "build"]);
+    expect([...routing.orchestratorAgents]).toEqual([
+      "plan",
+      "build",
+      "review",
+    ]);
     expect([...routing.taskAgents]).toEqual([
       "coder",
       "debugger",
@@ -3528,7 +3575,7 @@ describe("pinned automation", () => {
   }
 
   test("accepts the exact installed profile contract", async () => {
-    expect(receiptComponentNames).toHaveLength(24);
+    expect(receiptComponentNames).toHaveLength(26);
     expect(Object.keys(expectedDirectNpmDependencies)).toHaveLength(6);
     await withInstalledLayout(async (root) => {
       await expect(assertInstalledLayout(root)).resolves.toBeUndefined();
@@ -3568,7 +3615,7 @@ describe("pinned automation", () => {
         delete receipt.installed["component-22"];
         await writeFile(path, JSON.stringify(receipt));
       },
-      "exactly 24 entries",
+      "exactly 26 entries",
     ],
     [
       "duplicate receipt identity",
