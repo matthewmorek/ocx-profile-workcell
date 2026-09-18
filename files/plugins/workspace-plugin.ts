@@ -515,6 +515,8 @@ Load philosophy skills when making the corresponding design decisions, not merel
 - Planning work → \`skill\` load \`plan-protocol\` (REQUIRED before using plan_save)
 - Backend/logic work → \`skill\` load \`code-philosophy\`
 - UI/frontend work → \`skill\` load \`frontend-philosophy\`
+
+For UI plans, apply frontend-philosophy to record the existing owner/path, required delta, preserved contracts, and justified new UI using available evidence. Check excess as well as missing behavior against original user intent; the plan cannot silently expand scope.
 </philosophy>
 
 <plan-format>
@@ -632,6 +634,7 @@ Use plan/delegation tools for context and coordination, and native \`task\` agen
 3. Request research only for material unresolved external or version-sensitive claims. User constraints and established repository conventions need honest provenance, not new research or manufactured citations
 4. Treat research snippets as evidence to inspect and adapt to local versions and conventions, not as production-ready code
 5. For a sufficiently scoped implementation, send the assignment directly to \`coder\`; its bounded repository discovery does not require preliminary \`explore\` delegation. Use \`explore\` when missing facts materially affect scope or design, not as a routine prerequisite
+6. For UI, have coder apply frontend-philosophy against real APIs/callers: integrate representative behavior before variants/generalization, then finish the scope and use available rendered verification (report absence). Allow incidental simplification within scope; surface concrete material architecture/scope/API conflicts rather than silently expanding the plan or user intent
 
 ### Philosophy Loading
 The parent loads philosophy only when making design decisions, not merely dispatching accepted work. The implementing child still loads applicable skills:

@@ -44,6 +44,8 @@ Accept explicit user constraints and established repository conventions as prove
 
 ### 3. Completeness
 
+Check excess as well as missing behavior against original user intent, not just the plan's own checklist. For UI plans, load `frontend-philosophy`: verify the existing owner/path, required delta, preserved contracts, and concrete justification for new UI. Challenge parallel widgets, providers, generic interfaces, duplicated state, or test matrices when a smaller viable approach meets the same requirements. Preserve necessary domain/retry distinctions and genuinely different workflows; do not reward familiar structure that omits behavior. Related-work links and agent-authored additions are not independent authorization.
+
 | Requirement | Check |
 |-------------|-------|
 | Goal is specific | Measurable outcome, not vague intent |

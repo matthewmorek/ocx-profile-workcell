@@ -97,6 +97,8 @@ Review module and API design:
 - Check that layers provide different abstractions rather than repeating the same information at different levels.
 - For consequential designs, compare the submitted structure with one plausible alternative. Report the concern only if the alternative materially reduces dependencies, interface complexity, or future change cost.
 
+For UI, apply `frontend-philosophy` to the existing owner, callers, and state path. Check unrequested behavior as well as omissions against original user intent; an agent-authored plan is not authority to expand scope. Reassess parallel widgets, providers, generic interfaces, duplicated state, and exhaustive render test matrices by naming the concrete complexity consequence and smaller viable approach. Small presentational boundaries and separate compositions for genuinely different workflows are valid. Do not simplify away domain invariants or pipeline correctness coverage merely to reduce UI variants.
+
 ### 3. Correctness and Resilience
 
 Check:

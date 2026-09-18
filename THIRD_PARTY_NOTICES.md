@@ -1,5 +1,19 @@
 # Third-party notices
 
+## Frontend composition guidance
+
+Concepts in `files/skills/frontend-philosophy/SKILL.md` are informed by Vercel's
+composition-patterns skill v1.0.0 at immutable revision
+`a5343bd997c4cc4d8bf2ca61021bdc74b4d6c9d5`, paths
+`skills/composition-patterns/SKILL.md` and `skills/composition-patterns/AGENTS.md`
+in [`vercel-labs/agent-skills`](https://github.com/vercel-labs/agent-skills/tree/a5343bd997c4cc4d8bf2ca61021bdc74b4d6c9d5).
+The scoped skill metadata declares license `MIT` and author `vercel`. No full
+upstream LICENSE, NOTICE, or copyright-holder notice was supplied or found in
+the complete tree at that revision; none is invented here. Workcell authors
+fresh, bounded guidance, not copied snippets or vendored source code. It retains
+local API/version compatibility and makes composition conditional on present
+needs rather than prescribing a provider or a React migration.
+
 ## Debug-investigation skill adaptation
 
 `files/skills/debug-investigation/SKILL.md` adapts investigation concepts from
