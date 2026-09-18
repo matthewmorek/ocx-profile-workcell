@@ -3372,11 +3372,18 @@ describe("high-risk deterministic plugin boundaries", () => {
         expect(rules).toContain("do not copy the full plan into prompts");
         expect(rules).toContain("task IDs or section references");
         expect(rules).not.toContain("Update immediately");
+        // Verify phase guidance reaches the prompt payload, not model behavior.
+        expect(rules).toContain("frontend-philosophy");
         if (agent === "build") {
+          expect(rules).toContain("real APIs/callers");
+          expect(rules).toContain("rendered verification");
           expect(rules).toContain(
             "Do not claim completion without independent tester evidence",
           );
           expect(rules).toContain("Do NOT review before tester evidence");
+        } else {
+          expect(rules).toContain("existing owner/path");
+          expect(rules).toContain("original user intent");
         }
       }
 

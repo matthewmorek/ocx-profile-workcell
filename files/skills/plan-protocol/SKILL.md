@@ -39,6 +39,8 @@ When creating or updating a plan, ensure:
 
 ## Plan Format
 
+For UI plans, apply `frontend-philosophy` before choosing architecture. In existing plan prose or bullets, record the existing owner/path, required delta, preserved contracts, and justified new UI. Reuse established evidence. Map acceptance criteria to original user intent, separating required behavior and demonstrated safety/accessibility needs from optional enhancements; related issues and agent-authored plans do not authorize extra scope.
+
 Use `plan_save` with this exact markdown format:
 
 ```markdown

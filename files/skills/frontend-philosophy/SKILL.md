@@ -30,7 +30,7 @@ Use this skill for:
 
 ## Repository Discovery Comes First
 
-Before implementing UI, inspect the repository for applicable guidance and existing patterns.
+Before planning UI architecture or implementing it, identify the existing feature owner and required behavioral delta. Inspect its components, relevant callers, state owner, and extension points. Reuse established evidence; inspect missing or changed facts rather than repeating research.
 
 Look for:
 
@@ -42,6 +42,8 @@ Look for:
 - Existing accessibility utilities, lint rules, testing conventions, and browser-support requirements.
 
 Follow the nearest applicable local convention. Reuse an existing component or pattern when it serves the same user need without forcing a misleading abstraction.
+
+Record the existing owner/path, required change, preserved contracts, and any necessary new UI with a concrete justification. A paragraph or bullets in the existing plan or task context suffice; no separate artifact, schema, tool, or approval ceremony is needed. Separate explicit user requirements, preserved contracts, and demonstrated correctness, security, accessibility, or integrity needs from optional enhancements. Related-work links are context, not automatic scope. Original user requirements remain authoritative: an agent-authored plan cannot silently expand them.
 
 Do not:
 
@@ -158,15 +160,35 @@ Before adding a component:
 - Search for an existing primitive or composite component that fits the semantic role and interaction.
 - Reuse it directly when possible.
 - Compose existing primitives when the task represents a new, coherent pattern.
-- Extend a shared component only when the variation is broadly useful and does not make its API harder to understand.
+- Prefer a compatible extension of the current feature owner for the required delta; it need not benefit unrelated consumers. Preserve public APIs and defaults.
 - Keep one-off feature-specific composition local when generalization would add speculative API surface.
 
 Avoid shallow abstractions:
 
-- Do not create wrappers that only rename props, forward a few values, or hide no meaningful complexity.
-- Do not add boolean-prop combinations that create many unrelated modes.
-- Prefer a clear composition boundary or separate component when variants have different semantics, states, or interaction models.
+- Avoid wrappers that merely rename or forward props. A small presentational component can still own a meaningful semantic, visual, accessibility, or interaction boundary without deep business logic. A new component is not necessarily a new product design.
+- Avoid interacting workflow flags that create unrelated modes, not legitimate binary props such as disabled or expanded.
+- Use local extraction or separate compositions for genuinely different workflows, semantics, or interaction models; reuse does not require a mega-component. Different loading, error, retry, or completion states alone do not justify parallel widgets.
 - Keep product policy, validation rules, and state transitions out of scattered presentational components when they require consistent behavior across the product.
+
+### Domain State Is Not a Widget Catalog
+
+Preserve internal distinctions needed for correctness and recovery, including stage-specific retries. Project user-meaningful feedback from the existing state owner rather than mirroring domain state into a new UI source of truth. Simplifying presentation must not erase retry limits, partial successes, or failure distinctions that the operation relies on.
+
+### React Composition, When Applicable
+
+Start with props and local composition. Existing `children`, named slots, and render-functions are valid extension points; render-functions are useful when supplying data to consumers. Preserve these APIs and defaults rather than replacing them to satisfy a preferred pattern.
+
+Introduce a provider, compound-component API, or generic state/actions/meta interface only when concrete current coordination needs justify the extra contract. Decoupling logic from presentation does not require a provider or interchangeable backends. Optimize understandable behavior, not zero conditionals; composition alone does not make invalid states impossible.
+
+Honor the repository's React version. `useContext` is supported; do not incidentally migrate it, `forwardRef`, or other established APIs. React 19 guidance is not authorization to break React 18 compatibility.
+
+Concepts informed by Vercel composition-patterns v1.0.0, revision `a5343bd997c4cc4d8bf2ca61021bdc74b4d6c9d5`, `skills/composition-patterns/{SKILL,AGENTS}.md` (scoped metadata: license MIT, author vercel; no full upstream notice supplied). This is fresh Workcell guidance, not copied snippets. See also React's [before using context](https://react.dev/learn/passing-data-deeply-with-context#before-you-use-context), [useContext](https://react.dev/reference/react/useContext), and [forwardRef](https://react.dev/reference/react/forwardRef) references.
+
+## Implementation Fit
+
+Validate the plan against real component APIs and callers. Implement the smallest integrated representative UI behavior before multiplying variants or generalizing, then complete the remaining required behavior; do not stop at scaffolding or require a new user checkpoint. Simplify incidental structure within approved scope, but report concrete material architecture, scope, or API conflicts rather than silently expanding the task.
+
+Reassess parallel widgets, providers, generic interfaces, duplicated state, and growing test matrices against the requirement and a simpler viable alternative, not a line-count cap.
 
 ## Motion and Visual Styling
 
@@ -206,6 +228,8 @@ Before completing frontend work:
 - Verify color contrast and non-color indicators where relevant.
 - Respect reduced-motion preferences for added or modified motion.
 - Run the repository's relevant linting, type checking, tests, Storybook checks, or visual-regression workflow when available.
+- Use available rendered verification for the integrated behavior; report its absence or limitations rather than implying that static checks prove UX.
+- Test distinct contracts at their natural boundary: retry limits/backoff, each required pipeline stage (for example URL, transfer, finalize), idempotency, and preserved successes belong at the pipeline layer; UI tests protect user feedback, recovery, and accessibility. Avoid exhaustive render permutations without deleting correctness coverage.
 
 ## What Not To Do
 

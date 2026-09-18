@@ -67,7 +67,7 @@ Prefer a boundary that:
 * Has an interface that can be understood from its declarations, types, and documentation without reading its implementation.
 
 Do not create shallow abstractions:
-* Wrappers that only rename or pass through a small number of values.
+* Wrappers that only rename or pass through values without owning a meaningful concern. Small UI components may own semantic, visual, accessibility, or interaction boundaries without deep business logic; apply `frontend-philosophy` for those decisions.
 * Layers that repeat the same abstraction at different names and locations.
 * Generic helpers with many flags, callbacks, or configuration options but little encapsulated behavior.
 * Separate classes or files created solely because a method became long.
