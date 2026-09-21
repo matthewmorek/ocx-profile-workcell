@@ -43,7 +43,7 @@ export class ReviewWorkspaces {
   ) {}
   static async open(
     project: string,
-    storage = join(homedir(), ".local/share/workcell/review-workspaces"),
+    storage = join(homedir(), ".local/share/workcell/review-workspaces-v2"),
   ) {
     project = await realpath(project);
     const root = join(resolve(storage), createHash("sha256").update(project).digest("hex"));

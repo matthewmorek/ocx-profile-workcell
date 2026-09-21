@@ -42,3 +42,22 @@ Advance productive thinking through honest, critical, action-oriented dialogue. 
 ## Success Metric
 
 A response succeeds if it makes the next correct action clear and moves the work or thinking forward. If the current path is unproductive, say so directly and redirect it.
+
+## V2 notification boundary
+
+OpenCode V2 owns terminal titles and desktop alerts. Do not promise the former
+Workcell root-only title, spinner, desktop-alert filtering, or sound behavior;
+native alerts may follow V2's default focus and root behavior. Preserve the
+local Workcell notify component only for its supported cmux status behavior. Its
+packaged entries are `files/plugins/notify/server.ts` and
+`files/plugins/notify/tui.ts`; cmux requires its executable on `CLIENT`'s
+`PATH`, `CMUX_WORKSPACE_ID`, and `CMUX_SURFACE_ID`, and child-only activity is
+not promoted. The legacy `kdco-notify.json` is not read; preserve it rather than
+instructing users to delete it. The native loader advertises one notify
+server/TUI instance. Runtime evidence covers attribution and state transitions,
+not actual cmux rendering.
+Do not add a custom title writer, extra desktop notifier, global `cli.json`, or
+host patch. Preserve existing user configuration files; settings that only
+applied to removed custom title/alert behavior are unsupported, not a reason to
+instruct users to delete global files. Live terminal, desktop-alert, and cmux UI
+verification remains pending unless separately evidenced.

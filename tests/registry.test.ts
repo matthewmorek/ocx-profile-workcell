@@ -1,6 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, spyOn, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   lstat,
   mkdir,
@@ -12,21 +11,19 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 
+import { Service } from "@opencode/client/service";
 import { parse } from "jsonc-parser";
 
 import BackgroundAgentsPlugin from "../files/plugins/background-agents";
+import { currentHost } from "../files/plugins/kdco-primitives/current-host";
 import { getProjectId } from "../files/plugins/kdco-primitives/get-project-id";
-import NotifyPlugin from "../files/plugins/notify";
-import * as notifyBackend from "../files/plugins/notify/backend";
 import * as notifyCmux from "../files/plugins/notify/cmux";
-import { buildCmuxSessionStatusTransitionForEvent } from "../files/plugins/notify/status";
-import * as notifyTitle from "../files/plugins/notify/title";
-import { sanitizeOscTitleText } from "../files/plugins/notify/title";
+import NotifyServer from "../files/plugins/notify/server";
+import NotifyPlugin from "../files/plugins/notify/tui";
 import WorkspacePlugin from "../files/plugins/workspace-plugin";
 import WorktreePlugin from "../files/plugins/worktree";
 import {
@@ -62,66 +59,221 @@ import {
   smokeEnvironment,
   writeSandboxNpmPolicy,
 } from "../scripts/smoke-install";
+import { profileAgents } from "./profile-agents";
 
 const repositoryRoot = join(import.meta.dir, "..");
 
-// Exercise the real plugin hooks, replacing only external I/O and the clock.
-async function notificationHarness(osc = false) {
-  const notifications: unknown[] = [];
-  const statuses: string[] = [];
-  const titles: string[] = [];
-  const timers = new Map<number, () => void>();
-  let timerID = 0;
-  let lookup: (id: string) => Promise<any> = async (id) => ({
-    data: { id, title: "Task", agent: "build" },
+const pluginCleanups: (() => unknown)[] = [];
+afterEach(async () => {
+  for (const cleanup of pluginCleanups.splice(0)) await cleanup();
+});
+
+async function worktreeHarness(input: any, dependencies: any) {
+  const tools: Record<string, any> = {};
+  const queue: { event: any; done: () => void }[] = [];
+  let wake: (() => void) | undefined;
+  const cleanup = await (
+    WorktreePlugin.testInternals as any
+  ).createWorktreePlugin(
+    {
+      location: { directory: input.directory },
+      tool: {
+        transform: async (callback: any) => {
+          callback({
+            add: (tool: any) => {
+              tools[tool.name] = {
+                execute: async (args: any, context: any) =>
+                  (await tool.execute(args, context)).content,
+              };
+            },
+          });
+          return { dispose: async () => {} };
+        },
+      },
+      event: {
+        async *subscribe({ signal }: { signal: AbortSignal }) {
+          signal.addEventListener("abort", () => wake?.(), { once: true });
+          while (!signal.aborted) {
+            const pending = queue.shift();
+            if (!pending) {
+              await new Promise<void>((resolve) => {
+                wake = resolve;
+              });
+              continue;
+            }
+            yield pending.event;
+            pending.done();
+          }
+        },
+      },
+    },
+    {
+      ...dependencies,
+      client: { session: { get: async () => ({ time: { idle: 1 } }) } },
+    },
+  );
+  pluginCleanups.push(cleanup);
+  return {
+    tool: tools,
+    event: ({ event }: any) =>
+      new Promise<void>((done) => {
+        queue.push({
+          event: {
+            type: "session.execution.succeeded",
+            data: event.properties,
+          },
+          done,
+        });
+        wake?.();
+      }),
+  };
+}
+
+// Preserve the existing report/archive scenario helpers, but invoke registered
+// native tools and single-event hooks. No production compatibility layer exists.
+async function workspaceHarness(input: any) {
+  const tools: Record<string, any> = {};
+  const hooks = new Map<string, ((event: any) => Promise<void>)[]>();
+  const hook = async (
+    name: string,
+    callback: (event: any) => Promise<void>,
+  ) => {
+    hooks.set(name, [...(hooks.get(name) ?? []), callback]);
+    return { dispose: async () => {} };
+  };
+  const invoke = async (name: string, event: any) => {
+    for (const callback of hooks.get(name) ?? []) await callback(event);
+  };
+  const cleanup = await WorkspacePlugin.setup({
+    location: { directory: input.directory },
+    session: {
+      hook,
+      get: async ({ sessionID }: any) =>
+        (await input.client.session.get({ path: { id: sessionID } })).data,
+    },
+    agent: { get: async () => ({ data: { request: { body: {} } } }) },
+    tool: {
+      hook,
+      transform: async (callback: any) => {
+        callback({
+          add: (tool: any) => {
+            tools[tool.name] = {
+              execute: async (args: any, context: any) =>
+                (
+                  await tool.execute(args, {
+                    ...context,
+                    id: "fixture-call",
+                    messageID: "fixture-message",
+                    signal: new AbortController().signal,
+                    progress: async () => {},
+                  })
+                ).content,
+            };
+          },
+        });
+        return { dispose: async () => {} };
+      },
+    },
+    event: { async *subscribe() {} },
+  } as any);
+  if (typeof cleanup === "function") pluginCleanups.push(cleanup);
+  const event = (input: any) => ({
+    ...input,
+    tool: input.tool === "task" ? "subagent" : input.tool,
+    id: input.callID,
+    messageID: "fixture-message",
+    agent: "build",
   });
-  const originalRead = fsPromises.readFile;
+  return {
+    tool: tools,
+    "tool.execute.before": (input: any, output: any) =>
+      invoke("execute.before", {
+        ...event(input),
+        input: { ...output.args, agent: output.args.subagent_type },
+      }),
+    "tool.execute.after": async (input: any, output: any) => {
+      const native = {
+        ...event(input),
+        status: "completed",
+        result: {
+          content: output.output,
+          output: { status: "completed", output: output.output },
+        },
+      };
+      await invoke("execute.after", native);
+      output.output = native.result.content;
+    },
+    "experimental.session.compacting": async (input: any, output: any) => {
+      const native = {
+        ...input,
+        agent: "build",
+        options: {},
+        system: [] as { text: string }[],
+      };
+      await invoke("compaction", native);
+      output.context.push(
+        ...native.system.map((part: { text: string }) => part.text),
+      );
+    },
+    "experimental.chat.system.transform": async (input: any, output: any) => {
+      const native = {
+        ...input,
+        options: {},
+        system: [] as { text: string }[],
+      };
+      await invoke("context", native);
+      output.system.push(
+        ...native.system.map((part: { text: string }) => part.text),
+      );
+    },
+  };
+}
+
+// Native TUI snapshots are the state owner. Replace only cmux I/O and time.
+async function notificationHarness(
+  initial: Record<string, any> = { root: { id: "root", agent: "build" } },
+) {
+  const sessions = new Map(Object.entries(initial));
+  const running = new Set<string>();
+  const permissions = new Map<string, any[]>();
+  const forms = new Map<string, any[]>();
+  const writes: { key: string; text?: string; workspace?: string }[] = [];
+  const timers = new Map<number, () => void>();
+  const handlers = new Map<string, Set<(event: any) => void>>();
+  const invalidated: string[] = [];
+  let now = 0,
+    timerID = 0;
+  let route: any = { type: "session", sessionID: "root" };
+  let tabs: any[] = [];
+  let transport = async (_key: string, _text?: string) => true;
+  let sync = async (_id: string) => {};
+  const root = (id: string) => {
+    const seen = new Set<string>();
+    while (sessions.get(id)?.parentID && !seen.has(id)) {
+      seen.add(id);
+      id = sessions.get(id)!.parentID;
+    }
+    return id;
+  };
+  const flush = async () => {
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+  };
+  const forbidden = () => {
+    throw new Error("Native title/alert/config ownership must not be touched");
+  };
   const spies = [
-    spyOn(Bun, "spawn").mockImplementation((() => {
-      throw new Error("No real commands in notification tests");
-    }) as any),
-    spyOn(fsPromises, "readFile").mockImplementation(((
-      path: any,
-      ...args: any[]
-    ) =>
-      String(path).endsWith("kdco-notify.json")
-        ? Promise.resolve(
-            JSON.stringify({
-              notifyChildSessions: true,
-              terminal: "unknown-test-terminal",
-            }),
-          )
-        : (originalRead as any)(path, ...args)) as any),
-    spyOn(notifyBackend, "sendNotificationWithFallback").mockImplementation(
-      async (options) => {
-        await options.tryCmuxNotify();
-      },
-    ),
-    spyOn(notifyCmux, "canUseCmuxNotification").mockReturnValue(true),
-    spyOn(notifyCmux, "sendCmuxNotification").mockImplementation(
-      async (options) => {
-        notifications.push(options);
-        return true;
-      },
-    ),
-    spyOn(notifyCmux, "sendCmuxStatus").mockImplementation(
-      async ({ key, text }) => {
-        statuses.push(`${key}:${text}`);
-        return true;
-      },
-    ),
-    spyOn(notifyCmux, "clearCmuxStatus").mockImplementation(async ({ key }) => {
-      statuses.push(`${key}:clear`);
-      return true;
+    spyOn(notifyCmux, "cmuxTarget").mockReturnValue({
+      executable: "/cmux",
+      surfaceID: "client-surface",
+      env: { CMUX_WORKSPACE_ID: "client-workspace" },
     }),
-    spyOn(notifyTitle, "parseOscTitleContext").mockReturnValue(
-      osc ? ({ baseTitle: "Workcell", mayWriteOscTitle: true } as any) : null,
-    ),
-    spyOn(notifyTitle, "writeOscTitleBestEffort").mockImplementation(
-      (title) => {
-        titles.push(title);
+    spyOn(notifyCmux, "writeCmuxStatus").mockImplementation(
+      async (target, key, text) => {
+        writes.push({ key, text, workspace: target.env.CMUX_WORKSPACE_ID });
+        return transport(key, text);
       },
     ),
+    spyOn(Date, "now").mockImplementation(() => now),
     spyOn(globalThis, "setInterval").mockImplementation(((
       callback: () => void,
     ) => {
@@ -132,226 +284,273 @@ async function notificationHarness(osc = false) {
       timers.delete(id);
     }) as any),
   ];
-  const hooks = await NotifyPlugin({
-    client: { session: { get: ({ path }: any) => lookup(path.id) } },
-  } as any);
+  const context = {
+    renderer: new Proxy({}, { get: forbidden }),
+    attention: { notify: forbidden },
+    get config() {
+      return forbidden();
+    },
+    ui: {
+      router: { current: () => route },
+      tabs: { list: () => tabs },
+      get config() {
+        return forbidden();
+      },
+    },
+    data: {
+      on(type: string, callback: (event: any) => void) {
+        const listeners = handlers.get(type) ?? new Set();
+        listeners.add(callback);
+        handlers.set(type, listeners);
+        return () => {
+          listeners.delete(callback);
+        };
+      },
+      session: {
+        get: (id: string) => sessions.get(id),
+        root,
+        status: (id: string) => (running.has(id) ? "running" : "idle"),
+        sync: (id: string) => sync(id),
+        invalidate: (id: string) => invalidated.push(id),
+        permission: {
+          list: (id: string) => permissions.get(id) ?? [],
+          sync: async () => {},
+          invalidate: (id: string) => invalidated.push(id),
+        },
+        form: {
+          list: (id: string) => forms.get(id) ?? [],
+          sync: async () => {},
+          invalidate: (id: string) => invalidated.push(id),
+        },
+      },
+    },
+  };
+  const cleanup = await NotifyPlugin.setup(context as any);
+  await flush();
   return {
-    notifications,
-    statuses,
-    titles,
+    sessions,
+    running,
+    permissions,
+    forms,
+    writes,
     timers,
-    lookup(fn: typeof lookup) {
-      lookup = fn;
+    handlers,
+    invalidated,
+    flush,
+    setTransport(fn: typeof transport) {
+      transport = fn;
     },
-    event(type: string, properties: any) {
-      return hooks.event!({ event: { type, properties } } as any);
+    setSync(fn: typeof sync) {
+      sync = fn;
     },
-    question(sessionID: string, callID = "call") {
-      return hooks["tool.execute.before"]!(
-        { tool: "question", sessionID, callID },
-        { args: {} },
-      );
+    select(id?: string, activeTab?: string) {
+      route = id ? { type: "session", sessionID: id } : { type: "home" };
+      tabs = activeTab ? [{ sessionID: activeTab, active: true }] : [];
     },
-    restore() {
-      for (const spy of spies.reverse()) spy.mockRestore();
+    async event(type: string, data: any = {}) {
+      for (const listener of handlers.get(type) ?? []) listener({ type, data });
+      await flush();
+    },
+    async tick(ms = 500) {
+      now += ms;
+      for (const callback of timers.values()) callback();
+      await flush();
+    },
+    async dispose() {
+      if (cleanup) await cleanup();
+    },
+    async restore() {
+      try {
+        if (cleanup) await cleanup();
+      } finally {
+        for (const spy of spies.reverse()) spy.mockRestore();
+      }
     },
   };
 }
 
-describe("notification source ownership", () => {
-  test("only current debug/plan/build roots notify, across every source event and question hook", async () => {
-    for (const osc of [false, true]) {
-      const h = await notificationHarness(osc);
-      try {
-        const sources = [
-          ...["debug", "plan", "build"].map((agent) => ({
-            agent,
-            allowed: true,
-          })),
-          ...["coder", "general", "custom", "Build", "", undefined].map(
-            (agent) => ({ agent, allowed: false }),
-          ),
-          { agent: "build", parentID: "root", allowed: false },
-          { agent: "debug", parentID: "root", allowed: false },
-          { agent: "plan", parentID: "root", allowed: false },
-        ];
-        for (const [index, source] of sources.entries()) {
-          const sessionID = `source-${index}`;
-          h.lookup(async (id) => ({ data: { id, title: "Task", ...source } }));
-          const before = h.notifications.length;
-          const statusBefore = h.statuses.length;
-          const titleBefore = h.titles.length;
-          await h.event("session.status", {
-            sessionID,
-            status: { type: "busy" },
-          });
-          expect(h.timers.size).toBe(source.allowed ? 1 : 0);
-          await h.event("session.status", {
-            sessionID,
-            status: { type: "idle" },
-          });
-          await h.event("session.idle", { sessionID }); // same ready notification
-          await h.event("session.error", { sessionID, error: "failure" });
-          await h.event("permission.asked", {
-            sessionID,
-            id: `${sessionID}-permission`,
-          });
-          await h.event("permission.updated", {
-            sessionID,
-            id: `${sessionID}-permission`,
-          });
-          await h.question(sessionID);
-          await h.event("question.asked", {
-            sessionID,
-            id: "question",
-            tool: { callID: "call" },
-          });
-          expect(h.notifications.length - before).toBe(source.allowed ? 4 : 0);
-          expect(h.timers.size).toBe(0);
-          if (!source.allowed) {
-            expect(h.statuses.length).toBe(statusBefore);
-            expect(h.titles.length).toBe(titleBefore);
-          }
-        }
-      } finally {
-        h.restore();
-      }
-    }
-  });
-
-  test("unknown sources fail closed, recover without cached denial, and revoke only their own animation", async () => {
-    for (const osc of [false, true]) {
-      const h = await notificationHarness(osc);
-      try {
-        for (const result of [
-          undefined,
-          {},
-          { error: "missing" },
-          { data: { id: "wrong", agent: "build" } },
-          { data: { id: "root" } },
-        ]) {
-          h.lookup(async () => result);
-          for (const type of [
-            "session.idle",
-            "session.error",
-            "permission.asked",
-            "permission.updated",
-            "question.asked",
-            "session.status",
-          ]) {
-            await h.event(type, {
-              sessionID: "root",
-              status: { type: "busy" },
-            });
-            await h.event(type, {});
-          }
-          await h.question("root");
-          await h.question("");
-        }
-        h.lookup(async () => {
-          throw new Error("unavailable");
-        });
-        await h.question("root");
-        expect([
-          h.notifications.length,
-          h.statuses.length,
-          h.titles.length,
-          h.timers.size,
-        ]).toEqual([0, 0, 0, 0]);
-        h.lookup(async (id) => ({
-          data: {
-            id,
-            title: "Task",
-            agent: "build",
-            ...(id === "child" ? { parentID: "root" } : {}),
+describe("client-local cmux status", () => {
+  test("mounts from native state and follows running, waiting, error and idle without owning native UI", async () => {
+    expect(
+      NotifyServer.setup(
+        new Proxy({} as any, {
+          get() {
+            throw new Error("Server entry must have no effects");
           },
-        }));
-        await h.event("session.status", {
-          sessionID: "root",
-          status: { type: "busy" },
-        });
-        expect(h.timers.size).toBe(1);
-        const outputs = [h.statuses.length, h.titles.length];
-        await h.event("session.deleted", { info: { id: "child" } });
-        await h.question("child");
-        expect([h.statuses.length, h.titles.length]).toEqual(outputs);
-        expect(h.timers.size).toBe(1);
-        h.lookup(async (id) => ({
-          data: { id, title: "Task", agent: "coder" },
-        }));
-        await h.event("session.updated", { info: { id: "root" } });
-        expect(h.timers.size).toBe(0);
-        await h.question("root");
-        expect(h.notifications).toHaveLength(0);
-        h.lookup(async (id) => ({
-          data: { id, title: "Task", agent: "plan" },
-        }));
-        await h.question("root");
-        expect(h.notifications).toHaveLength(1);
-        await h.event("session.status", {
-          sessionID: "root",
-          status: { type: "busy" },
-        });
-        h.lookup(async () => {
-          throw new Error("lookup failed after authorization");
-        });
-        await h.event("session.updated", { info: { id: "root" } });
-        expect(h.timers.size).toBe(0);
-        h.lookup(async (id) => ({
-          data: { id, title: "Task", agent: "debug" },
-        }));
-        await h.event("session.status", {
-          sessionID: "root",
-          status: { type: "busy" },
-        });
-        expect(h.timers.size).toBe(1);
-        await h.event("session.deleted", { info: { id: "root" } });
-        expect(h.timers.size).toBe(0);
-        expect(osc ? h.titles.at(-1) : h.statuses.at(-1)).toBe(
-          osc ? "Workcell" : "opencode.session.root:clear",
-        );
-      } finally {
-        h.restore();
+        }),
+      ),
+    ).toBeUndefined();
+    const h = await notificationHarness();
+    const key = "opencode.session.root.client-surface";
+    try {
+      expect(h.writes).toEqual([
+        { key, text: undefined, workspace: "client-workspace" },
+      ]);
+      for (const agent of ["debug", "plan", "build"]) {
+        h.sessions.get("root")!.agent = agent;
+        h.running.add("root");
+        await h.event("session.execution.started");
+        expect(h.writes.at(-1)?.text).toBe("Running");
+        h.permissions.set("root", [{}]);
+        await h.event("permission.asked");
+        expect(h.writes.at(-1)?.text).toBe("Needs input");
+        const count = h.writes.length;
+        await h.event("permission.asked");
+        expect(h.writes).toHaveLength(count);
+        h.permissions.set("root", []);
+        await h.event("permission.replied");
+        expect(h.writes.at(-1)?.text).toBe("Running");
+        h.forms.set("root", [{}]);
+        await h.event("form.created");
+        expect(h.writes.at(-1)?.text).toBe("Needs input");
+        h.forms.set("root", []);
+        h.running.delete("root");
+        h.sessions.get("root")!.outcome = "failed";
+        await h.event("session.execution.failed");
+        expect(h.writes.at(-1)?.text).toBe("Error");
+        h.sessions.get("root")!.outcome = "interrupted";
+        await h.event("session.execution.interrupted");
+        expect(h.writes.at(-1)?.text).toBeUndefined();
       }
+    } finally {
+      await h.restore();
     }
   });
 
-  test("serializes delayed source lookups so busy cannot overtake idle", async () => {
-    for (const osc of [false, true]) {
-      const h = await notificationHarness(osc);
-      try {
-        let resolveBusy!: (value: any) => void;
-        const delayed = new Promise((resolve) => {
-          resolveBusy = resolve;
-        });
-        let calls = 0;
-        h.lookup(async (id) =>
-          ++calls === 1
-            ? delayed
-            : { data: { id, title: "Task", agent: "debug" } },
-        );
-        const busy = h.event("session.status", {
-          sessionID: "root",
-          status: { type: "busy" },
-        });
-        const idle = h.event("session.status", {
-          sessionID: "root",
-          status: { type: "idle" },
-        });
-        await Promise.resolve();
-        await Promise.resolve();
-        expect(calls).toBe(1);
-        resolveBusy({ data: { id: "root", title: "Task", agent: "debug" } });
-        await Promise.all([busy, idle]);
-        expect(calls).toBe(2);
-        expect(h.notifications).toHaveLength(1);
-        expect(h.timers.size).toBe(0);
-        expect(osc ? h.titles.at(-1) : h.statuses.at(-1)).toBe(
-          osc ? "Workcell" : "opencode.session.root:clear",
-        );
-      } finally {
-        h.restore();
+  test("resolves child navigation to a known eligible root without promoting child-only activity", async () => {
+    const h = await notificationHarness({});
+    try {
+      expect(h.writes).toEqual([]);
+      for (const session of [
+        { id: "wrong", agent: "build" },
+        { id: "root" },
+        { id: "root", agent: "coder" },
+      ]) {
+        h.sessions.set("root", session);
+        await h.event("session.agent.selected");
+        expect(h.writes).toEqual([]);
       }
+      h.sessions.set("root", { id: "root", agent: "plan" });
+      h.sessions.set("child", {
+        id: "child",
+        parentID: "root",
+        agent: "build",
+      });
+      h.select("child");
+      await h.tick();
+      expect(h.writes.at(-1)?.key).toBe("opencode.session.root.client-surface");
+      const count = h.writes.length;
+      h.running.add("child");
+      h.permissions.set("child", [{}]);
+      await h.event("permission.asked", { sessionID: "child" });
+      expect(h.writes).toHaveLength(count);
+      h.running.add("root");
+      await h.event("session.execution.started", { sessionID: "root" });
+      expect(h.writes.at(-1)?.text).toBe("Running");
+      h.sessions.delete("root");
+      await h.event("session.deleted", { sessionID: "root" });
+      expect(h.writes.at(-1)?.text).toBeUndefined();
+      h.sessions.set("root", { id: "root", agent: "debug" });
+      await h.event("session.created");
+      expect(h.writes.at(-1)?.text).toBe("Running");
+      h.sessions.get("root")!.agent = "custom";
+      await h.event("session.agent.selected");
+      expect(h.writes.at(-1)?.text).toBeUndefined();
+    } finally {
+      await h.restore();
+    }
+  });
+
+  test("serializes late writes across active tabs and clears only this terminal's status on disposal", async () => {
+    const h = await notificationHarness({
+      root: { id: "root", agent: "build" },
+      other: { id: "other", agent: "plan" },
+    });
+    try {
+      let finish!: (value: boolean) => void;
+      h.setTransport(async (_key, text) =>
+        text === "Running"
+          ? new Promise((resolve) => {
+              finish = resolve;
+            })
+          : true,
+      );
+      h.running.add("root");
+      await h.event("session.execution.started");
+      h.running.add("other");
+      h.select("child-not-loaded", "other");
+      await h.tick();
+      h.setTransport(async () => true);
+      finish(true);
+      await h.flush();
+      expect(h.writes.slice(-3)).toEqual([
+        {
+          key: "opencode.session.root.client-surface",
+          text: "Running",
+          workspace: "client-workspace",
+        },
+        {
+          key: "opencode.session.root.client-surface",
+          text: undefined,
+          workspace: "client-workspace",
+        },
+        {
+          key: "opencode.session.other.client-surface",
+          text: "Running",
+          workspace: "client-workspace",
+        },
+      ]);
+      await h.dispose();
+      expect(h.writes.at(-1)?.key).toBe(
+        "opencode.session.other.client-surface",
+      );
+      expect(h.writes.at(-1)?.text).toBeUndefined();
+      const count = h.writes.length;
+      await h.event("session.execution.started");
+      await h.tick();
+      expect(h.writes).toHaveLength(count);
+      expect(h.timers.size).toBe(0);
+      expect([...h.handlers.values()].every((set) => set.size === 0)).toBe(
+        true,
+      );
+    } finally {
+      await h.restore();
+    }
+  });
+
+  test("retries cmux failure and resynchronizes after reconnect without replaying stale hydration", async () => {
+    const h = await notificationHarness();
+    try {
+      h.setTransport(async () => false);
+      h.running.add("root");
+      await h.event("session.execution.started");
+      const failed = h.writes.length;
+      h.setTransport(async () => true);
+      await h.tick(1000);
+      expect(h.writes.length).toBeGreaterThan(failed);
+      expect(h.writes.at(-1)?.text).toBe("Running");
+      let finish!: () => void;
+      h.setSync(
+        async () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      await h.event("server.connected");
+      expect(h.invalidated).toEqual(["root", "root", "root"]);
+      expect(h.writes.at(-1)?.text).toBeUndefined();
+      h.select();
+      await h.tick();
+      finish();
+      await h.flush();
+      expect(h.writes.at(-1)?.text).toBeUndefined();
+      h.setSync(async () => {});
+      h.select("root");
+      h.permissions.set("root", [{}]);
+      await h.tick();
+      expect(h.writes.at(-1)?.text).toBe("Needs input");
+    } finally {
+      await h.restore();
     }
   });
 });
@@ -382,10 +581,17 @@ const releaseWorkflow = await readFile(
   "utf8",
 );
 
-function sha256(value: string | undefined): string | null {
-  return value === undefined
-    ? null
-    : createHash("sha256").update(value).digest("hex");
+// Inspect ordered native rules without hashing their representation.
+function policy(agent: string): Record<string, any> {
+  const grouped: Record<string, Record<string, string>> = {};
+  for (const rule of profileConfig.agents[agent].permissions)
+    (grouped[rule.action] ??= {})[rule.resource] = rule.effect;
+  return Object.fromEntries(
+    Object.entries(grouped).map(([action, rules]) => [
+      action,
+      Object.keys(rules).length === 1 && "*" in rules ? rules["*"] : rules,
+    ]),
+  );
 }
 
 const bareSemVerPattern =
@@ -692,7 +898,7 @@ describe("dependency and inventory policy helpers", () => {
 describe("self-contained Workcell registry", () => {
   test("declares the reviewed graph and release identity", () => {
     expect(registry.version).toBe(packageManifest.version);
-    expect(registry.opencode).toBe("1.18.25");
+    expect(registry.opencode).toBe("2.0.12");
     expect(registry.ocx).toBe("2.0.14");
     expect(registry.components.map((component: any) => component.name)).toEqual(
       [...expectedComponents],
@@ -765,14 +971,19 @@ describe("self-contained Workcell registry", () => {
     }
 
     const expectedRuntimeDependencies: Record<string, string[]> = {
-      "workcell-background-agents": [
-        "@opencode-ai/plugin@1.18.25",
-        "unique-names-generator@4.7.1",
+      "workcell-primitives": [
+        "@opencode/client@2.0.12",
+        "@opencode/plugin@2.0.12",
       ],
-      "workcell-workspace-plugin": ["@opencode-ai/plugin@1.18.25", "zod@4.3.5"],
-      "workcell-notify": ["node-notifier@10.0.1", "detect-terminal@2.0.0"],
+      "workcell-background-agents": [
+        "@opencode/plugin@2.0.12",
+        "unique-names-generator@4.7.1",
+        "zod@4.3.5",
+      ],
+      "workcell-workspace-plugin": ["@opencode/plugin@2.0.12", "zod@4.3.5"],
+      "workcell-notify": ["@opencode/plugin@2.0.12"],
       "workcell-worktree": [
-        "@opencode-ai/plugin@1.18.25",
+        "@opencode/plugin@2.0.12",
         "zod@4.3.5",
         "jsonc-parser@3.3.1",
       ],
@@ -788,13 +999,15 @@ describe("self-contained Workcell registry", () => {
     const pluginOwners = registry.components
       .filter((candidate: any) =>
         candidate.npmDependencies?.some((pin: string) =>
-          pin.startsWith("@opencode-ai/plugin@"),
+          pin.startsWith("@opencode/plugin@"),
         ),
       )
       .map((candidate: any) => candidate.name);
     expect(pluginOwners).toEqual([
+      "workcell-primitives",
       "workcell-background-agents",
       "workcell-workspace-plugin",
+      "workcell-notify",
       "workcell-worktree",
     ]);
     expect(
@@ -806,16 +1019,45 @@ describe("self-contained Workcell registry", () => {
     ).toBe(false);
   });
 
+  test("packages one dual-entry cmux plugin without legacy title or alert owners", async () => {
+    const component = registry.components.find(
+      (item: any) => item.name === "workcell-notify",
+    );
+    expect(component.dependencies).toEqual(["workcell-primitives"]);
+    expect(component.files).toEqual(
+      ["server", "tui", "cmux", "status"].map((name) => ({
+        path: `plugins/notify/${name}.ts`,
+        target: `plugins/notify/${name}.ts`,
+      })),
+    );
+    for (const file of ["notify.ts", "notify/backend.ts", "notify/title.ts"]) {
+      await expect(
+        lstat(join(repositoryRoot, "files/plugins", file)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    for (const file of component.files) {
+      const source = await readFile(
+        join(repositoryRoot, "files", file.path),
+        "utf8",
+      );
+      expect(source).not.toMatch(
+        /node-notifier|detect-terminal|OCX_TITLE_CONTEXT|process\.stdout|attention\.notify|terminal\.title|OPENCODE_CLI_CONFIG/,
+      );
+    }
+  });
+
   test("publishes the canonical profile configuration with all identities and nested options", () => {
     expect(profileConfig).toMatchObject({
       model: "openai/gpt-6-astra",
-      small_model: "openai/gpt-5.6-luna",
       default_agent: "plan",
-      subagent_depth: 1,
+      experimental: { subagent_depth: 1 },
       lsp: true,
       formatter: true,
       instructions: ["./tools/philosophy.md"],
-      permission: { "*": "deny" },
+      permissions: [
+        { action: "*", resource: "*", effect: "deny" },
+        ...profileConfig.permissions.slice(1),
+      ],
     });
     const expectedAgents = [
       "review",
@@ -832,159 +1074,39 @@ describe("self-contained Workcell registry", () => {
       "committer",
       "metadata",
     ];
-    expect(Object.keys(profileConfig.agent)).toEqual(expectedAgents);
-    const expectedAgentMatrix = {
-      review: {
-        mode: "primary",
-        model: "openai/gpt-6-astra",
-        temperature: null,
-        options: { reasoningEffort: "high", textVerbosity: "low" },
-        promptHash: null,
-        permissionHash:
-          "b33dc767abe0f67cdb50faddf81897ed3846b69985ce5add90bb6f502d18f227",
-      },
-      plan: {
-        mode: "primary",
-        model: "openai/gpt-6-astra",
-        temperature: 0.3,
-        options: { reasoningEffort: "high", textVerbosity: "medium" },
-        promptHash:
-          "6fe0fa1880f2cfbb152e1a9e738ef6a8ec17ac22dcd0a8177ca6434f87e4b822",
-        permissionHash:
-          "bc53c01ad86c2e583b99c2d05bc394a040f6dfe872d29f0f7ce6cb19c80debcc",
-      },
-      build: {
-        mode: "primary",
-        model: "openai/gpt-6-astra",
-        temperature: 0.3,
-        options: { reasoningEffort: "high", textVerbosity: "low" },
-        promptHash:
-          "7cb140543fe0b4fadc0f49e6cb26a81e963cb63b89047cde5a1a57e6f6a9b294",
-        permissionHash:
-          "19ddc5059cef457c9faa48e97fe5f3622d643b9ab907b7fc4e47073acb3b63e6",
-      },
-      debug: {
-        mode: "primary",
-        model: "openai/gpt-6-astra",
-        temperature: 0.3,
-        options: { reasoningEffort: "high", textVerbosity: "medium" },
-        promptHash:
-          "85a4b4ac61e743cf16333ce2336df0e68967d3d76c8ba73f732373ac46297c58",
-        permissionHash:
-          "46edd6bf8c60998ec117c79397526219259b0d6395b1fe79f264d2e3bf30e22e",
-      },
-      coder: {
-        mode: "subagent",
-        model: "openai/gpt-6-astra",
-        temperature: 0.1,
-        options: { reasoningEffort: "medium", textVerbosity: "low" },
-        promptHash: null,
-        permissionHash:
-          "abc3ce922ce5e97b55b3476416fc22ee071fb67e02551fcbd70d2088488e1a9f",
-      },
-      debugger: {
-        mode: "subagent",
-        model: "openai/gpt-6-astra",
-        temperature: 0.1,
-        options: { reasoningEffort: "high", textVerbosity: "low" },
-        promptHash: null,
-        permissionHash:
-          "248d264ccca16e6ae459f95c64dde146315d52c03d3023a1ea71452280e2b8aa",
-      },
-      tester: {
-        mode: "subagent",
-        model: "openai/gpt-5.6-luna",
-        temperature: null,
-        options: { reasoningEffort: "low", textVerbosity: "low" },
-        promptHash: null,
-        permissionHash:
-          "b39b80d0763ea577f773c5b54e0f7e98a2ce3456ddee06c195c84cb7f61ca097",
-      },
-      explore: {
-        mode: "subagent",
-        model: "openai/gpt-5.6-luna",
-        temperature: 0.2,
-        options: { reasoningEffort: "medium", textVerbosity: "medium" },
-        promptHash: null,
-        permissionHash:
-          "633709901baf9320c903cd281fd313bde63c88affc0b0104e7be39983bb7eb3d",
-      },
-      researcher: {
-        mode: "subagent",
-        model: "openai/gpt-5.6-terra",
-        temperature: 0.2,
-        options: { reasoningEffort: "medium", textVerbosity: "medium" },
-        promptHash: null,
-        permissionHash:
-          "3195e419c7762ef3fc39342752d883715894a608c5a167081a73c65cb445000c",
-      },
-      scribe: {
-        mode: "subagent",
-        model: "openai/gpt-5.6-luna",
-        temperature: 0.1,
-        options: { reasoningEffort: "medium", textVerbosity: "low" },
-        promptHash: null,
-        permissionHash:
-          "9733bac4d4ea7387f6287099b3f3911126aa9b5a1cf789ceeab5104267c2e810",
-      },
-      reviewer: {
-        mode: "subagent",
-        model: "openai/gpt-6-astra",
-        temperature: 0.1,
-        options: { reasoningEffort: "high", textVerbosity: "low" },
-        promptHash: null,
-        permissionHash:
-          "ee42d47207e739816b38e207d81ed3a8221fbe84f625023dea98bfcb00c4c6d3",
-      },
-      committer: {
-        mode: "subagent",
-        model: "openai/gpt-6-astra",
-        temperature: 0.1,
-        options: { reasoningEffort: "low", textVerbosity: "low" },
-        promptHash: null,
-        permissionHash:
-          "0a48c259d61f42b3f751fa9f81714bda53f16349c824b0082292853b88c2641c",
-      },
-      metadata: {
-        mode: "subagent",
-        model: "openai/gpt-5.6-luna",
-        temperature: 0,
-        options: { reasoningEffort: "low", textVerbosity: "low" },
-        promptHash: null,
-        permissionHash:
-          "38ea7f7fdf711cfa8d93ae20c92debe3909f28d6f6b4f3a82538af9f3c1c3b71",
-      },
-    };
-    const actualAgentMatrix = Object.fromEntries(
-      expectedAgents.map((name) => {
-        const agent = profileConfig.agent[name];
-        return [
-          name,
-          {
-            mode: agent.mode,
-            model: agent.model,
-            temperature: agent.temperature ?? null,
-            options: agent.options,
-            promptHash: sha256(agent.prompt),
-            permissionHash: sha256(JSON.stringify(agent.permission)),
-          },
-        ];
-      }),
-    );
-    expect(actualAgentMatrix).toEqual(expectedAgentMatrix);
-    expect(sha256(JSON.stringify(profileConfig.permission))).toBe(
-      "2810572f3bc9f4d8a8cb4cd62edb96a217aca74377bceadfa94c091d86828370",
-    );
+    expect(Object.keys(profileConfig.agents)).toEqual(expectedAgents);
+    expect(profileConfig.small_model).toBeUndefined();
+    expect(profileConfig.agent).toBeUndefined();
+    expect(profileConfig.permission).toBeUndefined();
+    expect(profileConfig.plugin).toBeUndefined();
+    for (const [
+      name,
+      [mode, model, temperature, reasoningEffort, textVerbosity],
+    ] of Object.entries(profileAgents)) {
+      const agent = profileConfig.agents[name];
+      expect(agent.mode).toBe(mode);
+      expect(agent.model).toBe(`openai/${model}`);
+      expect(agent.request.body).toEqual({
+        ...(temperature === undefined ? {} : { temperature }),
+        reasoningEffort,
+        textVerbosity,
+      });
+      for (const legacy of ["prompt", "permission", "options", "temperature"])
+        expect(agent[legacy]).toBeUndefined();
+    }
+    expect(
+      profileConfig.permissions.every((rule: any) => rule.effect === "deny"),
+    ).toBe(true);
     for (const name of expectedAgents) {
-      expect(profileConfig.agent[name].reasoningEffort).toBeUndefined();
-      expect(profileConfig.agent[name].textVerbosity).toBeUndefined();
+      expect(profileConfig.agents[name].reasoningEffort).toBeUndefined();
+      expect(profileConfig.agents[name].textVerbosity).toBeUndefined();
     }
     expect({
-      planSkill: profileConfig.agent.plan.permission.skill,
-      planTodoWrite: profileConfig.agent.plan.permission.todowrite,
-      buildSkill: profileConfig.agent.build.permission.skill,
-      buildTodoRead: profileConfig.agent.build.permission.todoread,
-      reviewerSkill: profileConfig.agent.reviewer.permission.skill,
+      planSkill: policy("plan").skill,
+      planTodoWrite: policy("plan").todowrite,
+      buildSkill: policy("build").skill,
+      buildTodoRead: policy("build").todoread,
+      reviewerSkill: policy("reviewer").skill,
     }).toEqual({
       planSkill: "allow",
       planTodoWrite: "allow",
@@ -993,9 +1115,7 @@ describe("self-contained Workcell registry", () => {
       reviewerSkill: "allow",
     });
     // Ordering is part of the permission contract: the last matching rule wins.
-    expect(
-      Object.entries(profileConfig.agent.reviewer.permission.bash),
-    ).toEqual([
+    expect(Object.entries(policy("reviewer").shell)).toEqual([
       ["*", "deny"],
       ["git -C * status*", "allow"],
       ["git -C * diff *", "allow"],
@@ -1014,19 +1134,18 @@ describe("self-contained Workcell registry", () => {
       ["gh pr * --watch*", "deny"],
       ["gh pr * --allow-escape-sequences*", "deny"],
     ]);
-    expect(profileConfig.agent.reviewer.permission).toMatchObject({
+    expect(policy("reviewer")).toMatchObject({
       edit: "deny",
-      write: "deny",
+      delegation_read: "allow",
+      delegation_list: "allow",
       external_directory: {
         "*": "deny",
-        "~/.local/share/workcell/review-workspaces/**": "allow",
+        "~/.local/share/workcell/review-workspaces-v2/**": "allow",
       },
-      task: "deny",
+      subagent: "deny",
       delegate: "deny",
     });
-    expect(
-      Object.entries(profileConfig.agent.committer.permission.bash),
-    ).toEqual([
+    expect(Object.entries(policy("committer").shell)).toEqual([
       ["*", "ask"],
       ["git status*", "allow"],
       ["git diff*", "allow"],
@@ -1059,36 +1178,33 @@ describe("self-contained Workcell registry", () => {
       ["gh pr view*", "allow"],
       ["gh pr create*", "allow"],
     ]);
-    expect(profileConfig.agent.metadata.hidden).toBe(true);
-    expect(profileConfig.mcp).toEqual({
+    expect(profileConfig.agents.metadata.hidden).toBe(true);
+    expect(profileConfig.mcp.servers).toEqual({
       context7: {
         type: "remote",
         url: "https://mcp.context7.com/mcp",
-        enabled: true,
+        disabled: false,
       },
       exa: {
         type: "remote",
         url: "https://mcp.exa.ai/mcp/oauth",
-        enabled: true,
+        disabled: false,
       },
-      gh_grep: { type: "remote", url: "https://mcp.grep.app", enabled: true },
+      gh_grep: { type: "remote", url: "https://mcp.grep.app", disabled: false },
     });
     const runtimePlugins = parseUniqueExactPackagePins(
-      profileConfig.plugin,
+      profileConfig.plugins,
       "Profile runtime plugins",
     );
     expect(runtimePlugins.map(({ name }) => name)).toEqual([
-      "opencode-vibeguard",
       "@tarquinen/opencode-dcp",
-      "@franlol/opencode-md-table-formatter",
     ]);
     expect(
       runtimePlugins.find(({ name }) => name === "@tarquinen/opencode-dcp")
         ?.version,
-    ).toBe("3.1.15");
+    ).toBe("3.2.0");
     expect(profileTuiConfig).toEqual({
       $schema: "https://opencode.ai/tui.json",
-      plugin: ["@tarquinen/opencode-dcp@3.1.15"],
     });
     expect(
       runtimePlugins.filter(({ name }) => name === "@tarquinen/opencode-dcp"),
@@ -1097,16 +1213,21 @@ describe("self-contained Workcell registry", () => {
       runtimePlugins.some(({ name }) => /notif(?:y|ier)/i.test(name)),
     ).toBe(false);
     for (const agentName of ["plan", "build", "debug"]) {
-      expect(profileConfig.agent[agentName].permission).toMatchObject({
+      expect(policy(agentName)).toMatchObject({
         delegate: "allow",
         delegation_read: "allow",
         delegation_list: "allow",
       });
     }
-    expect(profileConfig.agent.plan.permission).toMatchObject({
+    expect(policy("plan")).toMatchObject({
       plan_save: "allow",
       plan_read: "allow",
-      task: "deny",
+      subagent: {
+        "*": "deny",
+        explore: "allow",
+        researcher: "allow",
+        reviewer: "allow",
+      },
     });
     for (const agent of [
       "coder",
@@ -1118,12 +1239,12 @@ describe("self-contained Workcell registry", () => {
       "explore",
       "researcher",
     ]) {
-      expect(profileConfig.agent[agent].permission).toMatchObject({
+      expect(policy(agent)).toMatchObject({
         external_directory:
           agent === "reviewer"
             ? {
                 "*": "deny",
-                "~/.local/share/workcell/review-workspaces/**": "allow",
+                "~/.local/share/workcell/review-workspaces-v2/**": "allow",
               }
             : "deny",
         plan_read: ["explore", "researcher"].includes(agent) ? "deny" : "allow",
@@ -1139,9 +1260,9 @@ describe("self-contained Workcell registry", () => {
     const header = /^---\r?\n([\s\S]*?)\r?\n---/.exec(command)?.[1];
     // Frontmatter selects the runtime agent; this is not a prose snapshot.
     expect(header?.match(/^agent:\s*(\S+)\s*$/m)?.[1]).toBe("review");
-    expect(profileConfig.agent.review.mode).toBe("primary");
-    expect(profileConfig.agent.review.permission.review_start).toBe("allow");
-    expect(profileConfig.agent.review.permission.skill).toEqual({
+    expect(profileConfig.agents.review.mode).toBe("primary");
+    expect(policy("review").review_start).toBe("allow");
+    expect(policy("review").skill).toEqual({
       "*": "deny",
       "workcell-code-review": "allow",
       "frontend-philosophy": "allow",
@@ -1166,11 +1287,11 @@ describe("self-contained Workcell registry", () => {
 
   test("keeps debug fail-closed with native authorization and only the diagnostic skill", () => {
     expect(
-      Object.entries(profileConfig.agent)
+      Object.entries(profileConfig.agents)
         .filter(([, agent]: [string, any]) => agent.mode === "primary")
         .map(([name]) => name),
     ).toEqual(["review", "plan", "build", "debug"]);
-    const permission = profileConfig.agent.debug.permission;
+    const permission = policy("debug");
     expect(Object.entries(permission)[0]).toEqual(["*", "deny"]);
     expect(Object.entries(permission.read)).toEqual([
       ["*", "allow"],
@@ -1200,13 +1321,10 @@ describe("self-contained Workcell registry", () => {
       Object.entries(permission)
         .filter(([, action]) => action === "ask")
         .map(([name]) => name),
-    ).toEqual(["bash", "external_directory", "webfetch", "websearch"]);
+    ).toEqual(["shell", "external_directory", "webfetch", "websearch"]);
     for (const tool of [
       "edit",
-      "write",
-      "apply_patch",
       "formatter",
-      "task",
       "worktree_*",
       "plan_read",
       "plan_save",
@@ -1219,6 +1337,12 @@ describe("self-contained Workcell registry", () => {
       "kagi_*",
     ])
       expect(permission[tool], tool).toBe("deny");
+    expect(permission.subagent).toEqual({
+      "*": "deny",
+      explore: "allow",
+      researcher: "allow",
+      reviewer: "allow",
+    });
     // No shipped MCP/custom ask opt-in: exact reviewed names belong to user config.
     for (const [name, action] of Object.entries(permission))
       if (name.includes("*")) expect(action, name).toBe("deny");
@@ -1311,7 +1435,7 @@ describe("self-contained Workcell registry", () => {
         join(repositoryRoot, "files/plugins/background-agents.ts"),
         "utf8",
       )
-    ).slice(0, 1_200);
+    ).split("*/", 1)[0];
     const worktreeHeader = (
       await readFile(join(repositoryRoot, "files/plugins/worktree.ts"), "utf8")
     ).slice(0, 1_200);
@@ -1330,7 +1454,7 @@ describe("self-contained Workcell registry", () => {
       "| `files/tools/**` | `workers/kdco-registry/files/tools/**` |",
       "| `files/plugins/workspace-plugin.ts` | `workers/kdco-registry/files/plugins/workspace-plugin.ts` |",
       "| `files/plugins/background-agents.ts` | `workers/kdco-registry/files/plugins/background-agents.ts` |",
-      "| `files/plugins/notify.ts` and `files/plugins/notify/**` | `workers/kdco-registry/files/plugins/notify.ts` and `workers/kdco-registry/files/plugins/notify/**` |",
+      "| `files/plugins/notify/server.ts` and `files/plugins/notify/tui.ts` | `workers/kdco-registry/files/plugins/notify.ts` and `workers/kdco-registry/files/plugins/notify/**` |",
       "| `files/plugins/kdco-primitives/**` | `workers/kdco-registry/files/plugins/kdco-primitives/**` |",
       "| `files/plugins/worktree.ts` and `files/plugins/worktree/**` | `workers/kdco-registry/files/plugins/worktree.ts` and `workers/kdco-registry/files/plugins/worktree/**` |",
     ]) {
@@ -1405,8 +1529,72 @@ describe("self-contained Workcell registry", () => {
 });
 
 describe("high-risk deterministic plugin boundaries", () => {
+  test("lifecycle discovery requires authenticated exact-version same-process loopback identity", async () => {
+    const ctx = {
+      app: { version: "2.0.12" },
+      location: { directory: repositoryRoot },
+    } as any;
+    let endpoint: any;
+    let info = { pid: process.pid, version: "2.0.12" };
+    let connection: any;
+    let infoCalls = 0;
+    const discover = spyOn(Service, "discover").mockImplementation(
+      async () => endpoint,
+    );
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        infoCalls++;
+        connection = { headers: Object.fromEntries(request.headers) };
+        return Response.json(info);
+      },
+    });
+    try {
+      await expect(
+        currentHost({ ...ctx, app: { version: "2.0.13" } }),
+      ).rejects.toThrow("2.0.12");
+      expect(discover).not.toHaveBeenCalled();
+      for (const missingAuth of [undefined, { url: "http://127.0.0.1:1234" }]) {
+        endpoint = missingAuth;
+        await expect(currentHost(ctx)).rejects.toThrow(
+          "authenticated Workcell-configured managed",
+        );
+      }
+      endpoint = {
+        url: "https://example.invalid",
+        auth: { username: "opencode", password: "fixture-only" },
+      };
+      await expect(currentHost(ctx)).rejects.toThrow("local loopback");
+      expect(infoCalls).toBe(0);
+      endpoint.url = server.url.href;
+      info = { pid: process.pid + 1, version: "2.0.12" };
+      await expect(currentHost(ctx)).rejects.toThrow(
+        "not the current plugin host",
+      );
+      info = { pid: process.pid, version: "2.0.13" };
+      await expect(currentHost(ctx)).rejects.toThrow(
+        "not the current plugin host",
+      );
+      info = { pid: process.pid, version: "2.0.12" };
+      await currentHost(ctx);
+      expect(infoCalls).toBe(3);
+      expect(connection.headers).toMatchObject({
+        ...Service.headers(endpoint),
+        "x-opencode-directory": repositoryRoot,
+      });
+    } finally {
+      server.stop(true);
+      discover.mockRestore();
+    }
+  });
   test("parses launch context and builds profile-preserving session argv", () => {
     expect(parseActiveLaunchContext({})).toEqual({ mode: "plain" });
+    expect(buildSessionLaunchArgv("session-1", { mode: "plain" })).toEqual([
+      "opencode2",
+      "--session",
+      "session-1",
+    ]);
     expect(() => parseActiveLaunchContext({ OCX_CONTEXT: "1" })).toThrow(
       "OCX_BIN",
     );
@@ -1431,24 +1619,62 @@ describe("high-risk deterministic plugin boundaries", () => {
     );
   });
 
-  test("maps stable notification states and strips title control characters", () => {
+  test("cmux transport requires client identity and never sends desktop or title commands", async () => {
     expect(
-      buildCmuxSessionStatusTransitionForEvent("session.status", {
-        sessionID: " s1 ",
-        status: { type: "BUSY" },
-      }),
-    ).toEqual({ sessionID: "s1", logicalState: "animated-busy" });
+      notifyCmux.cmuxTarget(
+        { CMUX_SOCKET_PATH: "/socket", CMUX_SOCKET_MODE: "allowAll" },
+        () => "/cmux",
+      ),
+    ).toBeUndefined();
     expect(
-      buildCmuxSessionStatusTransitionForEvent("permission.asked", {
-        sessionID: "s1",
-      }),
-    ).toEqual({ sessionID: "s1", logicalState: "needs-input" });
+      notifyCmux.cmuxTarget({ CMUX_WORKSPACE_ID: "w" }, () => "/cmux"),
+    ).toBeUndefined();
     expect(
-      buildCmuxSessionStatusTransitionForEvent("unknown", { sessionID: "s1" }),
-    ).toBeNull();
-    expect(sanitizeOscTitleText(" Workcell\u0007 ready ")).toBe(
-      "Workcell  ready",
-    );
+      notifyCmux.cmuxTarget(
+        { CMUX_WORKSPACE_ID: "w", CMUX_SURFACE_ID: "s" },
+        () => null,
+      ),
+    ).toBeUndefined();
+    const env = {
+      CMUX_WORKSPACE_ID: " workspace-a ",
+      CMUX_SURFACE_ID: "surface-a",
+    };
+    const a = notifyCmux.cmuxTarget(env, () => "/cmux")!;
+    env.CMUX_WORKSPACE_ID = "workspace-b";
+    env.CMUX_SURFACE_ID = "surface-b";
+    const b = notifyCmux.cmuxTarget(env, () => "/cmux")!;
+    const commands: any[] = [];
+    const spawn = spyOn(Bun, "spawn").mockImplementation(((
+      argv: string[],
+      options: any,
+    ) => {
+      commands.push({ argv, env: options.env });
+      return { exited: Promise.resolve(0) };
+    }) as any);
+    try {
+      expect(await notifyCmux.writeCmuxStatus(a, "key-a", "Running")).toBe(
+        true,
+      );
+      expect(await notifyCmux.writeCmuxStatus(b, "key-b")).toBe(true);
+      expect(commands).toEqual([
+        {
+          argv: ["/cmux", "set-status", "key-a", "Running"],
+          env: {
+            CMUX_WORKSPACE_ID: "workspace-a",
+            CMUX_SURFACE_ID: "surface-a",
+          },
+        },
+        {
+          argv: ["/cmux", "clear-status", "key-b"],
+          env: {
+            CMUX_WORKSPACE_ID: "workspace-b",
+            CMUX_SURFACE_ID: "surface-b",
+          },
+        },
+      ]);
+    } finally {
+      spawn.mockRestore();
+    }
   });
 
   test("isolates persisted delegation artifacts to valid direct-child IDs", async () => {
@@ -1461,8 +1687,8 @@ describe("high-risk deterministic plugin boundaries", () => {
     const client = {
       app: { log: async () => ({}) },
       session: {
-        get: async ({ path }: { path: { id: string } }) => ({
-          data: { id: path.id },
+        get: async ({ sessionID }: { sessionID: string }) => ({
+          id: sessionID,
         }),
       },
     } as any;
@@ -1537,7 +1763,7 @@ describe("high-risk deterministic plugin boundaries", () => {
         const baseDirectory = await mkdtemp(
           join(tmpdir(), "workcell-metadata-"),
         );
-        const requests: Array<{ path: { id: string }; body: any }> = [];
+        const requests: any[] = [];
         const created: any[] = [];
         const deleted: string[] = [];
         const logs: string[] = [];
@@ -1548,49 +1774,55 @@ describe("high-risk deterministic plugin boundaries", () => {
           releaseGenerator = resolve;
         });
         const client = {
-          app: {
-            agents: async () => {
+          agent: {
+            list: async () => {
               discoveryCalls += 1;
               return {
                 data: [
-                  { name: scenario.agent, mode: "subagent" },
+                  { id: scenario.agent, mode: "subagent" },
                   ...(scenario.mode === "missing-agent"
                     ? []
-                    : [{ name: "metadata", mode: "subagent" }]),
+                    : [{ id: "metadata", mode: "subagent" }]),
                 ],
               };
             },
             log: async () => ({}),
           },
           session: {
-            get: async ({ path }: { path: { id: string } }) => ({
-              data: { id: path.id },
+            get: async ({ sessionID }: { sessionID: string }) => ({
+              id: sessionID,
+              parentID: sessionID === "child" ? "root" : undefined,
+              outcome: "succeeded",
             }),
-            create: async ({ body }: { body: any }) => {
+            create: async (body: any) => {
               created.push(body);
-              return {
-                data: { id: created.length === 1 ? "child" : "metadata-child" },
-              };
+              return { id: "metadata-child" };
             },
-            delete: async ({ path }: { path: { id: string } }) => {
-              deleted.push(path.id);
+            remove: async ({ sessionID }: { sessionID: string }) => {
+              deleted.push(sessionID);
               return {};
             },
-            prompt: async (request: { path: { id: string }; body: any }) => {
+            wait: async () => {},
+            generate: async (request: any) => {
               requests.push(request);
-              if (
-                request.body.agent === "metadata" &&
-                scenario.mode === "model-error"
-              )
+              if (scenario.mode === "model-error")
                 throw new Error("model unavailable");
               const text =
-                request.path.id === "child"
-                  ? result
-                  : scenario.mode === "invalid-response"
-                    ? "not JSON"
-                    : JSON.stringify(generated);
-              return { data: { parts: [{ type: "text", text }] } };
+                scenario.mode === "invalid-response"
+                  ? "not JSON"
+                  : JSON.stringify(generated);
+              return { text };
             },
+          },
+          message: {
+            list: async () => ({
+              data: [
+                {
+                  type: "assistant",
+                  content: [{ type: "text", text: result }],
+                },
+              ],
+            }),
           },
         };
         const injected = scenario.mode.startsWith("injected-");
@@ -1605,7 +1837,17 @@ describe("high-risk deterministic plugin boundaries", () => {
           } as any,
           {
             idGenerator: () => "calm-blue-otter",
-            allCompleteQuietPeriodMs: 1,
+            nativeSubagent: {
+              input: { make: (value: unknown) => value },
+              execute: async (args: any, context: any) => {
+                created.push(args);
+                requests.push({ ...args, context });
+                return {
+                  content: "running",
+                  output: { sessionID: "child", status: "running" },
+                };
+              },
+            } as any,
             ...(injected
               ? {
                   metadataGenerator: async (...args: any[]) => {
@@ -1635,40 +1877,24 @@ describe("high-risk deterministic plugin boundaries", () => {
             parentAgent: "build",
             prompt: "Inspect the bounded repository scope.",
             agent: scenario.agent,
+            context: {
+              sessionID: "root",
+              messageID: "message",
+              agent: "build",
+              id: "fixture-call",
+              signal: new AbortController().signal,
+              progress: async () => {},
+            } as any,
           });
           const initialArtifact = await manager.readOutput("root", record.id);
           expect(record.status, scenario.mode).toBe("complete");
           expect(initialArtifact).toContain(result);
-          const childRequest = requests.find(
-            (request) => request.path.id === "child",
-          )!;
-          const denied = {
-            task: false,
-            delegate: false,
-            todowrite: false,
-            plan_save: false,
-          };
-          expect(childRequest.body.tools).toEqual(
-            scenario.agent === "reviewer"
-              ? denied
-              : {
-                  ...denied,
-                  delegation_read: false,
-                  delegation_list: false,
-                },
-          );
-          if (scenario.agent === "reviewer") {
-            for (const permission of ["allow", "deny"] as const) {
-              const configured = {
-                delegation_read: permission,
-                delegation_list: permission,
-              };
-              expect({
-                ...configured,
-                ...childRequest.body.tools,
-              }).toMatchObject(configured);
-            }
-          }
+          expect(requests[0]).toMatchObject({
+            agent: scenario.agent,
+            background: true,
+            context: { sessionID: "root", agent: "build" },
+          });
+          // Native/session permission enforcement is exercised by the real-runtime fixture.
           const fallback = generateFallbackMetadata(result, record.id);
           if (injected) {
             expect(record.title).toBe(fallback.title);
@@ -1680,8 +1906,8 @@ describe("high-risk deterministic plugin boundaries", () => {
           const expected = enriched ? generated : fallback;
           const persistedCount =
             scenario.mode === "disabled" || scenario.mode === "injected-error"
-              ? 1
-              : 2;
+              ? 2
+              : 3;
           const deadline = Date.now() + 1_000;
           while (
             Date.now() < deadline &&
@@ -1714,11 +1940,14 @@ describe("high-risk deterministic plugin boundaries", () => {
           ].includes(scenario.mode);
           expect(created).toHaveLength(usesModel ? 2 : 1);
           expect(
-            requests.filter((request) => request.body.agent === "metadata"),
+            requests.filter(
+              (request) => request.sessionID === "metadata-child",
+            ),
           ).toHaveLength(usesModel ? 1 : 0);
           expect(deleted).toEqual(usesModel ? ["metadata-child"] : []);
         } finally {
           releaseGenerator();
+          manager.dispose();
           await rm(baseDirectory, { recursive: true, force: true });
         }
       }
@@ -1737,39 +1966,49 @@ describe("high-risk deterministic plugin boundaries", () => {
     let created = 0;
     const ids = ["calm-blue-otter", "quiet-green-fox", "small-red-bird"];
     const client = {
-      app: {
-        agents: async () => ({
-          data: Object.entries(profileConfig.agent).map(([name, agent]) => ({
-            name,
+      agent: {
+        list: async () => ({
+          data: Object.entries(profileConfig.agents).map(([id, agent]) => ({
+            id,
             ...(agent as object),
           })),
         }),
         log: async () => ({}),
       },
       session: {
-        get: async ({ path }: { path: { id: string } }) => ({
-          data: { id: path.id },
+        get: async ({ sessionID }: { sessionID: string }) => ({
+          id: sessionID,
+          parentID: sessionID.startsWith("child-") ? "debug-root" : undefined,
+          outcome: "succeeded",
         }),
-        create: async () => ({ data: { id: `child-${++created}` } }),
-        messages: async () => ({ data: [] }),
-        prompt: async (request: { path: { id: string }; body: any }) => {
-          requests.push(request);
-          if (request.path.id === "child-3")
+        wait: async ({ sessionID }: { sessionID: string }) => {
+          if (sessionID === "child-3")
             throw new Error("Public source unavailable");
-          return {
-            data: {
-              parts: [
+        },
+        prompt: async (request: { sessionID: string }) => {
+          requests.push({ path: { id: request.sessionID }, body: request });
+        },
+        synthetic: async (request: { sessionID: string }) => {
+          requests.push({ path: { id: request.sessionID }, body: request });
+        },
+      },
+      message: {
+        list: async ({ sessionID }: { sessionID: string }) => ({
+          data: [
+            {
+              type: "assistant",
+              content: [
                 {
                   type: "text",
                   text:
-                    request.body.agent === "explore"
+                    sessionID === "child-1"
                       ? "Evidence: src/example.ts:12 — observed branch."
                       : "Evidence: https://example.org/docs/v1 — documented behavior.",
                 },
               ],
             },
-          };
-        },
+          ],
+        }),
       },
     };
     const manager = new BackgroundAgentsPlugin.testInternals.DelegationManager(
@@ -1778,7 +2017,20 @@ describe("high-risk deterministic plugin boundaries", () => {
       silentLog as any,
       {
         idGenerator: () => ids[created],
-        allCompleteQuietPeriodMs: 1,
+        nativeSubagent: {
+          input: { make: (value: unknown) => value },
+          execute: async (args: any, context: any) => {
+            const sessionID = `child-${++created}`;
+            requests.push({
+              path: { id: sessionID },
+              body: { ...args, context },
+            });
+            return {
+              content: "running",
+              output: { sessionID, status: "running" },
+            };
+          },
+        } as any,
       },
     );
     const delegate = (agent: string) =>
@@ -1789,6 +2041,14 @@ describe("high-risk deterministic plugin boundaries", () => {
         prompt:
           "Inspect this bounded synthetic question; return underlying evidence and stop.",
         agent,
+        context: {
+          sessionID: "debug-root",
+          messageID: "question",
+          agent: "debug",
+          id: "fixture-call",
+          signal: new AbortController().signal,
+          progress: async () => {},
+        } as any,
       });
     try {
       for (const agent of ["debug", "plan", "build", "coder", "debugger"]) {
@@ -1814,40 +2074,21 @@ describe("high-risk deterministic plugin boundaries", () => {
           ({ path }) => path.id === `child-${created}`,
         )!;
         expect(request.body.agent).toBe(agent);
-        expect(request.body.tools).toEqual({
-          task: false,
-          delegate: false,
-          delegation_read: false,
-          delegation_list: false,
-          todowrite: false,
-          plan_save: false,
+        expect(request.body.background).toBe(true);
+        expect(request.body.context).toMatchObject({
+          sessionID: "debug-root",
+          agent: "debug",
         });
         await expect(
           manager.readOutput("unrelated-root", record.id),
         ).rejects.toThrow("was not found");
       }
-      const deadline = Date.now() + 1000;
-      while (
-        Date.now() < deadline &&
-        !requests.some(
-          ({ path, body }) =>
-            path.id === "debug-root" && body.noReply === false,
-        )
-      )
-        await Bun.sleep(5);
       const notifications = requests.filter(
         ({ path }) => path.id === "debug-root",
       );
-      expect(notifications.length).toBeGreaterThanOrEqual(3);
-      expect(notifications.every(({ body }) => body.agent === "debug")).toBe(
-        true,
-      );
-      expect(
-        notifications.some(({ body }) =>
-          body.parts[0].text.includes("small-red-bird"),
-        ),
-      ).toBe(true);
+      expect(notifications).toEqual([]); // Native executor owns per-child wakeups.
     } finally {
+      manager.dispose();
       await rm(baseDirectory, { recursive: true, force: true });
     }
   });
@@ -1862,14 +2103,25 @@ describe("high-risk deterministic plugin boundaries", () => {
         directory: sandbox,
         client: { app: { log: async () => ({}) } },
       } as any;
-      const background = (await BackgroundAgentsPlugin(input)) as any;
-      const workspace = (await WorkspacePlugin(input)) as any;
+      const hooks = new Map<string, (event: any) => Promise<void>>();
+      const cleanup = await BackgroundAgentsPlugin.setup({
+        location: { directory: sandbox },
+        tool: {
+          transform: async (callback: any) => {
+            callback({ get: () => ({}), add: () => {}, update: () => {} });
+            return { dispose: async () => {} };
+          },
+          hook: async (name: string, callback: any) => {
+            hooks.set(name, callback);
+            return { dispose: async () => {} };
+          },
+        },
+        session: { hook: async () => ({ dispose: async () => {} }) },
+        event: { async *subscribe() {} },
+      } as any);
+      if (typeof cleanup === "function") pluginCleanups.push(cleanup);
+      const workspace = await workspaceHarness(input);
       const output = { system: [] as string[] };
-      await background["experimental.chat.system.transform"](
-        { agent: "debug" },
-        output,
-      );
-      expect(output.system).toEqual([]);
       await workspace["experimental.chat.system.transform"](
         { agent: "debug" },
         output,
@@ -1885,11 +2137,11 @@ describe("high-risk deterministic plugin boundaries", () => {
       ])
         expect(output.system.join("\n")).not.toContain(marker);
       await expect(
-        background["tool.execute.before"](
-          { tool: "task" },
-          { args: { subagent_type: "debug" } },
-        ),
-      ).rejects.toThrow("not configured for native task execution");
+        hooks.get("execute.before")!({
+          tool: "subagent",
+          input: { agent: "debug" },
+        }),
+      ).rejects.toThrow("not configured for native subagent execution");
     } finally {
       home.mockRestore();
       if (previousHome === undefined) delete process.env.HOME;
@@ -1904,23 +2156,28 @@ describe("high-risk deterministic plugin boundaries", () => {
     );
     let createCalls = 0;
     const client = {
-      app: {
-        agents: async () => ({ data: [{ name: "explore", mode: "subagent" }] }),
+      agent: {
+        list: async () => ({ data: [{ id: "explore", mode: "subagent" }] }),
         log: async () => ({}),
       },
       session: {
-        get: async ({ path }: { path: { id: string } }) => ({
-          data: { id: path.id },
+        get: async ({ sessionID }: { sessionID: string }) => ({
+          id: sessionID,
         }),
-        create: async () => {
-          createCalls += 1;
-          return { data: { id: "child" } };
-        },
       },
     } as any;
     const Manager = BackgroundAgentsPlugin.testInternals.DelegationManager;
     const manager = new Manager(client, baseDirectory, silentLog as any, {
       idGenerator: () => "../root-b/stolen-result",
+      nativeSubagent: {
+        input: { make: (value: unknown) => value },
+        execute: async () => {
+          createCalls++;
+          throw new Error(
+            "Invalid ID must be rejected before native child admission",
+          );
+        },
+      } as any,
     });
 
     try {
@@ -1931,6 +2188,14 @@ describe("high-risk deterministic plugin boundaries", () => {
           parentAgent: "build",
           prompt: "Inspect the repository.",
           agent: "explore",
+          context: {
+            sessionID: "root-a",
+            messageID: "message-1",
+            agent: "build",
+            id: "fixture-call",
+            signal: new AbortController().signal,
+            progress: async () => {},
+          } as any,
         }),
       ).rejects.toThrow(/Delegation ID/);
       expect(createCalls).toBe(0);
@@ -2341,8 +2606,7 @@ describe("high-risk deterministic plugin boundaries", () => {
         END;
       `);
 
-      const createPlugin = (WorktreePlugin.testInternals as any)
-        .createWorktreePlugin;
+      const createPlugin = worktreeHarness;
       const plugin = await createPlugin(
         {
           directory: projectDirectory,
@@ -2407,8 +2671,7 @@ describe("high-risk deterministic plugin boundaries", () => {
         path: aliasedWorktreePath,
       });
 
-      const createPlugin = (WorktreePlugin.testInternals as any)
-        .createWorktreePlugin;
+      const createPlugin = worktreeHarness;
       const plugin = await createPlugin(
         {
           directory: projectDirectory,
@@ -2458,8 +2721,7 @@ describe("high-risk deterministic plugin boundaries", () => {
         path: missingWorktreePath,
       });
 
-      const createPlugin = (WorktreePlugin.testInternals as any)
-        .createWorktreePlugin;
+      const createPlugin = worktreeHarness;
       const plugin = await createPlugin(
         {
           directory: projectDirectory,
@@ -2585,8 +2847,7 @@ describe("high-risk deterministic plugin boundaries", () => {
         JSON.stringify({ hooks: { postCreate: [], preDelete: ["exit 23"] } }),
       );
 
-      const createPlugin = (WorktreePlugin.testInternals as any)
-        .createWorktreePlugin;
+      const createPlugin = worktreeHarness;
       const plugin = await createPlugin(
         {
           directory: projectDirectory,
@@ -2676,8 +2937,7 @@ describe("high-risk deterministic plugin boundaries", () => {
         });
       }
 
-      const createPlugin = (WorktreePlugin.testInternals as any)
-        .createWorktreePlugin;
+      const createPlugin = worktreeHarness;
       const plugin = await createPlugin(
         {
           directory: projectDirectory,
@@ -2748,8 +3008,7 @@ describe("high-risk deterministic plugin boundaries", () => {
         path: worktreePath,
       });
 
-      const createPlugin = (WorktreePlugin.testInternals as any)
-        .createWorktreePlugin;
+      const createPlugin = worktreeHarness;
       const plugin = await createPlugin(
         {
           directory: projectDirectory,
@@ -2790,7 +3049,7 @@ describe("high-risk deterministic plugin boundaries", () => {
   });
 
   test("normalizes standalone tester statuses with balanced Markdown", async () => {
-    const hooks = (await WorkspacePlugin({
+    const hooks = (await workspaceHarness({
       directory: repositoryRoot,
       client: {},
     } as any)) as any;
@@ -2848,7 +3107,7 @@ describe("high-risk deterministic plugin boundaries", () => {
   ])(
     "requests report-only correction, not blind reruns, for %s",
     async (report) => {
-      const hooks = (await WorkspacePlugin({
+      const hooks = (await workspaceHarness({
         directory: repositoryRoot,
         client: {},
       } as any)) as any;
@@ -2880,7 +3139,7 @@ describe("high-risk deterministic plugin boundaries", () => {
   test.each(["coder", "tester"])(
     "tracks concurrent %s calls per session without claiming whole-plan completion",
     async (agent) => {
-      const hooks = (await WorkspacePlugin({
+      const hooks = (await workspaceHarness({
         directory: repositoryRoot,
         client: {},
       } as any)) as any;
@@ -2933,7 +3192,7 @@ describe("high-risk deterministic plugin boundaries", () => {
       const markdown =
         "# User-selected archive\n\nArbitrary Markdown — not a Workcell plan.\n";
       await writeFile(selected, markdown);
-      const hooks = (await WorkspacePlugin({
+      const hooks = (await workspaceHarness({
         directory: sandbox,
         client: {
           session: {
@@ -3069,7 +3328,7 @@ describe("high-risk deterministic plugin boundaries", () => {
           "plans",
           "selected.md",
         );
-        const hooks = (await WorkspacePlugin({
+        const hooks = (await workspaceHarness({
           directory: sandbox,
           client: {
             session: {
@@ -3149,7 +3408,7 @@ describe("high-risk deterministic plugin boundaries", () => {
     try {
       // An ancestry lookup would fail: explicit reads require a session, not its tree.
       const create = async () => {
-        const hooks = (await WorkspacePlugin({
+        const hooks = (await workspaceHarness({
           directory: sandbox,
           client: {},
         } as any)) as any;
@@ -3269,7 +3528,7 @@ describe("high-risk deterministic plugin boundaries", () => {
     process.env.HOME = sandbox;
 
     try {
-      const hooks = (await WorkspacePlugin({
+      const hooks = (await workspaceHarness({
         directory: sandbox,
         client: {
           session: {
@@ -3536,19 +3795,19 @@ describe("pinned automation", () => {
     const manifestDependencies = Object.assign({}, ...dependencySections);
     for (const requiredPackage of [
       "ocx",
-      "opencode-ai",
-      "@opencode-ai/plugin",
-      "@opencode-ai/sdk",
+      "@opencode/cli",
+      "@opencode/plugin",
+      "@opencode/client",
     ]) {
       expect(manifestDependencies, requiredPackage).toHaveProperty(
         requiredPackage,
       );
     }
     expect(packageManifest.devDependencies).toMatchObject({
-      "@opencode-ai/plugin": "1.18.25",
-      "@opencode-ai/sdk": "1.18.25",
+      "@opencode/plugin": "2.0.12",
+      "@opencode/client": "2.0.12",
       "@types/bun": "1.4.1",
-      "opencode-ai": "1.18.25",
+      "@opencode/cli": "2.0.12",
       ocx: "2.0.15",
     });
   });
@@ -3611,7 +3870,7 @@ describe("pinned automation", () => {
 
   test("accepts the exact installed profile contract", async () => {
     expect(receiptComponentNames).toHaveLength(26);
-    expect(Object.keys(expectedDirectNpmDependencies)).toHaveLength(6);
+    expect(Object.keys(expectedDirectNpmDependencies)).toHaveLength(5);
     await withInstalledLayout(async (root) => {
       await expect(assertInstalledLayout(root)).resolves.toBeUndefined();
     });
@@ -3976,7 +4235,7 @@ describe("pinned automation", () => {
       expect(workflow).toContain('test "$(bun --version)" = 1.4.1');
       expect(workflow).toContain("bun install --frozen-lockfile");
       expect(workflow).toContain(
-        'test "$(./node_modules/.bin/opencode --version)" = 1.18.25',
+        'test "$(./node_modules/.bin/opencode2 --version)" = "opencode v2.0.12"',
       );
       expect(workflow).toContain("bun run typecheck");
       expect(workflow).toContain("bun run build");

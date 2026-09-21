@@ -45,15 +45,18 @@ change project selection, account, credentials, or service configuration.
 
 Use an MCP tool only when its exact catalog name and capability have been
 reviewed and explicitly opted in. For example, an approved configuration may
-contain an exact placeholder such as `debug.read_catalog_item` under
-`agent.debug.permission`, mapped to `"ask"`; replace it only with a real catalog
-name after user review. Never use broad `*`, `mcp.*`, or MCP-prefix patterns,
-and do not claim that a user-configured MCP server exists automatically. The
-debug primary cannot edit its own permissions or install a server. A same-name
-custom handler can still bypass an ask unless it cooperates with `context.ask`.
-Reviewed exact-name opt-in is a configuration prerequisite, not a per-operation
-question. Native Auto approval does not enable denied tools or guarantee that
-custom handlers participate in native authorization.
+contain an exact placeholder such as the following ordered `permissions` entry:
+`{ "action": "debug.read_catalog_item", "resource": "*", "effect": "ask" }`;
+replace it only with a real catalog name after user review. Never use broad `*`,
+`mcp.*`, or MCP-prefix patterns, and do not claim that a user-configured MCP
+server exists automatically. The debug primary cannot edit its own permissions
+or install a server. Native permissions authorize native/MCP tool calls by
+exact action and resource; a same-name custom handler is not made subject to
+MCP authorization merely by matching that name, so document or enforce its own
+supported authorization behavior separately. Reviewed exact-name opt-in is a
+configuration prerequisite, not a per-operation question. Native Auto approval
+does not enable denied tools or guarantee that custom handlers participate in
+native authorization.
 
 Keep private service data out of public research prompts. Preserve source URLs,
 timestamps, filters, and failed or contradictory results in the report.

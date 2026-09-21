@@ -32,7 +32,7 @@ other remote mutations.
 The pinned CLI accepts the agent selector:
 
 ```sh
-opencode --agent debug
+opencode2 --agent debug
 ```
 
 After configuration-time or profile installation changes, quit and restart
@@ -41,14 +41,18 @@ reloaded. For the installed profile, start a fresh session with
 `ocx oc -p workcell`, then use the interactive agent selector. OCX argument
 forwarding beyond the documented CLI selector is not asserted here.
 
-Workcell notifications follow the same root-session boundary: only current
-persisted `debug`, `plan`, and `build` roots can produce desktop, sound, cmux,
-title, status, or animation output; child sessions and unknown or failed source
-lookups are silent. This also covers permission/question and tool-question
-events. The legacy `notifyChildSessions` option is deprecated and ignored. See
-the [README notification notes](../README.md#notifications) for the ownership
-contract and reload requirement. These documentation and repository checks do
-not claim live UI verification.
+OpenCode V2 owns terminal titles and desktop alerts, so Debug does not promise
+the former Workcell root-only title, spinner, desktop-alert filtering, or sound
+policy. Native alerts may follow V2's default focus and root behavior. The local
+notify component remains responsible for supported cmux status behavior through
+`files/plugins/notify/server.ts` and `files/plugins/notify/tui.ts`; the native
+loader advertises one notify server/TUI instance. cmux requires its executable
+on `CLIENT`'s `PATH`, `CMUX_WORKSPACE_ID`, and `CMUX_SURFACE_ID`, and child-only
+activity is not promoted. Do not add a custom title writer, extra desktop
+notifier, global `cli.json`, or host patch. A real V2 TUI PTY recording confirmed
+client PID/workspace/surface attribution and `Running` → `Needs input` →
+`Running` → clear/disposal transitions, but actual cmux rendering was
+unavailable; visual verification remains pending.
 
 ## Investigation model
 
@@ -116,7 +120,7 @@ version-sensitive questions. Both remain asynchronous with their existing
 permissions. Debug sends each child a sanitized self-contained question and
 reads the result only after notification. It never delegates system commands,
 authenticated service access, privileged work, or approval bypass. Native
-`task` remains denied.
+`subagent` remains denied.
 
 ## Tool safety
 
@@ -153,7 +157,7 @@ Those checks verify packaging and the isolated install lifecycle; smoke does not
 launch OpenCode, validate runtime agents/tools, activate DCP, or claim package
 cache cleanup. They do not prove native permission or Auto runtime behavior.
 
-Controlled runtime acceptance requires a fresh pinned OpenCode 1.18.25 session on
+Controlled runtime acceptance requires a fresh pinned OpenCode 2.0.12 session on
 the supported Apple Silicon macOS baseline, with the TUI connected. Verify that
 normal Debug operations use native prompts, Auto advances across several bounded
 operations without duplicate permission questions, rejected operations are not

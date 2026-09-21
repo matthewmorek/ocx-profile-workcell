@@ -2,7 +2,7 @@ import { constants } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
-import { type Plugin, tool } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
 import { z } from "zod"
 import { getProjectId } from "./kdco-primitives/get-project-id"
 
@@ -274,16 +274,6 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 }
 
 /**
- * Expected input for experimental.chat.system.transform hook.
- * Note: The official SDK types this as {}, but runtime provides these properties.
- * See: https://github.com/sst/opencode/issues/6142
- */
-interface SystemTransformInput {
-	agent?: string
-	sessionID?: string
-}
-
-/**
  * KDCO Workspace Plugin
  *
  * Provides plan management and targeted rule injection.
@@ -304,30 +294,8 @@ interface ActiveTaskCall {
 	startTime: number
 }
 
-/** Tracks in-flight coder and tester task calls within their parent session */
-const activeTaskCalls = new Map<string, ActiveTaskCall>()
-
 /** Stale call timeout - matches MAX_RUN_TIME_MS in background-agents.ts */
 const STALE_CALL_TIMEOUT_MS = 15 * 60 * 1000
-
-/** Periodic cleanup of orphaned callIDs (runs every 60s) */
-const cleanupInterval = setInterval(() => {
-	const now = Date.now()
-	for (const [callID, data] of activeTaskCalls) {
-		if (now - data.startTime > STALE_CALL_TIMEOUT_MS) {
-			activeTaskCalls.delete(callID)
-		}
-	}
-}, 60_000)
-// Prevent interval from keeping process alive
-cleanupInterval.unref?.()
-
-function hasActiveTaskForSession(agent: TrackedTaskAgent, sessionID: string): boolean {
-	for (const task of activeTaskCalls.values()) {
-		if (task.agent === agent && task.sessionID === sessionID) return true
-	}
-	return false
-}
 
 function parseTesterResult(taskOutput: string): TesterResult | null {
 	const results: string[] = []
@@ -580,14 +548,14 @@ ${SHARED_PLAN_RULES}
 ## You Are an ORCHESTRATOR
 
 You coordinate work. You do NOT implement, read repository files, or execute Bash directly.
-Use plan/delegation tools for context and coordination, and native \`task\` agents for implementation and command execution.
+Use plan/delegation tools for context and coordination, and native \`subagent\` agents for implementation and command execution.
 
 **CRITICAL CONSTRAINTS:**
-- Code changes and immediate focused self-checks → native \`task\` with \`coder\`
-- Difficult diagnosis and corrective repair → native \`task\` with \`debugger\`
-- Independent execution of existing verification → native \`task\` with \`tester\`
-- Documentation files → native \`task\` with \`scribe\`
-- Git and pull-request operations → native \`task\` with \`committer\`
+- Code changes and immediate focused self-checks → native \`subagent\` with \`coder\`
+- Difficult diagnosis and corrective repair → native \`subagent\` with \`debugger\`
+- Independent execution of existing verification → native \`subagent\` with \`tester\`
+- Documentation files → native \`subagent\` with \`scribe\`
+- Git and pull-request operations → native \`subagent\` with \`committer\`
 - Codebase questions → \`delegate\` to \`explore\` (INTERNAL only)
 - External docs/APIs → \`delegate\` to \`researcher\` (EXTERNAL only)
 - Review after tester evidence or a material-limitation disposition → \`delegate\` to \`reviewer\`
@@ -645,11 +613,11 @@ The parent loads philosophy only when making design decisions, not merely dispat
 1. Orient: Reuse the plan and relevant delegation findings already in context; do not read repository files directly
 2. Implement: Send bounded implementation to \`coder\` by shared plan task ID or section, including scope, constraints, expected evidence, and proportionate immediate focused self-checks
    - Continue to completion or a concrete blocker. An evidence-backed material scope/design/API/authorization conflict is a legitimate terminal \`blocked\` result, not progress-only incomplete execution. Resolve the smallest needed decision before affected work resumes; do not blindly retry. Preserve completed work and continue unaffected safe in-scope work where practical. Unfamiliarity alone is not a blocker
-3. Verify independently: Call native \`task\` with \`tester\` only when the implementation is ready for verification
+3. Verify independently: Call native \`subagent\` with \`tester\` only when the implementation is ready for verification
 4. Give tester a self-contained handoff containing the exact revision/diff review basis, requested verification scope, changed files, acceptance criteria, exact existing commands to run, and coder evidence. Identify the basis using resolved commit/base IDs or, for dirty worktrees, the base revision and a retained patch reference or diff fingerprint covering relevant staged, unstaged, and untracked changes; report unavailable attribution as a limitation
 5. Dispose tester evidence:
    - \`passed\` → when ready for review, send only the verified scope, changed files, acceptance criteria, and tester evidence to \`reviewer\`; a batch pass does not verify the entire plan
-   - \`failed\` → route correction to \`coder\` or difficult diagnosis/repair to \`debugger\`; request a tester rerun only through a new explicit parent \`task\` call
+   - \`failed\` → route correction to \`coder\` or difficult diagnosis/repair to \`debugger\`; request a tester rerun only through a new explicit parent \`subagent\` call
    - \`infrastructure-error\` or \`blocked\` → decide whether the limitation is material; review may proceed only when the limitation and disposition are supplied to \`reviewer\`
    - missing, unrecognized, or contradictory status → request a report-only correction using existing tester evidence; do not rerun commands solely for formatting. If actual evidence is missing, inaccessible, stale, or insufficient, explicitly request fresh verification for that gap
 6. Document: Delegate documentation work to \`scribe\`
@@ -681,8 +649,16 @@ Do NOT claim "done" or "complete" without that evidence or disposition.
 </code-review-protocol>
 </system-reminder>`
 
-const WorkspacePlugin: Plugin = async (ctx) => {
-	const { directory } = ctx
+const WorkspacePlugin = Plugin.define({ id: "workcell-workspace", async setup(ctx) {
+	const { directory } = ctx.location
+	const registrations: Array<{ dispose(): Promise<void> }> = []
+	const activeTaskCalls = new Map<string, ActiveTaskCall>()
+	const hasActiveTaskForSession = (agent: TrackedTaskAgent, sessionID: string) =>
+		[...activeTaskCalls.values()].some(task => task.agent === agent && task.sessionID === sessionID)
+	const cleanupInterval = setInterval(() => {
+		for (const [id, task] of activeTaskCalls) if (Date.now() - task.startTime > STALE_CALL_TIMEOUT_MS) activeTaskCalls.delete(id)
+	}, 60_000)
+	cleanupInterval.unref?.()
 	const readArchivePlan = await createArchivePlanReader().catch((error: unknown) => {
 		// Optional archive failure must not disable shared-plan tools or compaction.
 		// Keep the startup failure: path calls must not retry configuration or fall back.
@@ -692,7 +668,7 @@ const WorkspacePlugin: Plugin = async (ctx) => {
 
 	// Use git root commit hash for cross-worktree consistency
 	const projectId = await getProjectId(directory)
-	const baseDir = path.join(os.homedir(), ".local", "share", "opencode", "workspace", projectId)
+	const baseDir = path.join(os.homedir(), ".local", "share", "opencode", "workspace-v2", projectId)
 
 	/**
 	 * Resolves the root session ID by walking up the parent chain.
@@ -704,32 +680,27 @@ const WorkspacePlugin: Plugin = async (ctx) => {
 
 		let currentID = sessionID
 		for (let depth = 0; depth < 10; depth++) {
-			const session = await ctx.client.session.get({
-				path: { id: currentID },
-			})
+			const session = await ctx.session.get({ sessionID: currentID })
 
-			if (!session.data?.parentID) {
+			if (!session.parentID) {
 				return currentID
 			}
 
-			currentID = session.data.parentID
+			currentID = session.parentID
 		}
 
 		throw new Error("Failed to resolve root session: maximum traversal depth exceeded")
 	}
 
-	return {
-		tool: {
-			plan_save: tool({
+	registrations.push(await ctx.tool.transform(editor => {
+			editor.add({ name: "plan_save", options: { codemode: false },
 				description:
 					"Save the implementation plan as Workcell-schema markdown. Deliberate archive promotion must preserve accepted scope; material changes require approval. Saving does not authorize implementation. Must include citations (ref:delegation-id) for decisions based on research. Plan is validated before saving.",
-				args: {
-					content: tool.schema.string().describe("The full plan in markdown format"),
-				},
+				input: z.object({ content: z.string().describe("The full plan in markdown format") }),
 				async execute(args, toolCtx) {
 					// Guard 1: Session required (Law 1: Early Exit)
 					if (!toolCtx?.sessionID) {
-						return "❌ plan_save requires sessionID. This is a system error."
+						return { content: "❌ plan_save requires sessionID. This is a system error." }
 					}
 
 					const rootID = await getRootSessionID(toolCtx.sessionID)
@@ -739,7 +710,7 @@ const WorkspacePlugin: Plugin = async (ctx) => {
 					// Guard 2: Parse and validate at boundary (Law 2: Parse Don't Validate)
 					const result = parsePlanMarkdown(args.content)
 					if (!result.ok) {
-						return formatParseError(result.error, result.hint)
+						return { content: formatParseError(result.error, result.hint) }
 					}
 
 					// Happy path: save
@@ -748,91 +719,106 @@ const WorkspacePlugin: Plugin = async (ctx) => {
 					const warningText =
 						warningCount > 0 ? ` (${warningCount} warnings: ${result.warnings?.join(", ")})` : ""
 
-					return `Plan saved.${warningText}`
+					return { content: `Plan saved.${warningText}` }
 				},
-			}),
+			})
 
-			plan_read: tool({
+			editor.add({ name: "plan_read", options: { codemode: false },
 				description: "Without path, read the root-session shared implementation plan. With path, read one exact user-selected .md file (max 1 MiB) from the startup-selected default Plannotator archive, across projects. Returns raw Markdown, not approval or shared-plan replacement. Use this instead of ordinary Read for that archive; report explicit-path errors or source conflicts, never fall back to the shared plan or guess another source.",
-				args: {
-					path: tool.schema.string().optional().describe("Exact user-selected absolute or ~/ archive .md path; no listing, globbing, interpolation, or latest selection. Omit only to read the shared session plan."),
-					reason: tool.schema
+				input: z.object({
+					path: z.string().optional().describe("Exact user-selected absolute or ~/ archive .md path; no listing, globbing, interpolation, or latest selection. Omit only to read the shared session plan."),
+					reason: z
 						.string()
 						.describe("Brief explanation of why you are calling this tool"),
-				},
+				}),
 				async execute(args, toolCtx) {
 					// Guard: Session required (Law 1: Early Exit)
 					if (!toolCtx?.sessionID) {
-						return "❌ plan_read requires sessionID. This is a system error."
+						return { content: "❌ plan_read requires sessionID. This is a system error." }
 					}
-					if (args.path !== undefined) return readArchivePlan(args.path)
+					if (args.path !== undefined) return { content: await readArchivePlan(args.path) }
 					const rootID = await getRootSessionID(toolCtx.sessionID)
 					const planPath = path.join(baseDir, rootID, "plan.md")
 					try {
-						return await fs.readFile(planPath, "utf8")
+						return { content: await fs.readFile(planPath, "utf8") }
 					} catch (error) {
-						if (isNodeError(error) && error.code === "ENOENT") return "No plan found."
+						if (isNodeError(error) && error.code === "ENOENT") return { content: "No plan found." }
 						throw error
 					}
 				},
-			}),
-		},
+			})
+	}))
+
+	// 2.0.12 loads agent.request.body but does not lower it into requests.
+	// Overlay explicit values only; leave unspecified provider defaults intact.
+	const applyRequestBody = async (event: { agent: string; options: Record<string, unknown> }) => {
+		const { data: agent } = await ctx.agent.get({ agentID: event.agent })
+		Object.assign(event.options, agent.request.body)
+	}
+	registrations.push(await ctx.session.hook("generate", applyRequestBody))
+	registrations.push(await ctx.session.hook("compaction", applyRequestBody))
 
 		// Targeted Rule Injection
-		"experimental.chat.system.transform": async (input: SystemTransformInput, output) => {
+	registrations.push(await ctx.session.hook("context", async input => {
+			await applyRequestBody(input)
 			const agent = input.agent
 
 			// Universal date awareness (all agents) - Law 2: Parse intent, not just data
 			const today = new Date().toISOString().split("T")[0]
-			output.system.push(`<date-awareness>
+			input.system.push({ type: "text", text: `<date-awareness>
 Today is ${today}. When searching for documentation, APIs, or external resources, use the current year (${new Date().getFullYear()}). Do not default to outdated years from training data.
-</date-awareness>`)
+</date-awareness>` })
 
 			// Agent-specific rules
 			if (agent === "plan") {
-				output.system.push(PLAN_RULES)
+				input.system.push({ type: "text", text: PLAN_RULES })
 			} else if (agent === "build") {
-				output.system.push(BUILD_RULES)
+				input.system.push({ type: "text", text: BUILD_RULES })
 			}
-		},
+	}))
 
 		// Track coder and tester task starts within the parent session
-		"tool.execute.before": async (
-			input: { tool: string; sessionID?: string; callID?: string },
-			output: { args?: { subagent_type?: string; agent?: string } },
-		) => {
-			if (input.tool !== "task") return
-			if (!input.callID || !input.sessionID) return
-
-			const agent = output.args?.subagent_type || output.args?.agent
+	registrations.push(await ctx.tool.hook("execute.before", async input => {
+			if (input.tool !== "subagent") return
+			const args = z.object({ agent: z.string(), background: z.boolean().optional() }).safeParse(input.input)
+			if (!args.success || args.data.background) return
+			const agent = args.data.agent
 			if (agent !== "coder" && agent !== "tester") return
 
-			activeTaskCalls.set(input.callID, {
+			activeTaskCalls.set(`${input.sessionID}:${input.messageID}:${input.id}`, {
 				agent,
 				sessionID: input.sessionID,
 				startTime: Date.now(),
 			})
-		},
+	}))
 
 		// Session-scoped implementation verification reminders
-		"tool.execute.after": async (
-			input: { tool: string; sessionID: string; callID: string },
-			output: { title: string; output: string; metadata: unknown },
-		) => {
-
-			if (!input.callID) return
-			const trackedTask = activeTaskCalls.get(input.callID)
+	registrations.push(await ctx.tool.hook("execute.after", async input => {
+			const key = `${input.sessionID}:${input.messageID}:${input.id}`
+			const trackedTask = activeTaskCalls.get(key)
 			if (!trackedTask) return
 
-			activeTaskCalls.delete(input.callID)
+			activeTaskCalls.delete(key)
+			if (input.status !== "completed") return
+			const nativeOutput = input.result.output as { status?: string; output?: string } | undefined
+			if (nativeOutput?.status !== "completed") return
+			const output = { output: nativeOutput.output ?? "" }
+			const original = output.output
+			const appendReminder = () => {
+				const reminder = output.output.slice(original.length)
+				if (!reminder) return
+				const content = input.result.content
+				input.result = { ...input.result, content: typeof content === "string" ? content + reminder : [...(content ?? []), { type: "text", text: reminder }] }
+			}
 
 			if (hasActiveTaskForSession(trackedTask.agent, trackedTask.sessionID)) return
 
 			if (trackedTask.agent === "coder") {
 				output.output += `\n\n<system-reminder>
-No coder calls are currently active in this session; this does not mean the final planned task or implementation is complete. Assess scope and evidence. A concrete material scope/design/API/authorization conflict is a legitimate terminal blocked result: resolve the smallest needed decision, preserve completed work, and continue unaffected safe scope where practical; do not blindly retry as progress-only. When an implementation batch is ready, explicitly run native \`task\` with \`tester\` for independent existing verification before review.
+No coder calls are currently active in this session; this does not mean the final planned task or implementation is complete. Assess scope and evidence. A concrete material scope/design/API/authorization conflict is a legitimate terminal blocked result: resolve the smallest needed decision, preserve completed work, and continue unaffected safe scope where practical; do not blindly retry as progress-only. When an implementation batch is ready, explicitly run native \`subagent\` with \`tester\` for independent existing verification before review.
 Give tester bounded shared-plan references, changed files, exact existing commands, and compact coder evidence (status, commands, exit codes, decisive failures, limitations, accessible artifacts); inline essentials when artifacts are inaccessible. Tester must not author or repair tests.
 </system-reminder>`
+				appendReminder()
 				return
 			}
 
@@ -859,13 +845,11 @@ Tester RESULT is ${testerResult}. Make an explicit disposition of the material v
 Tester result is invalid: a recognized, non-contradictory standalone \`RESULT: passed | failed | infrastructure-error | blocked\` line is required. Request a report-only correction with the existing tester evidence and required final contract; do not rerun commands solely for formatting. Supply accessible artifacts or inline essential evidence. If actual verification evidence is missing, inaccessible, stale, or insufficient, explicitly request fresh verification of the gap instead. Do not route a reporting failure to debugger.
 </system-reminder>`
 			}
-		},
+			appendReminder()
+	}))
 
 		// Compaction Hook - Inject plan context when session is compacted
-		"experimental.session.compacting": async (
-			input: { sessionID: string },
-			output: { context: string[]; prompt?: string },
-		) => {
+	registrations.push(await ctx.session.hook("compaction", async input => {
 			const rootID = await getRootSessionID(input.sessionID)
 			const planPath = path.join(baseDir, rootID, "plan.md")
 
@@ -887,7 +871,7 @@ Tester result is invalid: a recognized, non-contradictory standalone \`RESULT: p
 				currentTask = planContent.slice(start, end).match(/\d+\.\d+ [^\n←]+/)?.[0] ?? null
 			}
 
-			output.context.push(`<workspace-context>
+			input.system.push({ type: "text", text: `<workspace-context>
 ## Current Plan
 ${planContent}
 
@@ -897,9 +881,22 @@ The saved plan is a design artifact; its task markers may not reflect execution 
 
 ## Verification
 Verify decisions against their stated provenance: user constraints, repository paths/sections, or relevant research artifacts. Use \`delegation_read("id")\` for missing delegated evidence; do not manufacture research for user or repository provenance.
-</workspace-context>`)
-		},
+</workspace-context>` })
+	}))
+	const controller = new AbortController()
+	const events = (async () => {
+		for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+			if (event.type !== "session.execution.interrupted" && event.type !== "session.execution.failed" && event.type !== "session.deleted") continue
+			for (const [id, task] of activeTaskCalls) if (task.sessionID === event.data.sessionID) activeTaskCalls.delete(id)
+		}
+	})().catch(error => { if (!controller.signal.aborted) console.warn(`[workcell-workspace] Event stream failed: ${String(error).slice(0, 1000)}`) })
+	return async () => {
+		controller.abort()
+		clearInterval(cleanupInterval)
+		activeTaskCalls.clear()
+		await Promise.all(registrations.map(registration => registration.dispose()))
+		await events
 	}
-}
+} })
 
 export default WorkspacePlugin

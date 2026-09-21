@@ -1,83 +1,39 @@
-type CmuxSessionLogicalState = "animated-busy" | "needs-input" | "error" | "idle"
+import type { Plugin } from "@opencode/plugin/tui";
 
-export type CmuxSessionStatusTransition = {
-	readonly sessionID: string
-	readonly logicalState: CmuxSessionLogicalState
+export type CmuxState = "running" | "waiting" | "error" | "idle";
+
+/** Project the selected root's own state, never promote child activity to it. */
+export function selectedRootStatus(
+  ctx: Pick<Plugin.Context, "data" | "ui">,
+): { sessionID: string; state: CmuxState } | undefined {
+  const route = ctx.ui.router.current();
+  if (route.type !== "session") return;
+  const selected =
+    ctx.ui.tabs.list().find((tab) => tab.active)?.sessionID ?? route.sessionID;
+  const source = ctx.data.session.get(selected);
+  if (!source || source.id !== selected) return;
+  const rootID = ctx.data.session.root(selected);
+  const root = ctx.data.session.get(rootID);
+  if (!root || root.id !== rootID || root.parentID !== undefined) return;
+  if (root.agent !== "debug" && root.agent !== "plan" && root.agent !== "build")
+    return;
+  const permissions = ctx.data.session.permission.list(rootID);
+  const forms = ctx.data.session.form.list(rootID);
+  if (permissions === undefined || forms === undefined) return;
+  const state: CmuxState =
+    permissions.length || forms.length
+      ? "waiting"
+      : ctx.data.session.status(rootID) === "running"
+        ? "running"
+        : root.outcome === "failed"
+          ? "error"
+          : "idle";
+  return { sessionID: rootID, state };
 }
 
-function toNonEmptyString(value: unknown): string | null {
-	if (typeof value !== "string") return null
-
-	const normalized = value.trim()
-	if (!normalized) return null
-
-	return normalized
-}
-
-function toStatusType(properties: Record<string, unknown>): string | null {
-	const status = properties.status
-	if (!status || typeof status !== "object") return null
-
-	const statusType = toNonEmptyString((status as Record<string, unknown>).type)
-	if (!statusType) return null
-
-	return statusType.toLowerCase()
-}
-
-export function buildCmuxSessionStatusTransitionForEvent(
-	eventType: string,
-	properties: Record<string, unknown>,
-): CmuxSessionStatusTransition | null {
-	const sessionID = toNonEmptyString(properties.sessionID)
-	if (!sessionID) return null
-
-	if (
-		eventType === "question.asked" ||
-		eventType === "permission.asked" ||
-		eventType === "permission.updated"
-	) {
-		return { sessionID, logicalState: "needs-input" }
-	}
-
-	if (eventType === "session.idle") {
-		return { sessionID, logicalState: "idle" }
-	}
-
-	if (eventType === "session.error") {
-		return { sessionID, logicalState: "error" }
-	}
-
-	if (eventType !== "session.status") {
-		return null
-	}
-
-	const statusType = toStatusType(properties)
-	if (statusType === "idle") {
-		return { sessionID, logicalState: "idle" }
-	}
-
-	if (statusType === "busy" || statusType === "retry" || statusType === "running") {
-		return { sessionID, logicalState: "animated-busy" }
-	}
-
-	return null
-}
-
-export function buildCmuxSessionStatusTransitionForQuestionTool(
-	sessionID: unknown,
-): CmuxSessionStatusTransition | null {
-	const normalizedSessionID = toNonEmptyString(sessionID)
-	if (!normalizedSessionID) return null
-
-	return {
-		sessionID: normalizedSessionID,
-		logicalState: "needs-input",
-	}
-}
-
-export function getCmuxSessionStatusText(
-	logicalState: Exclude<CmuxSessionLogicalState, "idle" | "animated-busy">,
-): string {
-	if (logicalState === "needs-input") return "Needs input"
-	return "Error"
+export function statusText(state: CmuxState): string | undefined {
+  if (state === "running") return "Running";
+  if (state === "waiting") return "Needs input";
+  if (state === "error") return "Error";
+  return undefined;
 }

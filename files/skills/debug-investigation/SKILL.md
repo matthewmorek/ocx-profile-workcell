@@ -66,7 +66,7 @@ remain unattended.
 
 ### Blocked observations
 
-Conversational approval is not native approval. In OpenCode 1.18.25, Read checks
+Conversational approval is not native approval. In OpenCode 2.0.12, Read checks
 `external_directory` separately from `read`; a hard deny can block before a native
 permission event, and a later session deny can override an agent's `ask`. Auto
 answers eligible native requests, not hard denies. The packaged Debug primary has
@@ -120,7 +120,7 @@ using existing non-privileged tools. Follow the target, route, exposure, and bud
 procedure in [System and project evidence](references/system-project.md). Ordinary
 diagnostic connections are permitted observations, not remote service mutations or
 forbidden contact. Invoke in-scope probes through native authorization without
-per-host or per-connection conversational approvals; bash/webfetch remain `ask`.
+per-host or per-connection conversational approvals; shell/webfetch remain `ask`.
 
 Do not perform indiscriminate subnet/port sweeps, credential guessing, exploit
 probes, disruptive/load traffic, remote mutations, persistent network configuration
@@ -136,7 +136,7 @@ and unknowns; a TCP connection alone does not establish application health.
 After existing log/process inspection, Debug may perform a hypothesis-driven
 restart of a specifically identified user-owned local development process or local
 desktop application/application-specific user-session service within the requested
-investigation. Use native bash authorization without an extra permission
+investigation. Use native shell authorization without an extra permission
 question or Build handoff. Before acting, capture pre-restart evidence and
 establish exact ownership, PID/process and session/target identity, the existing
 exact launch/restart procedure (including arguments, working directory, and required

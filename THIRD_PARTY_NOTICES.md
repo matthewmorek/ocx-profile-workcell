@@ -84,7 +84,7 @@ The local-to-authoritative mapping is:
 | `files/tools/**` | `workers/kdco-registry/files/tools/**` |
 | `files/plugins/workspace-plugin.ts` | `workers/kdco-registry/files/plugins/workspace-plugin.ts` |
 | `files/plugins/background-agents.ts` | `workers/kdco-registry/files/plugins/background-agents.ts` |
-| `files/plugins/notify.ts` and `files/plugins/notify/**` | `workers/kdco-registry/files/plugins/notify.ts` and `workers/kdco-registry/files/plugins/notify/**` |
+| `files/plugins/notify/server.ts` and `files/plugins/notify/tui.ts` | `workers/kdco-registry/files/plugins/notify.ts` and `workers/kdco-registry/files/plugins/notify/**` |
 | `files/plugins/kdco-primitives/**` | `workers/kdco-registry/files/plugins/kdco-primitives/**` |
 | `files/plugins/worktree.ts` and `files/plugins/worktree/**` | `workers/kdco-registry/files/plugins/worktree.ts` and `workers/kdco-registry/files/plugins/worktree/**` |
 
@@ -125,7 +125,7 @@ or endorsement.
 
 ## DCP
 
-DCP 3.1.15 is separately fetched AGPL-3.0-or-later software referenced by the
+DCP 3.2.0 is separately fetched AGPL-3.0-or-later software referenced by the
 harness. It is not copied into this repository and is not vendored here. Its own
 distribution and license notices govern that separately fetched software.
 

@@ -1,5 +1,6 @@
 {
   "$schema": "https://ocx.kdco.dev/schemas/profile.json",
+  "bin": "opencode2",
   "registries": {
     "matthewmorek": {
       "url": "https://matthewmorek.github.io/ocx-profile-workcell",
