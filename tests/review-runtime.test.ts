@@ -32,6 +32,13 @@ test("native review handoff, ordinary reviewer inspection, agent ledger, restart
   );
   const project = join(root, "source");
   await mkdir(project);
+  // Competing external skill in the isolated HOME, never the real host catalog.
+  const externalSkill = join(root, ".agents/skills/code-review");
+  await mkdir(externalSkill, { recursive: true });
+  await writeFile(
+    join(externalSkill, "SKILL.md"),
+    "---\nname: code-review\ndescription: External generic review fixture\n---\nEXTERNAL_GENERIC_REVIEW_FIXTURE\n",
+  );
   const git = async (...args: string[]) =>
     (
       await exec(
@@ -107,6 +114,8 @@ test("native review handoff, ordinary reviewer inspection, agent ledger, restart
       });
       let operation: { name: string; args: unknown } | undefined;
       try {
+        if (prompt === "Discover external review fixture" && !outputs.length)
+          operation = { name: "skill", args: { name: "code-review" } };
         if (role === "origin" && !outputs.length)
           operation = {
             name: "review_start",
@@ -174,7 +183,8 @@ test("native review handoff, ordinary reviewer inspection, agent ledger, restart
             ][outputs.length];
           } else {
             operation = [
-              { name: "skill", args: { name: "code-review" } },
+              { name: "skill", args: { name: "workcell-code-review" } },
+              { name: "skill", args: { name: "frontend-philosophy" } },
               { name: "worktree_review", args: { id, head: pin } },
               {
                 name: "write",
@@ -277,7 +287,12 @@ test("native review handoff, ordinary reviewer inspection, agent ledger, restart
       plugin: [
         new URL("../files/plugins/background-agents.ts", import.meta.url).href,
       ],
-      skills: { paths: [resolve("files/skills/code-review")] },
+      skills: {
+        paths: [
+          resolve("files/skills/workcell-code-review"),
+          resolve("files/skills/frontend-philosophy"),
+        ],
+      },
       provider: {
         "review-test": {
           npm: "@ai-sdk/openai-compatible",
@@ -316,7 +331,7 @@ test("native review handoff, ordinary reviewer inspection, agent ledger, restart
           XDG_STATE_HOME: join(root, "state"),
           OPENCODE_DISABLE_MODELS_FETCH: "1",
           OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
-          OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+          OPENCODE_DISABLE_EXTERNAL_SKILLS: "0",
           OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
         },
         stdout: "pipe",
@@ -346,6 +361,36 @@ test("native review handoff, ordinary reviewer inspection, agent ledger, restart
   const timeout = setTimeout(() => running.child.kill(), 60000);
   try {
     let client = running.client;
+    const discovery = (
+      await client.session.create({ query: { directory: project } })
+    ).data!;
+    const discovered = await client.session.prompt({
+      path: { id: discovery.id },
+      query: { directory: project },
+      body: {
+        agent: "build",
+        parts: [{ type: "text", text: "Discover external review fixture" }],
+      },
+    });
+    expect(discovered.error).toBeUndefined();
+    const discoveryTranscript = (
+      await client.session.messages({
+        path: { id: discovery.id },
+        query: { directory: project },
+      })
+    ).data!;
+    expect(
+      discoveryTranscript
+        .flatMap((m) => m.parts)
+        .some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "skill" &&
+            part.state.status === "completed" &&
+            part.state.input.name === "code-review" &&
+            part.state.output.includes("EXTERNAL_GENERIC_REVIEW_FIXTURE"),
+        ),
+    ).toBe(true);
     const origin = (
       await client.session.create({
         body: { title: "Origin" },
@@ -430,7 +475,21 @@ test("native review handoff, ordinary reviewer inspection, agent ledger, restart
             part.type === "tool" &&
             part.tool === "skill" &&
             part.state.status === "completed" &&
-            part.state.input.name === "code-review",
+            part.state.input.name === "workcell-code-review" &&
+            part.state.output.includes("# Code Review Philosophy") &&
+            part.state.output.includes("review_start") &&
+            !part.state.output.includes("EXTERNAL_GENERIC_REVIEW_FIXTURE"),
+        ),
+    ).toBe(true);
+    expect(
+      transcript
+        .flatMap((message) => message.parts)
+        .some(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "skill" &&
+            part.state.status === "completed" &&
+            part.state.input.name === "frontend-philosophy",
         ),
     ).toBe(true);
     expect(await readFile(started.ledger, "utf8")).toContain(

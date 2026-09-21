@@ -1,5 +1,5 @@
 ---
-name: code-review
+name: workcell-code-review
 description: Use for explicit code/PR review requests and independent review assignments; routes top-level requests to isolated review sessions and evaluates evidence-backed correctness, security and code-health risks
 ---
 

@@ -232,8 +232,8 @@
       "description": "Evidence-based code-review methodology.",
       "files": [
         {
-          "path": "skills/code-review/SKILL.md",
-          "target": "skills/code-review/SKILL.md",
+          "path": "skills/workcell-code-review/SKILL.md",
+          "target": "skills/workcell-code-review/SKILL.md",
         },
       ],
     },

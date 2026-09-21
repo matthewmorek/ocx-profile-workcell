@@ -771,7 +771,7 @@ class DelegationManager {
     const request = args.request || (args.action === "resume"
       ? "Resume from the native agent-written ledger; check freshness before reusing coverage."
       : "Review staged changes in the trusted origin using git diff --cached.");
-    void this.promptParentWithRetry(coordinator!, "review", `Review workspace ${owner.id}. Trusted origin: ${resources.project}. Scratch notes: ${paths.notes}. Ledger: ${paths.ledger}. Checkout (if pinned): ${paths.checkout}. Use code-review and native tools; keep this session in the origin context. Caller request and essential context:\n${request}\nReturn the concise summary with review_start action=return, id=${owner.id}, request=<summary>. Do not close automatically.`, false).catch(() => this.log.warn(`Review session ${coordinator} interrupted; resume workspace ${owner.id}.`));
+    void this.promptParentWithRetry(coordinator!, "review", `Review workspace ${owner.id}. Trusted origin: ${resources.project}. Scratch notes: ${paths.notes}. Ledger: ${paths.ledger}. Checkout (if pinned): ${paths.checkout}. Use workcell-code-review and native tools; keep this session in the origin context. Caller request and essential context:\n${request}\nReturn the concise summary with review_start action=return, id=${owner.id}, request=<summary>. Do not close automatically.`, false).catch(() => this.log.warn(`Review session ${coordinator} interrupted; resume workspace ${owner.id}.`));
     return view();
   }
 

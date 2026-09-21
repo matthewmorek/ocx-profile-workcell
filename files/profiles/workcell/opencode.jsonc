@@ -19,7 +19,11 @@
         "delegate": "allow",
         "delegation_read": "allow",
         "delegation_list": "allow",
-        "skill": { "*": "deny", "code-review": "allow" },
+        "skill": {
+          "*": "deny",
+          "workcell-code-review": "allow",
+          "frontend-philosophy": "allow",
+        },
         "read": "allow",
         "grep": "allow",
         "glob": "allow",

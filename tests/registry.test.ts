@@ -841,7 +841,7 @@ describe("self-contained Workcell registry", () => {
         options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash: null,
         permissionHash:
-          "1083e55961d91871e74c8075bb5587501ed9640555ad68958fa79fd691cfe9f3",
+          "b33dc767abe0f67cdb50faddf81897ed3846b69985ce5add90bb6f502d18f227",
       },
       plan: {
         mode: "primary",
@@ -1141,6 +1141,26 @@ describe("self-contained Workcell registry", () => {
     expect(header?.match(/^agent:\s*(\S+)\s*$/m)?.[1]).toBe("review");
     expect(profileConfig.agent.review.mode).toBe("primary");
     expect(profileConfig.agent.review.permission.review_start).toBe("allow");
+    expect(profileConfig.agent.review.permission.skill).toEqual({
+      "*": "deny",
+      "workcell-code-review": "allow",
+      "frontend-philosophy": "allow",
+    });
+    const skill = registry.components.find(
+      (item: any) => item.name === "workcell-skill-code-review",
+    );
+    expect(skill?.files).toEqual([
+      {
+        path: "skills/workcell-code-review/SKILL.md",
+        target: "skills/workcell-code-review/SKILL.md",
+      },
+    ]);
+    expect(
+      await readFile(
+        join(repositoryRoot, "files/skills/workcell-code-review/SKILL.md"),
+        "utf8",
+      ),
+    ).toMatch(/^name: workcell-code-review$/m);
     expect(command).not.toMatch(/^(<<<<<<<|=======|>>>>>>>)/m);
   });
 

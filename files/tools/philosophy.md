@@ -11,8 +11,8 @@ Before writing, modifying, or materially refactoring code, you MUST load the rel
 - Full-stack changes, including frontend code that contains meaningful business logic or state behavior:
   - Load both `frontend-philosophy` and `code-philosophy`.
 - Independent code review:
-  - Load `code-review`.
-  - The `code-review` skill is the authority for review methodology, classification, and reporting format.
+  - Load `workcell-code-review`.
+  - The `workcell-code-review` skill is the authority for review methodology, classification, and reporting format.
 
 ### 2. Load before implementation
 
