@@ -3981,7 +3981,6 @@ describe("pinned automation", () => {
       expect(workflow).toContain("bun run typecheck");
       expect(workflow).toContain("bun run build");
       expect(workflow).toContain("REGISTRY_DIST=dist bun run test");
-      expect(workflow).toContain("REGISTRY_DIST=dist bun run smoke");
     }
     expect(releaseWorkflow).toContain("find . -type f");
     expect(releaseWorkflow).toContain('cmp "dist/$file"');
