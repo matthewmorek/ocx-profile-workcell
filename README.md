@@ -100,17 +100,20 @@ implementation. See
 ## Review mode
 
 `review` is a dedicated read-only primary, separate from the capable `reviewer`
-leaf. Natural-language review requests, top-level `code-review`, and `/review`
-share the review entry, but a skill cannot switch agents: the entry starts or
+leaf. Natural-language review requests, top-level `workcell-code-review`, and
+`/review` share the review entry, but a skill cannot switch agents: the entry starts or
 reuses the appropriate root session. Other modes start a separate review root;
 direct review may reuse its legitimate review root. Build's existing
 Build → tester → reviewer gate is unchanged.
+
+The profile-owned `workcell-code-review` name avoids colliding with a generic
+externally installed skill while leaving external skills enabled.
 
 The primary uses native tools and an agent-written ledger. Select one
 comprehensive reviewer for a cohesive change, or 2–4 ordinary reviewer
 delegations only for distinct behavior, state, security, or integration risks.
 Independence, adjudication, stable finding IDs, evidence/freshness checks, and
-incremental reuse are review-agent and `code-review` guidance—not a custom
+incremental reuse are review-agent and `workcell-code-review` guidance—not a custom
 review engine or runtime completion gate.
 
 `/review` accepts staged changes, `recent`, revisions/ranges, files/directories,

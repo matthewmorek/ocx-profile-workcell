@@ -11,8 +11,8 @@ Before writing, modifying, or materially refactoring code, you MUST load the rel
 - Full-stack changes, including frontend code that contains meaningful business logic or state behavior:
   - Load both `frontend-philosophy` and `code-philosophy`.
 - Independent code review:
-  - Load `code-review`.
-  - The `code-review` skill is the authority for review methodology, classification, and reporting format.
+  - Load `workcell-code-review`.
+  - The `workcell-code-review` skill is the authority for review methodology, classification, and reporting format.
 
 ### 2. Load before implementation
 
@@ -24,17 +24,18 @@ The repository's established conventions are the primary local authority. Philos
 
 ### 3. Apply principles proportionately
 
-Use the loaded skill to make decisions appropriate to the task's scope and risk.
+Use this decision order: **required outcome → existing capability → smallest sufficient mechanism → proportionate verification → stop**.
 
-- Reuse existing components, abstractions, conventions, and patterns when they fit the problem.
-- Prefer the smallest coherent change that meets the requirement.
-- Do not apply patterns mechanically merely because the skill mentions them.
-- Do not introduce a new dependency, component system, abstraction, architectural style, or cross-cutting refactor without a concrete need and clear complexity-reduction benefit.
-- When repository conventions conflict with universal accessibility, security, correctness, or data-integrity requirements, preserve the higher-order requirement and explain the conflict.
+- In existing plan prose, identify the owner/capabilities, missing behavioral delta, and non-goals. Separate requested outcomes and preserved contracts from chosen mechanisms; a plan is an execution reference, not proof that its mechanism is necessary.
+- For consequential new persistence or shared infrastructure, compare one smaller option that preserves the same guarantees; explain any gap that rules it out. No new artifact, matrix, or routine approval ceremony is needed.
+- Preserve safety, accessibility, security, data integrity, legacy contracts, and user-required architecture. Material scope/design/API/authorization conflicts need an explicit decision or approved revision, not silent expansion or pruning.
+- Apply principles only where they solve a concrete problem. Once the required outcome is verified, stop rather than adding speculative structure or cleanup.
 
 ### 4. Verify before completion
 
 Before reporting completion, verify the implementation against the applicable skill's checklist and the repository's own verification workflow.
+
+Whenever Plan, Build, or review requests new tests or coverage, select a meaningful concrete failure not already covered more cheaply, at the lowest effective boundary. Default to extending an existing focused test/fixture; new harnesses, permutation matrices, or performance infrastructure need a relevant requirement or risk. Use judgment, not per-test paperwork or coverage targets. Test authors load `testing-philosophy` for details; the tester only runs existing checks and neither designs tests nor loads that skill.
 
 At minimum:
 

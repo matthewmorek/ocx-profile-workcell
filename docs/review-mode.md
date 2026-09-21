@@ -2,7 +2,7 @@
 
 Review mode is an agent-guided, read-only workflow using OpenCode native tools
 and permissions. It is not a custom review engine. Natural-language review
-requests, `/review`, and top-level `code-review` guidance use the same entry;
+requests, `/review`, and top-level `workcell-code-review` guidance use the same entry;
 the command starts a separate `review` root, while direct review may reuse its
 legitimate review root. A skill cannot switch agents. Build's existing
 Build → tester → reviewer gate is unchanged.
@@ -23,7 +23,7 @@ Use one comprehensive reviewer for a cohesive change. Use 2–4 ordinary
 delegations only when distinct behavior/specification, state/concurrency,
 security/trust, or integration risks justify independent passes. Independence,
 adjudication, stable finding IDs, evidence and freshness checks, and incremental
-reuse are agent and `code-review` obligations. Missing or failed work is an
+reuse are agent and `workcell-code-review` obligations. Missing or failed work is an
 evidence limitation, not a clean pass.
 
 ## Starting and controlling a review
@@ -103,6 +103,29 @@ delete a workspace. A stopped owner can be recovered only through the supported
 workspace recovery path. Unknown worker outcomes remain interrupted. Old engine
 open reviews must be closed with the previous version before upgrade; there is
 no automatic migration or legacy deletion.
+
+## Connected Linear status
+
+The user-selected follow-up remains unresolved: a registered or connected
+Linear server is not equivalent to agent tool availability. The current
+review default-deny configuration has no verified native Linear read-tool
+allowlist, and the required tool-catalog metadata is not yet available. The
+cause beyond this known permission gap is unverified; no Linear fix or
+permission expansion is shipped here. The existing native fixture validates
+deterministic delivery, not real account access or model compliance.
+
+Any future enablement should inventory the exact native read-only tool first,
+then opt in to that exact tool only. Do not broaden access to `linear_*` tools
+or permit authentication, configuration, or other mutating operations.
+
+## Skill migration
+
+The registry now targets the managed `skills/workcell-code-review/SKILL.md`
+instead of the generic profile target. Existing installed profiles require the
+normal profile update or install flow and a fresh OpenCode session; the current
+running session retains its old configuration. This note does not promise
+cleanup of a stale host path or require users to delete files. Follow the
+repository's normal upgrade and release conventions.
 
 On later rounds, reuse unchanged code coverage only after comparing the ledger's
 pins, scope and requirements and refreshing mutable evidence. Head, base,

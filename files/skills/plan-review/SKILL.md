@@ -44,13 +44,15 @@ Accept explicit user constraints and established repository conventions as prove
 
 ### 3. Completeness
 
-Check excess as well as missing behavior against original user intent, not just the plan's own checklist. For UI plans, load `frontend-philosophy`: verify the existing owner/path, required delta, preserved contracts, and concrete justification for new UI. Challenge parallel widgets, providers, generic interfaces, duplicated state, or test matrices when a smaller viable approach meets the same requirements. Preserve necessary domain/retry distinctions and genuinely different workflows; do not reward familiar structure that omits behavior. Related-work links and agent-authored additions are not independent authorization.
+Before refining a chosen design, compare original requirements, approved scope deltas, and existing base capabilities—not just the plan's checklist. Verify the existing owner, missing behavioral delta, non-goals, and separation of requested outcomes/preserved contracts from mechanisms. For consequential new persistence or shared infrastructure, check one smaller equally-correct option and any evidence ruling it out. Consider removing or replacing unnecessary mechanisms before asking for defensive machinery; preserve safety, accessibility, data integrity, legacy contracts, and user-required architecture. Findings need material consequences and evidence, not LOC counts or literal-PRD-only reasoning. For UI plans, load `frontend-philosophy` and preserve distinct workflows. Material deviations need a decision or approved revision.
+
+Apply test economics to coverage requests: a meaningful concrete failure, not already covered more cheaply, at the lowest effective boundary. Default to extending existing focused tests/fixtures; new harnesses, permutation matrices, or performance infrastructure need a relevant requirement or risk, not per-test paperwork.
 
 | Requirement | Check |
 |-------------|-------|
 | Goal is specific | Measurable outcome, not vague intent |
 | Phases are logical | Sequential, with clear progression |
-| Edge cases considered | Error handling, failure modes addressed |
+| Relevant edge cases considered | Material failure risks addressed with proportionate verification |
 | Notes section present | Key decisions and observations documented |
 | Context & Decisions table | Captures architectural choices with rationale |
 
@@ -82,7 +84,7 @@ Check excess as well as missing behavior against original user intent, not just 
 | Severity | Icon | Criteria | Action Required |
 |----------|------|----------|-----------------|
 | Critical | 🔴 | Unsupported key decisions with material correctness or safety risk, no clear goal, unactionable tasks | Must fix before execution |
-| Major | 🟠 | Vague tasks, incomplete phases, missing edge case handling | Should fix |
+| Major | 🟠 | Vague tasks, incomplete phases, or missing edge-case handling with demonstrated material risk to required behavior or preserved contracts | Should fix |
 | Minor | 🟡 | Missing notes, unclear dependencies, incomplete rationale | Nice to fix |
 | Nitpick | 🟢 | Style preferences, wording suggestions | Optional |
 
@@ -125,7 +127,7 @@ APPROVE | REQUEST_CHANGES | NEEDS_DISCUSSION
 | Goal is specific and measurable | PASS / FAIL |
 | Citations support key decisions | PASS / FAIL |
 | Tasks are actionable | PASS / FAIL |
-| Edge cases addressed | PASS / FAIL |
+| Material edge-case risks addressed | PASS / FAIL |
 
 ### Positive Observations
 - [What's done well - always include at least one]
@@ -136,7 +138,7 @@ APPROVE | REQUEST_CHANGES | NEEDS_DISCUSSION
 ## What NOT to Do
 
 - Do NOT re-validate format—`plan_save` handles structural validation
-- Do NOT evaluate code quality (that's code-review's job)
+- Do NOT evaluate code quality (that's workcell-code-review's job)
 - Do NOT execute or modify the plan during review
 - Do NOT skip provenance verification for decisions; user/repository evidence is valid without a new research delegation
 - Do NOT accept vague goals or ambiguous tasks

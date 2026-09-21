@@ -2,7 +2,7 @@
   "$schema": "https://ocx.kdco.dev/schemas/v2/registry.json",
   "name": "matthewmorek",
   "author": "Matthew Morek",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "opencode": "1.18.25",
   "ocx": "2.0.14",
   "components": [
@@ -232,8 +232,8 @@
       "description": "Evidence-based code-review methodology.",
       "files": [
         {
-          "path": "skills/code-review/SKILL.md",
-          "target": "skills/code-review/SKILL.md",
+          "path": "skills/workcell-code-review/SKILL.md",
+          "target": "skills/workcell-code-review/SKILL.md",
         },
       ],
     },
