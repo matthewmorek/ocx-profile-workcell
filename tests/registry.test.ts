@@ -849,7 +849,7 @@ describe("self-contained Workcell registry", () => {
         temperature: 0.3,
         options: { reasoningEffort: "high", textVerbosity: "medium" },
         promptHash:
-          "1b9505d51aa4a77167fd6c7ebe786ae99a74eefb368aecadae07af3ac7df3473",
+          "6fe0fa1880f2cfbb152e1a9e738ef6a8ec17ac22dcd0a8177ca6434f87e4b822",
         permissionHash:
           "bc53c01ad86c2e583b99c2d05bc394a040f6dfe872d29f0f7ce6cb19c80debcc",
       },
@@ -859,7 +859,7 @@ describe("self-contained Workcell registry", () => {
         temperature: 0.3,
         options: { reasoningEffort: "high", textVerbosity: "low" },
         promptHash:
-          "886bd7a56665bb5701fe3fc3964941018887515da9857bf7cdb8a3df02135c03",
+          "7cb140543fe0b4fadc0f49e6cb26a81e963cb63b89047cde5a1a57e6f6a9b294",
         permissionHash:
           "19ddc5059cef457c9faa48e97fe5f3622d643b9ab907b7fc4e47073acb3b63e6",
       },
@@ -3371,6 +3371,8 @@ describe("high-risk deterministic plugin boundaries", () => {
         expect(rules).toContain("do not repeat reads for each task");
         expect(rules).toContain("do not copy the full plan into prompts");
         expect(rules).toContain("task IDs or section references");
+        expect(rules).toContain("original goal/non-goals");
+        expect(rules).toContain("explicitly approved scope deltas");
         expect(rules).not.toContain("Update immediately");
         // Verify phase guidance reaches the prompt payload, not model behavior.
         expect(rules).toContain("frontend-philosophy");
@@ -3381,6 +3383,8 @@ describe("high-risk deterministic plugin boundaries", () => {
             "Do not claim completion without independent tester evidence",
           );
           expect(rules).toContain("Do NOT review before tester evidence");
+          expect(rules).toContain("legitimate terminal `blocked` result");
+          expect(rules).toContain("do not blindly retry");
         } else {
           expect(rules).toContain("existing owner/path");
           expect(rules).toContain("original user intent");
@@ -3410,6 +3414,10 @@ describe("high-risk deterministic plugin boundaries", () => {
         const output = { title: "", output: result, metadata: {} };
         await hooks["tool.execute.after"](input, output);
         expect(output.output).toContain(reminder);
+        if (agent === "coder") {
+          expect(output.output).toContain("legitimate terminal blocked result");
+          expect(output.output).toContain("do not blindly retry");
+        }
       }
     } finally {
       if (previousHome === undefined) delete process.env.HOME;

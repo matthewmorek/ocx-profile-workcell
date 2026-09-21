@@ -237,7 +237,7 @@ Keep comments close to their code and document each significant design decision 
 
 ## Design It Twice for Consequential Changes
 
-Before committing to a hard-to-reverse decision, briefly consider at least one credible alternative.
+Before committing to a hard-to-reverse decision, start with the required outcome and existing capabilities. For consequential new persistence or shared infrastructure, compare one smaller equally-correct option, or explain which required guarantee rules it out. A plan's chosen mechanism is not proof of necessity; user-required architecture and preserved safety, accessibility, data-integrity, and legacy contracts remain binding.
 
 Use this for:
 * New public APIs or widely used abstractions.
@@ -253,7 +253,7 @@ Compare alternatives by:
 * Compatibility, observability, testing, rollout, and rollback costs.
 * Expected ease of the next likely change.
 
-Do not create a formal design document for routine, local, low-risk changes. The purpose is to avoid prematurely committing the system to a weak boundary.
+Use existing plan prose, not a new artifact or mandatory matrix. The purpose is to avoid prematurely committing to a weak boundary, not create routine approval ceremonies. Material scope/design/API/authorization conflicts require a decision or approved revision rather than silent expansion or pruning.
 
 ## Change Discipline
 
@@ -269,7 +269,7 @@ When modifying existing code:
 * Preserve behavior that callers rely on unless the task intentionally changes the contract.
 * Remove obsolete paths, stale comments, dead flags, and duplicate logic when safely within scope.
 * Avoid opportunistic rewrites that expand risk without reducing a concrete source of complexity.
-* Add or update tests at the level that proves the required behavior and likely failure modes.
+* Add or request tests only for meaningful concrete failures not already covered more cheaply, at the lowest effective boundary. Extend existing focused tests/fixtures by default; new harnesses, permutation matrices, or performance infrastructure need a relevant requirement or risk.
 
 ## Verification Checklist
 

@@ -5,7 +5,7 @@ description: Test design philosophy for application changes. Create focused, dur
 
 # Testing Philosophy: Confidence Without Test Bloat
 
-**Role:** Principal Engineer for test design while writing application code.
+**Role:** Test design reference for planning, implementation decisions, and review. The tester remains runner-only; it neither designs tests nor needs to load this skill.
 
 **Philosophy:** Tests are production code. They must provide meaningful confidence at a lower cost than the regressions they prevent. Do not optimize for coverage, assertion count, or exhaustive branch enumeration.
 
@@ -102,18 +102,9 @@ When a defect depends on runtime behavior, keep that mechanism real at the test 
 
 ## Decision Rule
 
-Before writing a test, answer all of these:
+Before requesting or writing new tests, choose a meaningful concrete failure not already covered more cheaply, at the lowest effective boundary. Prefer extending existing focused tests/fixtures that survive reasonable refactors. New harnesses, permutation matrices, or performance infrastructure need a relevant requirement or risk. If that justification is weak, do not add the test.
 
-1. What exact regression would this test catch?
-2. Why would that regression matter?
-3. Is this the smallest natural boundary that can catch it?
-4. Would the test survive a reasonable refactor?
-5. Is the confidence already provided by types, linting, existing coverage, or manual verification?
-6. Is the test proportionate to the behavior and risk it protects?
-
-If the answers are weak, do not add the test.
-
-Apply this decision rule to each parameterized row, not merely the overall test. Identify a plausible incorrect implementation that each new or changed regression test must reject, and the assertion that rejects it. Check interactions between existing settings when a change composes with them. Passing adjacent tests is not evidence that the changed behavior works.
+Use this as a selection rule, not per-test paperwork. Parameterized cases should reject distinct plausible defects, not mechanically enumerate permutations. Check relevant interactions when settings compose; passing adjacent tests is not evidence that the changed behavior works.
 
 Retain temporary verification probes until independent verification finishes. Then remove them or promote them to focused regression tests when they protect a durable contract.
 

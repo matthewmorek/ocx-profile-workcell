@@ -63,16 +63,18 @@ Before making findings:
 
 ## Review Order
 
-### 1. Intent and Contract
+### 1. Necessity, Intent, and Contract
 
-Verify that the implementation satisfies the stated behavior and preserves relevant existing contracts.
+Before accumulating correctness fixes within the chosen design, compare original requirements, approved scope deltas, and existing base capabilities. Separate plan-design choices from code beyond the plan: an accepted plan is the execution reference, not proof of necessity. Consider deleting or replacing an unnecessary mechanism instead of adding defensive machinery, and show how required guarantees remain preserved. Material design departures need a decision or approved revision, not silent scope pruning.
+
+Verify required behavior and preserved safety, accessibility, data-integrity, compatibility/legacy contracts, and user-required architecture. Necessity findings need evidence, a material consequence, and a smaller viable approach—not literal-PRD-only reasoning or LOC counts.
 
 Check:
 
 - Inputs, outputs, side effects, failure modes, and invariants.
 - Compatibility of API, schema, event, and configuration changes.
 - Boundary conditions: empty values, nullability, limits, retries, duplicates, ordering, partial failure, and cancellation.
-- Whether tests demonstrate the meaningful behavior, not merely implementation details.
+- Whether tests demonstrate meaningful behavior, not merely implementation details. Request new coverage only for a concrete relevant failure not covered more cheaply, at the lowest effective boundary. Default to existing focused tests/fixtures; new harnesses, permutation matrices, or performance infrastructure need a relevant requirement or risk, not per-test paperwork.
 
 What information disappears? What existing configuration or state interacts with this change? Follow the affected path through its actual consumers before approving it.
 
@@ -95,7 +97,7 @@ Review module and API design:
 - Pull complexity downward: callers should state their intent, while the module handles internal mechanics, sequencing, and routine error cases where practical.
 - Prefer somewhat general-purpose interfaces that serve the problem domain without speculative over-abstraction.
 - Check that layers provide different abstractions rather than repeating the same information at different levels.
-- For consequential designs, compare the submitted structure with one plausible alternative. Report the concern only if the alternative materially reduces dependencies, interface complexity, or future change cost.
+- Use the necessity comparison above for consequential designs; report alternatives only when they preserve required guarantees and materially reduce dependencies, interface complexity, or future change cost.
 
 For UI, apply `frontend-philosophy` to the existing owner, callers, and state path. Check unrequested behavior as well as omissions against original user intent; an agent-authored plan is not authority to expand scope. Reassess parallel widgets, providers, generic interfaces, duplicated state, and exhaustive render test matrices by naming the concrete complexity consequence and smaller viable approach. Small presentational boundaries and separate compositions for genuinely different workflows are valid. Do not simplify away domain invariants or pipeline correctness coverage merely to reduce UI variants.
 
@@ -166,6 +168,7 @@ Classify every comment by both severity and evidence.
 Rules:
 
 - A confirmed Major or Critical finding needs high confidence and a concrete explanation.
+- Missing edge-case handling or coverage alone is not automatically Major; establish material relevant risk.
 - Do not convert uncertainty into an assertion.
 - Do not hide high-impact uncertainty: label it as a strong concern or investigation question.
 - Do not use a numerical confidence percentage unless it adds decision-relevant meaning.

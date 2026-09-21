@@ -39,7 +39,9 @@ When creating or updating a plan, ensure:
 
 ## Plan Format
 
-For UI plans, apply `frontend-philosophy` before choosing architecture. In existing plan prose or bullets, record the existing owner/path, required delta, preserved contracts, and justified new UI. Reuse established evidence. Map acceptance criteria to original user intent, separating required behavior and demonstrated safety/accessibility needs from optional enhancements; related issues and agent-authored plans do not authorize extra scope.
+In existing plan prose or bullets, identify the existing owner/capabilities, missing behavioral delta, and non-goals. Separate requested outcomes and preserved contracts from chosen mechanisms; map acceptance criteria to original intent and explicitly approved scope deltas. For consequential new persistence or shared infrastructure, compare one smaller equally-correct option or explain the guarantee it cannot preserve. Reuse established evidence; related issues and agent-authored choices do not authorize extra scope. For UI, apply `frontend-philosophy` before choosing architecture.
+
+Select new tests only for meaningful concrete failures not covered more cheaply, at the lowest effective boundary. Default to existing focused tests/fixtures; new harnesses, permutation matrices, or performance infrastructure need a relevant requirement or risk. Keep this rationale in ordinary plan prose, not per-test paperwork or an extra matrix.
 
 Use `plan_save` with this exact markdown format:
 
@@ -98,7 +100,7 @@ ONE_SENTENCE_DESCRIBING_OUTCOME
 | `[PENDING]`     | Not yet started           |
 | `[IN PROGRESS]` | Currently being worked on |
 | `[COMPLETE]`    | Finished successfully     |
-| `[BLOCKED]`     | Waiting on dependencies   |
+| `[BLOCKED]`     | Waiting on dependencies or a material conflict decision |
 
 ---
 
@@ -131,7 +133,7 @@ not-started → in-progress → complete
 3. **Treat markers as a saved snapshot**, not authoritative live execution progress
 4. **Track routine progress separately** in task results and primary-session context; do not rewrite or delegate updates to the full plan for each completed task
 
-The accepted shared plan is the design reference. Save substantive design revisions, not unchanged content or progress-only updates. Children read it directly with `plan_read` when context is missing or known to have changed; handoffs reference bounded task IDs or sections rather than copying the plan. Saving does not initiate review.
+The accepted shared plan is the execution reference, not proof that its chosen mechanism is necessary. Material deviations require a decision or approved revision; do not silently expand or prune scope. Save substantive design revisions, not unchanged content or progress-only updates. Children read it directly with `plan_read` when context is missing or known to have changed; handoffs reference bounded task IDs or sections plus compact accessible original goal/non-goals and approved scope deltas rather than copying the plan. Saving does not initiate review.
 
 ### Shared plan and explicit archive reads
 
@@ -243,8 +245,8 @@ Add JWT authentication with refresh token support
 
 ## Phase 3: Testing [PENDING]
 
-- [ ] 3.1 Write unit tests
-- [ ] 3.2 Integration tests
+- [ ] 3.1 Extend existing token tests for expiry and invalid-signature rejection
+- [ ] 3.2 Verify refresh-token replay rejection at the persistence boundary
 
 ## Notes
 

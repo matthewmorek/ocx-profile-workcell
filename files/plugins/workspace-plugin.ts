@@ -457,10 +457,10 @@ async function createArchivePlanReader() {
 
 const SHARED_PLAN_RULES = `<shared-plan>
 The saved plan is shared by the root session and its child sessions; unrelated root sessions have separate plans.
-Treat the accepted plan as a design artifact, not a live progress ledger. Save substantive design revisions, not full-plan rewrites for routine progress updates.
+Treat the accepted plan as a design artifact, not a live progress ledger: an execution reference, not proof of mechanism necessity. Original intent and explicitly approved scope deltas bound it. Material deviations need a decision or approved revision, not silent expansion or pruning. Save substantive design revisions, not full-plan rewrites for routine progress updates.
 Saving a plan does not automatically require review, delegation, or a reread. Review is an explicit orchestration decision.
 Use the plan already in context. Call \`plan_read\` only when the plan is missing or known to have changed; do not repeat reads for each task.
-Give child agents bounded assignments with task IDs or section references to the shared saved plan, scope, constraints, and expected evidence; do not copy the full plan into prompts. Children can use \`plan_read\` when they need missing plan context.
+Give child agents bounded assignments with task IDs or section references to the shared saved plan, compact accessible original goal/non-goals and explicitly approved scope deltas, constraints, and expected evidence; do not copy the full plan into prompts. Inline essential provenance if references are inaccessible. Children can use \`plan_read\` when they need missing plan context.
 For a user-selected Plannotator archive, the parent supplies its exact path plus the bounded assignment. Workers with this tool use \`plan_read(path)\`, not ordinary Read or a no-path fallback. Report missing or conflicting sources rather than guessing. Explore and researcher do not have plan_read.
 Explicit archive reads span projects in this user's selected default archive, not session-isolated storage. They return raw Markdown without replacing the shared plan. Reading, filenames (including -approved), and saving do not authorize implementation. Deliberate promotion via \`plan_save\` must conform to the Workcell schema and preserve accepted scope; material changes require approval.
 </shared-plan>`
@@ -516,7 +516,7 @@ Load philosophy skills when making the corresponding design decisions, not merel
 - Backend/logic work → \`skill\` load \`code-philosophy\`
 - UI/frontend work → \`skill\` load \`frontend-philosophy\`
 
-For UI plans, apply frontend-philosophy to record the existing owner/path, required delta, preserved contracts, and justified new UI using available evidence. Check excess as well as missing behavior against original user intent; the plan cannot silently expand scope.
+Use existing plan prose to record the existing owner/path and capabilities, missing behavioral delta, and non-goals; separate original user intent and preserved contracts from mechanisms. For consequential new persistence or shared infrastructure, compare one smaller equally-correct option or explain the guarantee it cannot preserve. For UI, apply frontend-philosophy. Apply shared test economics to coverage requests: meaningful concrete failure, not covered more cheaply, lowest effective boundary; default to existing focused tests/fixtures, not new harnesses, permutation matrices, or performance infrastructure without relevant risk.
 </philosophy>
 
 <plan-format>
@@ -621,7 +621,7 @@ Use plan/delegation tools for context and coordination, and native \`task\` agen
 - \`coder\` owns implementation and implementation-level self-checks; it is not a proxy for every Bash command
 - \`debugger\` is reserved for difficult diagnosis or repair, not routine verification
 - \`tester\` independently runs existing verification; it never authors, proposes, modifies, or repairs tests and never loads \`testing-philosophy\`
-- Test design remains coder-owned
+- Test authorship remains coder-owned; Plan, Build design decisions, and review apply shared test economics when requesting coverage
 - \`reviewer\` follows tester evidence or the parent's explicit disposition of a material verification limitation
 
 </workspace-routing>
@@ -634,7 +634,7 @@ Use plan/delegation tools for context and coordination, and native \`task\` agen
 3. Request research only for material unresolved external or version-sensitive claims. User constraints and established repository conventions need honest provenance, not new research or manufactured citations
 4. Treat research snippets as evidence to inspect and adapt to local versions and conventions, not as production-ready code
 5. For a sufficiently scoped implementation, send the assignment directly to \`coder\`; its bounded repository discovery does not require preliminary \`explore\` delegation. Use \`explore\` when missing facts materially affect scope or design, not as a routine prerequisite
-6. For UI, have coder apply frontend-philosophy against real APIs/callers: integrate representative behavior before variants/generalization, then finish the scope and use available rendered verification (report absence). Allow incidental simplification within scope; surface concrete material architecture/scope/API conflicts rather than silently expanding the plan or user intent
+6. Validate necessity against existing capabilities before adding machinery. For UI, have coder apply frontend-philosophy against real APIs/callers: integrate representative behavior before variants/generalization, then finish scope and use available rendered verification (report absence). Incidental simplification is allowed; material scope/design/API/authorization conflicts require a decision or approved revision, not silent expansion or pruning
 
 ### Philosophy Loading
 The parent loads philosophy only when making design decisions, not merely dispatching accepted work. The implementing child still loads applicable skills:
@@ -644,6 +644,7 @@ The parent loads philosophy only when making design decisions, not merely dispat
 ### Execution and Verification
 1. Orient: Reuse the plan and relevant delegation findings already in context; do not read repository files directly
 2. Implement: Send bounded implementation to \`coder\` by shared plan task ID or section, including scope, constraints, expected evidence, and proportionate immediate focused self-checks
+   - Continue to completion or a concrete blocker. An evidence-backed material scope/design/API/authorization conflict is a legitimate terminal \`blocked\` result, not progress-only incomplete execution. Resolve the smallest needed decision before affected work resumes; do not blindly retry. Preserve completed work and continue unaffected safe in-scope work where practical. Unfamiliarity alone is not a blocker
 3. Verify independently: Call native \`task\` with \`tester\` only when the implementation is ready for verification
 4. Give tester a self-contained handoff containing the exact revision/diff review basis, requested verification scope, changed files, acceptance criteria, exact existing commands to run, and coder evidence. Identify the basis using resolved commit/base IDs or, for dirty worktrees, the base revision and a retained patch reference or diff fingerprint covering relevant staged, unstaged, and untracked changes; report unavailable attribution as a limitation
 5. Dispose tester evidence:
@@ -672,7 +673,7 @@ When implementation is ready for review:
 3. For \`failed\`, correct through \`coder\` or \`debugger\`, then explicitly rerun \`tester\`; do not review the failed implementation as complete
 4. For \`infrastructure-error\` or \`blocked\`, make an explicit material-limitation disposition and provide it to \`reviewer\` if review proceeds
 5. Include verification disposition and review findings in the completion report
-6. If critical (🔴) or major (🟠) issues are found, route fixes to \`coder\` or \`debugger\` and repeat independent verification before completion
+6. Assess necessity against original requirements and existing base capabilities before accumulating fixes within a design. Separate plan-design issues from code beyond plan; consider deleting/replacing unnecessary mechanisms while proving required guarantees preserved. Resolve material design conflicts before routing critical (🔴) or major (🟠) fixes to \`coder\`/\`debugger\`, then repeat independent verification before completion
 
 Do NOT review before tester evidence or an explicit material-limitation disposition.
 Do NOT claim "done" or "complete" without that evidence or disposition.
@@ -829,7 +830,7 @@ Today is ${today}. When searching for documentation, APIs, or external resources
 
 			if (trackedTask.agent === "coder") {
 				output.output += `\n\n<system-reminder>
-No coder calls are currently active in this session; this does not mean the final planned task or implementation is complete. Assess the returned scope and evidence. When an implementation batch is ready, explicitly run native \`task\` with \`tester\` for independent existing verification before review.
+No coder calls are currently active in this session; this does not mean the final planned task or implementation is complete. Assess scope and evidence. A concrete material scope/design/API/authorization conflict is a legitimate terminal blocked result: resolve the smallest needed decision, preserve completed work, and continue unaffected safe scope where practical; do not blindly retry as progress-only. When an implementation batch is ready, explicitly run native \`task\` with \`tester\` for independent existing verification before review.
 Give tester bounded shared-plan references, changed files, exact existing commands, and compact coder evidence (status, commands, exit codes, decisive failures, limitations, accessible artifacts); inline essentials when artifacts are inaccessible. Tester must not author or repair tests.
 </system-reminder>`
 				return
