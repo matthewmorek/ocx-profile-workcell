@@ -119,7 +119,7 @@ observations, not as a routine first step or a claimed source fix.
    Do not guess commands, dump environment secrets, edit configuration/source, or
    install/change dependencies to make the restart possible.
 4. Disclose exact command and target, expected interruption, timeout, output and
-   exposure bounds, and recovery/cleanup limits. Invoke through native bash
+exposure bounds, and recovery/cleanup limits. Invoke through the native shell tool
    authorization without an extra permission question. Honor rejection or denial;
    never route around it. Use a graceful stop/restart with a bounded wait; do not
    escalate a timeout to force-kill. No broad `pkill` or guessed kill targets.

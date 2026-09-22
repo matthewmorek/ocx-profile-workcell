@@ -13,8 +13,9 @@ local profile name is `workcell`; its OCX source is `matthewmorek/workcell`.
   and must not depend on an upstream workspace bundle at runtime.
 - All intended agents, skills, commands, local plugins, and support modules are
   packaged locally. Generic internal workspace/worktree names remain unchanged.
-- Override options belong under each recognized agent's `agent.options` object. Do
-  not duplicate them as direct agent keys.
+- Override options belong under each recognized agent's
+  `agents.<name>.request.body` object. Do not duplicate them as direct agent keys
+  or rely on legacy same-name entries; native V2 configuration takes precedence.
 - Keep public identity consistent: Workcell, `workcell`, `workcell-bundle`,
   `workcell-*`, `matthewmorek/workcell`, and the repository/package identity
   `matthewmorek/ocx-profile-workcell` / `ocx-profile-workcell`.
@@ -26,17 +27,25 @@ local profile name is `workcell`; its OCX source is `matthewmorek/workcell`.
   dependency or silently forking unrelated upstream changes.
 - Preserve KDCO OCX/Workspace copyright and MIT notices. Record immutable upstream
   revisions for every copied import in the third-party notices before importing it.
-- DCP 3.1.15 is separately fetched AGPL-3.0-or-later software: reference it as an
+- DCP 3.2.0 is separately fetched AGPL-3.0-or-later software: reference it as an
   external dependency when required, but do not vendor its package or source.
-- Workcell owns the profile TUI configuration and pins DCP 3.1.15 in both the
-  server and TUI contexts.
+- Workcell owns the four-file profile layout. The inactive `tui.jsonc` contains no
+  duplicate DCP declaration; the server plugin declaration supplies the CLI panel.
 - Runtime plugins are exact-pinned. Use the local notify plugin; do not add an
   external notifier.
+- OpenCode V2 owns terminal titles and desktop alerts. Do not preserve or add a
+  custom title writer, spinner, desktop notifier, global `cli.json`, or host
+  patch. The local `workcell-notify` component remains responsible for cmux
+  status through `files/plugins/notify/server.ts` and `tui.ts`; the native loader
+  advertises one notify server/TUI instance. cmux requires its executable on
+  `CLIENT`'s `PATH`, `CMUX_WORKSPACE_ID`, and `CMUX_SURFACE_ID`; child-only
+  activity is not promoted. The legacy `kdco-notify.json` is not read and must
+  be preserved, not deleted. Component count remains 27.
 
 ## Development
 
 Supported baseline for Workcell 0.5.0: Apple Silicon macOS, Bun 1.4.1,
-registry-target OCX 2.0.14, validation CLI OCX 2.0.15, and OpenCode 1.18.25.
+registry-target OCX 2.0.14, validation CLI OCX 2.0.15, and OpenCode 2.0.12.
 
 ```sh
 bun install --frozen-lockfile
@@ -69,12 +78,19 @@ branches; normal review Git metadata, objects and refs may be written. Close
 legacy engine reviews with the previous version before upgrading; do not migrate
 or delete them automatically.
 
-The repository-only migration sequence is to install and validate Workcell
-0.5.0 additively alongside the prior known-good profile. If DCP should be Workcell-only, optionally remove a duplicate
-user-global DCP TUI declaration after validation. Do not perform these machine-
-level steps as part of repository changes. Roll back by restoring that
-declaration and launching the prior Workcell profile or the existing `ws`
-profile.
+The repository-only migration sequence is to provision and validate the exact
+V2 runtime in an isolated candidate configuration/data environment alongside the
+prior known-good profile. Lifecycle operations are managed-server-only: accept a
+discovered server only after authenticated same-host PID checks, and fail clearly
+for private, standalone, unsupported-host, or mismatched-server cases. The
+managed server must start with the Workcell configuration. Users must explicitly
+restart the daemon when switching profiles; CLI reuse does not apply subsequent
+OCX configuration to an already-running daemon. There is no custom launcher,
+automatic daemon restart, global configuration change, or machine-level
+installation/migration in repository work. Close prior V1 review sessions with
+their original version before upgrading. Roll back by restarting and launching
+the untouched V1 profile with its matching runtime; never feed V2 config or
+session state to V1.
 
 If `delegate` is missing, a running session may still use its previous profile;
 launch a fresh `ocx oc -p workcell` session. Then distinguish these cases:

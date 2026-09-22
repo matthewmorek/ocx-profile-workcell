@@ -60,11 +60,16 @@ root. `resume` reads the agent-written ledger and rechecks scope and freshness.
 `return` sends a concise summary to the originating root; reporting does not
 close the workspace. Close is explicit, drains ordinary workers, removes owned
 state, worktree and artifacts, and retains host conversation history. A failed
-drain or cleanup retains resources for retry.
+drain or cleanup retains resources for retry. During ordinary review work,
+completion and cancellation wakeups are per child; the parent may resume before
+all workers finish or their artifacts are persisted. `delegation_read` and
+`delegation_list` remain the durable retrieval paths for partial, cancelled, and
+persisted results. Do not wait for an all-complete cycle wakeup or poll when the
+native per-child notification is sufficient.
 
 ## Native tools and workspace
 
-The review primary uses native Read/Grep/Glob and permitted Bash Git/`gh`; the
+The review primary uses native Read/Grep/Glob and permitted shell Git/`gh`; the
 review skill supplies procedure, not enforcement. OpenCode permissions authorize
 approved commands and scratch paths. They are not an OS sandbox or a promise of
 complete shell-parser isolation.

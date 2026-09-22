@@ -1,4 +1,4 @@
 {
   "$schema": "https://opencode.ai/tui.json",
-  "plugin": ["@tarquinen/opencode-dcp@3.1.15"],
+  // Inactive in V2: DCP's TUI export is discovered from server plugins.
 }

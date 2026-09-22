@@ -4,10 +4,10 @@
  * @module kdco-primitives/types
  */
 
-import type { createOpencodeClient } from "@opencode-ai/sdk"
+import type { OpenCodeClient } from "@opencode/client"
 
 /**
  * OpenCode client instance type.
- * Derived from the factory function return type for type safety.
+ * Public HTTP client; never embeds another OpenCode host.
  */
-export type OpencodeClient = ReturnType<typeof createOpencodeClient>
+export type OpencodeClient = OpenCodeClient

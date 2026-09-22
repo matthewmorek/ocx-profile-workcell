@@ -6,13 +6,16 @@
  * Routing is explicit:
  * - Async/read-only roles use `delegate`.
  * - Filesystem-write, command-executing, or externally mutating roles use
- *   OpenCode's native `task` tool.
+ *   OpenCode's native `subagent` tool.
  *
  * Agent routing can be overridden without editing this file:
  *
  * KDCO_ASYNC_AGENTS=explore,researcher,reviewer
  * KDCO_TASK_AGENTS=coder,debugger,tester,scribe,committer
  * KDCO_ORCHESTRATOR_AGENTS=plan,build
+ * Async targets also need exact `subagent` resource grants in the primary's
+ * profile permissions. Native/session denies remain authoritative; direct
+ * subagent calls to async targets are always rejected by this plugin.
  *
  * Optional LLM metadata enrichment (only the exact value `1` enables it):
  * KDCO_BACKGROUND_METADATA=1
@@ -26,8 +29,12 @@
  * Attribution/inspiration only; no revision, file-copy mapping, or external license is asserted.
  */
 
-import { type Plugin, type ToolContext, tool } from "@opencode-ai/plugin";
-import type { Event, Message, Part, TextPart } from "@opencode-ai/sdk";
+import { Plugin } from "@opencode/plugin";
+import * as Tool from "@opencode/plugin/promise/tool";
+import type { ToolContext } from "@opencode/plugin/promise/tool";
+import { isSessionNotFoundError, type SessionMessageInfo } from "@opencode/client";
+import { z } from "zod";
+import { currentHost } from "./kdco-primitives/current-host";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -92,8 +99,6 @@ const TERMINAL_WAIT_GRACE_MS = 10_000;
 const READ_POLL_INTERVAL_MS = 250;
 const RESULT_READ_RETRY_DELAY_MS = 300;
 const RESULT_READ_ATTEMPTS = 4;
-const IDLE_FINALIZATION_GRACE_MS = 1_500;
-const ALL_COMPLETE_QUIET_PERIOD_MS = 75;
 const METADATA_TIMEOUT_MS = 30_000;
 const NOTIFICATION_RETRY_DELAYS_MS = [0, 250, 1_000] as const;
 
@@ -161,7 +166,7 @@ function escapeXml(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
-function isTextPart(value: unknown): value is TextPart {
+function isTextPart(value: unknown): value is { type: "text"; text: string } {
   if (!value || typeof value !== "object") return false;
 
   const candidate = value as {
@@ -180,29 +185,6 @@ function extractTextFromParts(parts: unknown): string {
     .map((part) => part.text)
     .join("\n")
     .trim();
-}
-
-async function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  timeoutMessage: string,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(timeoutMessage));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  }
 }
 
 // ==========================================
@@ -293,8 +275,8 @@ function parseMetadataResponse(responseText: string): GeneratedMetadata | undefi
 /**
  * Generate metadata through the explicitly configured `metadata` agent.
  *
- * This does not merely read `small_model`; it explicitly selects the metadata
- * agent, whose model should be configured as GPT-5.6 Luna or another cheap,
+ * It explicitly selects the metadata agent, whose model should be configured
+ * as GPT-5.6 Luna or another cheap,
  * structured-output-capable model.
  */
 async function generateMetadata(
@@ -309,25 +291,19 @@ async function generateMetadata(
   let metadataSessionID: string | undefined;
 
   try {
-    const agentsResult = await client.app.agents({});
-    const agents = (agentsResult.data ?? []) as Array<{
-      name: string;
-      mode?: string;
-    }>;
-
-    if (!agents.some((agent) => agent.name === "metadata")) {
+    const { data: agents } = await client.agent.list();
+    const metadataAgent = agents.find((agent) => agent.id === "metadata");
+    if (!metadataAgent) {
       await debugLog("generateMetadata: metadata agent unavailable; using fallback");
       return fallback;
     }
 
-    const session = await client.session.create({
-      body: {
-        title: `Metadata: ${delegationId}`,
-        parentID,
-      },
-    });
+    const parent = await client.session.get({ sessionID: parentID });
+    // Session.generate resolves the session model, not agent.model. Preserve
+    // the configured metadata model explicitly rather than using the root default.
+    const session = await client.session.create({ title: `Metadata: ${delegationId}`, agent: "metadata", location: parent.location, ...(metadataAgent.model ? { model: metadataAgent.model } : {}) });
 
-    metadataSessionID = session.data?.id;
+    metadataSessionID = session.id;
 
     if (!metadataSessionID) {
       await debugLog("generateMetadata: failed to create metadata session");
@@ -351,34 +327,9 @@ async function generateMetadata(
       "</delegation-result>",
     ].join("\n");
 
-    const response = await withTimeout(
-      client.session.prompt({
-        path: {
-          id: metadataSessionID,
-        },
-        body: {
-          agent: "metadata",
-          parts: [
-            {
-              type: "text",
-              text: prompt,
-            },
-          ],
-          tools: {
-            task: false,
-            delegate: false,
-            delegation_read: false,
-            delegation_list: false,
-            todowrite: false,
-            plan_save: false,
-          },
-        },
-      }),
-      METADATA_TIMEOUT_MS,
-      `Metadata generation timed out after ${METADATA_TIMEOUT_MS}ms`,
-    );
+    const response = await client.session.generate({ sessionID: metadataSessionID, prompt }, { signal: AbortSignal.timeout(METADATA_TIMEOUT_MS) });
 
-    const responseText = extractTextFromParts(response.data?.parts);
+    const responseText = response.text;
 
     if (!responseText) {
       await debugLog("generateMetadata: metadata agent returned no text");
@@ -399,11 +350,7 @@ async function generateMetadata(
   } finally {
     if (metadataSessionID) {
       try {
-        await client.session.delete({
-          path: {
-            id: metadataSessionID,
-          },
-        });
+        await client.session.remove({ sessionID: metadataSessionID });
       } catch {
         // Metadata sessions are best-effort temporary sessions.
       }
@@ -414,18 +361,6 @@ async function generateMetadata(
 // ==========================================
 // TYPES
 // ==========================================
-
-interface SessionMessageItem {
-  info: Message;
-  parts: Part[];
-}
-
-interface AssistantSessionMessageItem {
-  info: Message & {
-    role: "assistant";
-  };
-  parts: Part[];
-}
 
 type DelegationStatus =
   "registered" | "running" | "finalizing" | "complete" | "error" | "cancelled" | "timeout";
@@ -441,22 +376,6 @@ interface DelegationProgress {
   lastHeartbeatAt: Date;
   lastMessage?: string;
   lastMessageAt?: Date;
-}
-
-interface DelegationNotificationState {
-  terminalNotifiedAt?: Date;
-  terminalNotificationCount: number;
-  terminalNotificationError?: string;
-}
-
-interface ParentNotificationState {
-  allCompleteNotifiedAt?: Date;
-  allCompleteNotificationCount: number;
-  allCompleteCycle: number;
-  allCompleteCycleToken: string;
-  allCompleteNotifiedCycleToken?: string;
-  allCompleteScheduledCycleToken?: string;
-  allCompleteScheduledTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface DelegationRetrievalState {
@@ -482,8 +401,6 @@ interface DelegationRecord {
   parentAgent: string;
   prompt: string;
   agent: string;
-  notificationCycle: number;
-  notificationCycleToken: string;
   status: DelegationStatus;
   promptPending: boolean;
   createdAt: Date;
@@ -492,7 +409,6 @@ interface DelegationRecord {
   updatedAt: Date;
   timeoutAt: Date;
   progress: DelegationProgress;
-  notification: DelegationNotificationState;
   retrieval: DelegationRetrievalState;
   artifact: DelegationArtifactState;
   error?: string;
@@ -502,6 +418,7 @@ interface DelegationRecord {
 }
 
 interface DelegateInput {
+  context: ToolContext;
   parentSessionID: string;
   parentMessageID: string;
   parentAgent: string;
@@ -519,13 +436,13 @@ interface DelegationListItem {
 }
 
 interface DelegationManagerOptions {
+  nativeSubagent?: Tool.Info;
+  storage?: Plugin.Context["storage"];
   reviewProject?: string;
   reviewWorkspaces?: ReviewWorkspaces;
   maxRunTimeMs?: number;
   readPollIntervalMs?: number;
   terminalWaitGraceMs?: number;
-  idleFinalizationGraceMs?: number;
-  allCompleteQuietPeriodMs?: number;
   idGenerator?: () => string;
   // Supplying a generator explicitly opts into enrichment, including in tests.
   metadataGenerator?: typeof generateMetadata;
@@ -564,17 +481,10 @@ function parsePersistedStatus(raw: string | undefined): DelegationStatus {
 // LOGGING
 // ==========================================
 
-function createLogger(client: OpencodeClient) {
-  const log = (level: "debug" | "info" | "warn" | "error", message: string) =>
-    client.app
-      .log({
-        body: {
-          service: "background-agents",
-          level,
-          message,
-        },
-      })
-      .catch(() => {});
+function createLogger() {
+  const log = (level: "debug" | "info" | "warn" | "error", message: string) => {
+    if (level !== "debug") console[level](`[background-agents] ${message}`);
+  };
 
   return {
     debug: (message: string) => log("debug", message),
@@ -591,6 +501,9 @@ type Logger = ReturnType<typeof createLogger>;
 // ==========================================
 
 class DelegationManager {
+  private readonly observerAbort = new AbortController();
+  private readonly nativeSubagent?: Tool.Info;
+  private readonly storage?: Plugin.Context["storage"];
   private reviewResources?: Promise<ReviewWorkspaces>;
   private readonly reviewProject?: string;
   private readonly delegations = new Map<string, DelegationRecord>();
@@ -603,10 +516,9 @@ class DelegationManager {
     }
   >();
   private readonly timeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly idleFinalizationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly timeoutRequested = new Set<string>();
   private readonly finalizationLocks = new Set<string>();
   private readonly pendingByParent = new Map<string, Set<string>>();
-  private readonly parentNotificationState = new Map<string, ParentNotificationState>();
   private readonly parentPrompts = new Map<string, number>();
 
   private readonly client: OpencodeClient;
@@ -615,8 +527,6 @@ class DelegationManager {
   private readonly maxRunTimeMs: number;
   private readonly readPollIntervalMs: number;
   private readonly terminalWaitGraceMs: number;
-  private readonly idleFinalizationGraceMs: number;
-  private readonly allCompleteQuietPeriodMs: number;
   private readonly idGenerator: () => string;
   private readonly metadataGenerator: typeof generateMetadata | undefined;
 
@@ -627,6 +537,8 @@ class DelegationManager {
     options: DelegationManagerOptions = {},
   ) {
     this.client = client;
+    this.nativeSubagent = options.nativeSubagent;
+    this.storage = options.storage;
     this.reviewProject = options.reviewProject;
     if (options.reviewWorkspaces) this.reviewResources = Promise.resolve(options.reviewWorkspaces);
     this.baseDir = baseDir;
@@ -634,9 +546,6 @@ class DelegationManager {
     this.maxRunTimeMs = options.maxRunTimeMs ?? DEFAULT_MAX_RUN_TIME_MS;
     this.readPollIntervalMs = options.readPollIntervalMs ?? READ_POLL_INTERVAL_MS;
     this.terminalWaitGraceMs = options.terminalWaitGraceMs ?? TERMINAL_WAIT_GRACE_MS;
-    this.idleFinalizationGraceMs = options.idleFinalizationGraceMs ?? IDLE_FINALIZATION_GRACE_MS;
-    this.allCompleteQuietPeriodMs =
-      options.allCompleteQuietPeriodMs ?? ALL_COMPLETE_QUIET_PERIOD_MS;
     this.idGenerator = options.idGenerator ?? generateReadableId;
     this.metadataGenerator =
       options.metadataGenerator ??
@@ -650,34 +559,30 @@ class DelegationManager {
     for (let depth = 0; depth < 20; depth++) {
       if (visited.has(currentID)) {
         await this.debugLog(`getRootSessionID: parent cycle detected at ${currentID}`);
-        return currentID;
+        throw new Error("Session ancestry contains a cycle");
       }
 
       visited.add(currentID);
 
       try {
-        const session = await this.client.session.get({
-          path: {
-            id: currentID,
-          },
-        });
+        const session = await this.client.session.get({ sessionID: currentID });
 
-        if (!session.data?.parentID) {
+        if (!session.parentID) {
           return currentID;
         }
 
-        currentID = session.data.parentID;
+        currentID = session.parentID;
       } catch (error) {
         await this.debugLog(
           `getRootSessionID: failed at ${currentID}: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
-        return currentID;
+        throw new Error("Cannot establish session ancestry", { cause: error });
       }
     }
 
-    return currentID;
+    throw new Error("Session ancestry depth exceeded");
   }
 
   private reviews(): Promise<ReviewWorkspaces> {
@@ -688,34 +593,65 @@ class DelegationManager {
     return this.reviewResources;
   }
 
+  async assertReviewOpen(sessionID: string): Promise<void> {
+    const root = await this.getRootSessionID(sessionID);
+    const binding = await this.reviewBinding(root);
+    if (binding) {
+      if (binding.closedAt !== undefined) {
+        // A late synthetic delivery must not restart a closed coordinator.
+        // A new explicit user prompt may reuse its retained conversation.
+        const latest = await this.client.message.list({ sessionID: root, type: "user", order: "desc", limit: 1 });
+        const closedAt = binding.closedAt;
+        if (latest.data.some(message => message.type === "user" && message.time.created > closedAt)) {
+          await this.storage?.remove(`review-session/${root}`);
+          return;
+        }
+        throw new Error("Review workspace is closed; automatic continuation refused");
+      }
+      const owner = await (await this.reviews()).load(binding.id);
+      if (!owner.sessions.includes(root)) throw new Error("Review session ownership mismatch");
+    }
+  }
+
+  dispose(): void {
+    this.observerAbort.abort();
+    for (const timer of this.timeoutTimers.values()) clearTimeout(timer);
+  }
+
   private async reviewID(rootSessionID: string): Promise<string | undefined> {
+    return (await this.reviewBinding(rootSessionID))?.id;
+  }
+
+  private async reviewBinding(rootSessionID: string): Promise<{ id: string; closedAt?: number } | undefined> {
     if (!this.reviewProject && !this.reviewResources) return undefined;
-    const result = await this.client.session.get({ path: { id: rootSessionID } });
-    if (result.error || !result.data) throw new Error("Cannot determine delegation artifact ownership");
-    const metadata = (result.data as unknown as { metadata?: Record<string, unknown> }).metadata;
+    const result = await this.client.session.get({ sessionID: rootSessionID });
+    const metadata = result.metadata;
     if (metadata?.workcellReview) throw new Error("Old review engine session: close it with the previous version; no automatic migration");
-    const marker = metadata?.workcellReviewWorkspace as { id?: string; project?: string } | undefined;
-    if (!marker) return undefined;
+    const marker = await this.storage?.get(`review-session/${rootSessionID}`);
+    if (marker === undefined) return undefined;
     const resources = await this.reviews();
-    if (marker.project !== resources.project || typeof marker.id !== "string") throw new Error("Review project ownership mismatch");
-    resources.paths(marker.id); return marker.id;
+    const binding = z.object({ id: z.string(), closedAt: z.number().optional() }).parse(marker);
+    resources.paths(binding.id); return binding;
   }
 
   private async attachReview(owner: ReviewOwner, sessionID: string): Promise<void> {
-    const session = await this.client.session.get({ path: { id: sessionID } });
-    if (session.error || !session.data || session.data.parentID) throw new Error("Review coordinator must be a root session");
-    const metadata = (session.data as unknown as { metadata?: Record<string, unknown> }).metadata ?? {};
-    // Pinned V1 server accepts metadata, although its legacy SDK body omits this field.
-    const body = { title: `Review ${owner.id}`, metadata: { ...metadata, workcellReviewWorkspace: { id: owner.id, project: owner.project } } };
-    const updated = await this.client.session.update({ path: { id: sessionID }, body });
-    if (updated.error) throw new Error("Could not attach the review workspace");
+    const session = await this.client.session.get({ sessionID });
+    if (session.parentID) throw new Error("Review coordinator must be a root session");
+    if (!this.storage) throw new Error("Review session storage is unavailable");
+    await this.client.session.update({ sessionID, title: `Review ${owner.id}` });
+    // V2 session metadata cannot be updated. The existing plugin KV keeps this
+    // binding after scratch removal, so late native deliveries fail closed.
+    await this.storage.set(`review-session/${sessionID}`, { id: owner.id });
     if (!owner.sessions.includes(sessionID)) owner.sessions.push(sessionID);
     await (await this.reviews()).save(owner);
   }
 
   async review(args: { action: "start" | "resume" | "status" | "return" | "close"; id?: string; request: string; separate: boolean; discard: boolean }, context: ToolContext): Promise<string> {
+    if (!this.storage) throw new Error("Review session storage is unavailable");
     const resources = await this.reviews();
-    if (await fs.realpath(context.directory) !== resources.project) throw new Error("Review belongs to another project");
+    const caller = await this.client.session.get({ sessionID: context.sessionID });
+    if (caller.parentID) throw new Error("Review coordinator must be a root session");
+    if (await fs.realpath(caller.location.directory) !== resources.project) throw new Error("Review belongs to another project");
     let bound = await this.reviewID(await this.getRootSessionID(context.sessionID));
     if (bound && args.action === "start" && !args.id) {
       try { await fs.lstat(resources.paths(bound).root); }
@@ -729,6 +665,8 @@ class DelegationManager {
           owner.closing = true; await resources.save(owner);
           await this.stopReview(owner, context.sessionID);
           await resources.remove(owner, args.discard);
+          for (const sessionID of owner.sessions) await this.storage!.set(`review-session/${sessionID}`, { id: owner.id, closedAt: Date.now() });
+          if (owner.sessions.includes(context.sessionID)) await this.storage?.remove(`review-session/${context.sessionID}`);
           for (const [key, record] of this.delegations) if (record.artifact.reviewID === owner.id) this.delegations.delete(key);
         }, true);
       } catch (error) {
@@ -750,22 +688,42 @@ class DelegationManager {
       await resources.use(owner.id, async (current) => { await this.attachReview(current, context.sessionID); owner.sessions = current.sessions; });
       return view();
     }
-    const status = await this.client.session.status({});
-    if (status.error || !status.data) throw new Error("Could not check existing review session activity");
     let coordinator = owner.sessions.at(-1);
     if (coordinator === context.sessionID && context.agent !== "review") coordinator = undefined;
-    if (coordinator && status.data[coordinator] && status.data[coordinator].type !== "idle") {
+    if (coordinator && (await this.client.session.active())[coordinator]) {
       return JSON.stringify({ id: owner.id, session: coordinator, ...resources.paths(owner.id), busy: true, requestDelivered: false, next: "Wait for the active review, then resume to send this request." });
     }
     await resources.use(owner.id, async (current) => {
-      if (!coordinator || (await this.client.session.get({ path: { id: coordinator } })).error) {
-        const created = await this.client.session.create({ body: { title: `Review ${owner.id}` } });
-        if (created.error || !created.data) throw new Error("Could not create a review session");
-        coordinator = created.data.id;
+      let createdHere = false;
+      if (coordinator) {
+        let retained;
+        try { retained = await this.client.session.get({ sessionID: coordinator }); }
+        catch (error) { if (!isSessionNotFoundError(error)) throw error; coordinator = undefined; }
+        if (retained && retained.agent !== "review") {
+          try {
+            await this.client.session.switchAgent({ sessionID: retained.id, agent: "review" });
+            if ((await this.client.session.get({ sessionID: retained.id })).agent !== "review") throw new Error("Agent switch was not applied");
+          } catch (error) {
+            throw new Error("Could not restore the review coordinator's review agent; no request was delivered", { cause: error });
+          }
+        }
+      }
+      if (!coordinator) {
+        const created = await this.client.session.create({ title: `Review ${owner.id}`, agent: "review", location: caller.location });
+        coordinator = created.id;
+        createdHere = true;
       }
       current.origin = context.sessionID;
       current.originAgent = context.agent;
-      await this.attachReview(current, coordinator!); owner.sessions = current.sessions;
+      try { await this.attachReview(current, coordinator!); }
+      catch (error) {
+        if (createdHere) {
+          await this.client.session.remove({ sessionID: coordinator! });
+          await this.storage!.remove(`review-session/${coordinator}`);
+        }
+        throw error;
+      }
+      owner.sessions = current.sessions;
     });
     const paths = resources.paths(owner.id);
     const request = args.request || (args.action === "resume"
@@ -778,34 +736,61 @@ class DelegationManager {
   async pinReview(args: { id: string; head: string; pr?: number; discard: boolean }): Promise<string> {
     const resources = await this.reviews();
     return resources.use(args.id, async (owner) => {
-      const status = await this.client.session.status({});
-      if (status.error || !status.data || owner.workers.some((id) => status.data?.[id] && status.data[id].type !== "idle") || [...this.delegations.values()].some((d) => d.artifact.reviewID === owner.id && (isActiveStatus(d.status) || d.promptPending || this.finalizationLocks.has(d.id)))) throw new Error("Wait for review workers before changing the checkout");
+      const active = await this.client.session.active();
+      if (owner.workers.some((id) => active[id]) || [...this.delegations.values()].some((d) => d.artifact.reviewID === owner.id && (isActiveStatus(d.status) || d.promptPending || this.finalizationLocks.has(d.id)))) throw new Error("Wait for review workers before changing the checkout");
       await resources.pin(owner, args.head, args.pr, args.discard);
       return JSON.stringify({ id: owner.id, head: owner.head, ...resources.paths(owner.id) });
     });
   }
 
   private async stopReview(owner: ReviewOwner, currentSession: string): Promise<void> {
-    for (const root of owner.sessions) {
-      const state = this.parentNotificationState.get(root);
-      if (state) this.cancelScheduledAllComplete(state);
-    }
     const ids = [...owner.workers, ...owner.sessions.filter((id) => id !== currentSession)];
     for (const id of ids) {
-      const result = await this.client.session.abort({ path: { id } });
-      if (result.error && (await this.client.session.get({ path: { id } })).response.status !== 404) throw new Error("Could not stop a review session; retry close");
+      try { await this.client.session.interrupt({ sessionID: id }); }
+      catch (error) { if (!isSessionNotFoundError(error)) throw error; }
     }
     for (const d of this.delegations.values()) if (d.artifact.reviewID === owner.id && isActiveStatus(d.status)) await this.finalizeDelegation(d.id, "cancelled", "Review explicitly closed");
     for (let attempt = 0; attempt < 100; attempt++) {
-      const status = await this.client.session.status({});
-      if (status.error || !status.data) throw new Error("Could not verify review worker termination");
-      if (ids.every((id) => !status.data![id] || status.data![id].type === "idle") && !owner.sessions.some((id) => id !== currentSession && this.parentPrompts.has(id)) && ![...this.delegations.values()].some((d) => d.artifact.reviewID === owner.id && (d.promptPending || this.finalizationLocks.has(d.id)))) {
-        if (owner.sessions.includes(currentSession) && this.parentPrompts.has(currentSession)) throw new Error("Workers stopped. Finish this review turn and close from the origin, or retry after the turn is idle");
+      const active = await this.client.session.active();
+      if (ids.every((id) => !active[id]) && !owner.sessions.some((id) => id !== currentSession && this.parentPrompts.has(id)) && ![...this.delegations.values()].some((d) => d.artifact.reviewID === owner.id && (d.promptPending || this.finalizationLocks.has(d.id)))) {
+        // A terminal child is not a delivery barrier: the native observer can
+        // still resume its parent. Wait for each owned child's durable synthetic
+        // message before cleanup, then interrupt any notification-driven run.
+        const delivered = new Set<string>();
+        for (const parent of owner.sessions) {
+          try {
+            for (const message of await this.syntheticHistory(parent)) {
+              if (message.type === "synthetic" && message.metadata?.source === "subagent" && typeof message.metadata.childID === "string") delivered.add(message.metadata.childID);
+            }
+          } catch (error) { if (!isSessionNotFoundError(error)) throw error; }
+        }
+        if (!owner.workers.every(id => delivered.has(id))) {
+          if (owner.sessions.includes(currentSession)) throw new Error("Workers stopped; native completion delivery is pending in this turn. Close from another root session (normally the origin) after this turn ends. Workspace retained.");
+          await sleep(100);
+          continue;
+        }
+        for (const sessionID of owner.sessions.filter(id => id !== currentSession)) {
+          try {
+            await this.client.session.interrupt({ sessionID });
+            await this.client.session.wait({ sessionID });
+          } catch (error) { if (!isSessionNotFoundError(error)) throw error; }
+        }
         return;
       }
       await sleep(100);
     }
-    throw new Error("Review workers have not stopped; workspace retained, retry close");
+    throw new Error("Review workers or native completion deliveries have not settled; workspace retained, retry close");
+  }
+
+  private async syntheticHistory(sessionID: string): Promise<SessionMessageInfo[]> {
+    const messages: SessionMessageInfo[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.client.message.list({ sessionID, type: "synthetic", limit: 100, ...(cursor ? { cursor } : { order: "desc" }) });
+      messages.push(...page.data);
+      if (!page.data.length || !page.cursor?.next || page.cursor.next === cursor) return messages;
+      cursor = page.cursor.next;
+    }
   }
 
   private async getDelegationsDir(sessionID: string): Promise<string> {
@@ -888,93 +873,14 @@ class DelegationManager {
     this.timeoutTimers.delete(id);
   }
 
-  private clearIdleFinalizationTimer(id: string): void {
-    const timer = this.idleFinalizationTimers.get(id);
-
-    if (!timer) {
-      return;
-    }
-
-    clearTimeout(timer);
-    this.idleFinalizationTimers.delete(id);
-  }
-
   private scheduleTimeout(id: string): void {
     this.clearTimeoutTimer(id);
 
     const timer = setTimeout(() => {
-      void this.handleTimeout(id);
-    }, this.maxRunTimeMs + 5_000);
+      void this.handleTimeout(id).catch(error => this.log.warn(`Delegation timeout cleanup retained: ${error}`));
+    }, Math.max(0, (this.delegations.get(id)?.timeoutAt.getTime() ?? Date.now()) - Date.now()) + 5_000);
 
     this.timeoutTimers.set(id, timer);
-  }
-
-  private scheduleIdleFinalization(id: string): void {
-    if (this.idleFinalizationTimers.has(id)) {
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      this.idleFinalizationTimers.delete(id);
-
-      const delegation = this.delegations.get(id);
-
-      if (!delegation || isTerminalStatus(delegation.status)) {
-        return;
-      }
-
-      void this.finalizeDelegation(id, "complete");
-    }, this.idleFinalizationGraceMs);
-
-    this.idleFinalizationTimers.set(id, timer);
-  }
-
-  private getParentNotificationState(parentSessionID: string): ParentNotificationState {
-    const existing = this.parentNotificationState.get(parentSessionID);
-
-    if (existing) {
-      return existing;
-    }
-
-    const initialCycle = 0;
-    const initialized: ParentNotificationState = {
-      allCompleteNotificationCount: 0,
-      allCompleteCycle: initialCycle,
-      allCompleteCycleToken: this.buildAllCompleteCycleToken(parentSessionID, initialCycle),
-    };
-
-    this.parentNotificationState.set(parentSessionID, initialized);
-
-    return initialized;
-  }
-
-  private buildAllCompleteCycleToken(parentSessionID: string, cycle: number): string {
-    return `${parentSessionID}:${cycle}`;
-  }
-
-  private cancelScheduledAllComplete(state: ParentNotificationState): void {
-    if (state.allCompleteScheduledTimer) {
-      clearTimeout(state.allCompleteScheduledTimer);
-    }
-
-    state.allCompleteScheduledTimer = undefined;
-    state.allCompleteScheduledCycleToken = undefined;
-  }
-
-  private beginParentNotificationCycle(parentSessionID: string): ParentNotificationState {
-    const state = this.getParentNotificationState(parentSessionID);
-
-    this.cancelScheduledAllComplete(state);
-
-    state.allCompleteCycle += 1;
-    state.allCompleteCycleToken = this.buildAllCompleteCycleToken(
-      parentSessionID,
-      state.allCompleteCycle,
-    );
-    state.allCompleteNotifiedAt = undefined;
-    state.allCompleteNotifiedCycleToken = undefined;
-
-    return state;
   }
 
   private registerDelegation(input: {
@@ -993,10 +899,7 @@ class DelegationManager {
     if (!pending) {
       pending = new Set<string>();
       this.pendingByParent.set(input.parentSessionID, pending);
-      this.beginParentNotificationCycle(input.parentSessionID);
     }
-
-    const parentState = this.getParentNotificationState(input.parentSessionID);
 
     const now = new Date();
 
@@ -1009,8 +912,6 @@ class DelegationManager {
       parentAgent: input.parentAgent,
       prompt: input.prompt,
       agent: input.agent,
-      notificationCycle: parentState.allCompleteCycle,
-      notificationCycleToken: parentState.allCompleteCycleToken,
       status: "registered",
       promptPending: true,
       createdAt: now,
@@ -1020,9 +921,6 @@ class DelegationManager {
         toolCalls: 0,
         lastUpdateAt: now,
         lastHeartbeatAt: now,
-      },
-      notification: {
-        terminalNotificationCount: 0,
       },
       retrieval: {
         retrievalCount: 0,
@@ -1093,12 +991,11 @@ class DelegationManager {
 
     this.finalizationLocks.add(id);
     this.clearTimeoutTimer(id);
-    this.clearIdleFinalizationTimer(id);
 
     this.updateDelegation(id, (record) => {
       record.status = "finalizing";
-      // Idle, timeout and cancellation can precede transport settlement.
-      // Only markPromptSettled may clear promptPending after session.prompt settles.
+      // Timeout and cancellation can precede native execution settlement.
+      // Only markPromptSettled may clear promptPending after session.wait settles.
     });
 
     return true;
@@ -1120,6 +1017,7 @@ class DelegationManager {
     delegation.status = status;
     delegation.completedAt = now;
     delegation.updatedAt = now;
+    this.timeoutRequested.delete(id);
 
     if (error) {
       delegation.error = error;
@@ -1138,20 +1036,6 @@ class DelegationManager {
     this.resolveTerminalWaiter(id);
 
     return delegation;
-  }
-
-  private markNotified(id: string): void {
-    this.updateDelegation(id, (delegation, now) => {
-      delegation.notification.terminalNotifiedAt = now;
-      delegation.notification.terminalNotificationCount += 1;
-      delegation.notification.terminalNotificationError = undefined;
-    });
-  }
-
-  private markNotificationError(id: string, error: string): void {
-    this.updateDelegation(id, (delegation) => {
-      delegation.notification.terminalNotificationError = error;
-    });
   }
 
   private markRetrieved(id: string, readerSessionID: string): void {
@@ -1214,37 +1098,18 @@ class DelegationManager {
 
   private async readResultFromSession(delegation: DelegationRecord): Promise<string> {
     try {
-      const messages = await this.client.session.messages({
-        path: {
-          id: delegation.sessionID,
-        },
-      });
-
-      const messageData = messages.data as SessionMessageItem[] | undefined;
-
-      if (!messageData?.length) {
-        await this.debugLog(`readResultFromSession: no messages for ${delegation.id}`);
-        return "";
-      }
-
-      const assistantMessages = messageData.filter(
-        (message): message is AssistantSessionMessageItem => message.info.role === "assistant",
-      );
-
-      for (let index = assistantMessages.length - 1; index >= 0; index--) {
-        const text = extractTextFromParts(assistantMessages[index].parts);
-
-        if (text) {
-          return text;
+      let cursor: string | undefined;
+      for (;;) {
+        const messages = await this.client.message.list({ sessionID: delegation.sessionID, type: "assistant", limit: 100, ...(cursor ? { cursor } : { order: "desc" }) });
+        for (const message of messages.data) {
+          if (message.type !== "assistant") continue;
+          const text = extractTextFromParts(message.content);
+          if (text) return text;
         }
+        if (!messages.data.length || !messages.cursor?.next || messages.cursor.next === cursor) break;
+        cursor = messages.cursor.next;
       }
-
-      await this.debugLog(
-        `readResultFromSession: no assistant text for ${delegation.id}; roles=${messageData
-          .map((message) => message.info.role)
-          .join(",")}`,
-      );
-
+      await this.debugLog(`readResultFromSession: no assistant text for ${delegation.id}`);
       return "";
     } catch (error) {
       await this.debugLog(
@@ -1336,10 +1201,11 @@ class DelegationManager {
     ].join("\n");
   }
 
-  private async persistOutput(delegation: DelegationRecord, content: string): Promise<void> {
+  private async persistOutput(delegation: DelegationRecord, content: string, ownershipHeld = false): Promise<void> {
     const temporaryPath = `${delegation.artifact.filePath}.tmp-${process.pid}-${Date.now()}`;
 
     try {
+      if (delegation.artifact.reviewID && (await (await this.reviews()).load(delegation.artifact.reviewID, true)).closing) throw new Error("Review is closing; result retained in native history until cleanup");
       const artifactContent = this.buildArtifactContent(delegation, content);
 
       const write = async () => {
@@ -1347,7 +1213,7 @@ class DelegationManager {
         await fs.writeFile(temporaryPath, artifactContent, { encoding: "utf8", mode: 0o600 });
         await fs.rename(temporaryPath, delegation.artifact.filePath);
       };
-      if (delegation.artifact.reviewID) await (await this.reviews()).use(delegation.artifact.reviewID, write);
+      if (delegation.artifact.reviewID && !ownershipHeld) await (await this.reviews()).use(delegation.artifact.reviewID, write);
       else await write();
 
       const statistics = await fs.stat(delegation.artifact.filePath);
@@ -1410,155 +1276,6 @@ class DelegationManager {
     }
   }
 
-  private buildTerminalNotification(delegation: DelegationRecord, remainingCount: number): string {
-    const lines = [
-      "<task-notification>",
-      `<task-id>${escapeXml(delegation.id)}</task-id>`,
-      `<status>${escapeXml(delegation.status)}</status>`,
-      `<summary>${escapeXml(
-        `Background agent ${delegation.status}: ${delegation.title || delegation.id}`,
-      )}</summary>`,
-      delegation.title ? `<title>${escapeXml(delegation.title)}</title>` : "",
-      delegation.description
-        ? `<description>${escapeXml(delegation.description)}</description>`
-        : "",
-      delegation.error ? `<error>${escapeXml(delegation.error)}</error>` : "",
-      `<artifact>${escapeXml(delegation.artifact.filePath)}</artifact>`,
-      `<retrieval>${escapeXml(
-        `Use delegation_read("${delegation.id}") for full output.`,
-      )}</retrieval>`,
-      remainingCount > 0 ? `<remaining>${remainingCount}</remaining>` : "",
-      "</task-notification>",
-    ];
-
-    return lines.filter((line) => line.length > 0).join("\n");
-  }
-
-  private buildAllCompleteNotification(
-    parentSessionID: string,
-    cycle: number,
-    cycleToken: string,
-  ): string {
-    return [
-      "<task-notification>",
-      "<type>all-complete</type>",
-      "<status>completed</status>",
-      "<summary>All delegations complete.</summary>",
-      `<parent-session-id>${escapeXml(parentSessionID)}</parent-session-id>`,
-      `<cycle>${cycle}</cycle>`,
-      `<cycle-token>${escapeXml(cycleToken)}</cycle-token>`,
-      "</task-notification>",
-    ].join("\n");
-  }
-
-  private areCycleTerminalNotificationsComplete(
-    parentSessionID: string,
-    cycleToken: string,
-  ): boolean {
-    let count = 0;
-
-    for (const delegation of this.delegations.values()) {
-      if (
-        delegation.parentSessionID !== parentSessionID ||
-        delegation.notificationCycleToken !== cycleToken
-      ) {
-        continue;
-      }
-
-      count += 1;
-
-      if (!isTerminalStatus(delegation.status) || !delegation.notification.terminalNotifiedAt) {
-        return false;
-      }
-    }
-
-    return count > 0;
-  }
-
-  private scheduleAllCompleteForParent(parentSessionID: string, parentAgent: string): void {
-    const state = this.getParentNotificationState(parentSessionID);
-    const cycleToken = state.allCompleteCycleToken;
-
-    if (!this.areCycleTerminalNotificationsComplete(parentSessionID, cycleToken)) {
-      return;
-    }
-
-    if (
-      state.allCompleteNotifiedCycleToken === cycleToken ||
-      state.allCompleteScheduledCycleToken === cycleToken
-    ) {
-      return;
-    }
-
-    this.cancelScheduledAllComplete(state);
-    state.allCompleteScheduledCycleToken = cycleToken;
-
-    state.allCompleteScheduledTimer = setTimeout(() => {
-      void this.dispatchAllComplete(
-        parentSessionID,
-        parentAgent,
-        state.allCompleteCycle,
-        cycleToken,
-      );
-    }, this.allCompleteQuietPeriodMs);
-  }
-
-  private async dispatchAllComplete(
-    parentSessionID: string,
-    parentAgent: string,
-    cycle: number,
-    cycleToken: string,
-  ): Promise<void> {
-    try {
-      const reviewID = await this.reviewID(parentSessionID);
-      if (reviewID) await (await this.reviews()).load(reviewID);
-    } catch {
-      // Closed or unavailable ownership must not restart the coordinator from a timer.
-      return;
-    }
-    const state = this.getParentNotificationState(parentSessionID);
-
-    if (state.allCompleteScheduledCycleToken !== cycleToken) {
-      return;
-    }
-
-    this.cancelScheduledAllComplete(state);
-
-    if (
-      state.allCompleteCycleToken !== cycleToken ||
-      state.allCompleteNotifiedCycleToken === cycleToken ||
-      !this.areCycleTerminalNotificationsComplete(parentSessionID, cycleToken)
-    ) {
-      return;
-    }
-
-    try {
-      await this.promptParentWithRetry(
-        parentSessionID,
-        parentAgent,
-        this.buildAllCompleteNotification(parentSessionID, cycle, cycleToken),
-        false,
-      );
-
-      if (
-        state.allCompleteCycleToken !== cycleToken ||
-        !this.areCycleTerminalNotificationsComplete(parentSessionID, cycleToken)
-      ) {
-        return;
-      }
-
-      state.allCompleteNotifiedAt = new Date();
-      state.allCompleteNotificationCount += 1;
-      state.allCompleteNotifiedCycleToken = cycleToken;
-    } catch (error) {
-      await this.debugLog(
-        `dispatchAllComplete(${cycleToken}): ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-  }
-
   private async promptParentWithRetry(
     parentSessionID: string,
     parentAgent: string,
@@ -1578,22 +1295,10 @@ class DelegationManager {
         if (reviewID) await (await this.reviews()).load(reviewID);
 
         try {
-          const response = await this.client.session.prompt({
-            path: {
-              id: parentSessionID,
-            },
-            body: {
-              noReply,
-              agent: parentAgent,
-              parts: [
-                {
-                  type: "text",
-                  text,
-                },
-              ],
-            },
-          });
-          if (response?.error) throw new Error("Session notification failed");
+          if (!noReply && (await this.client.session.get({ sessionID: parentSessionID })).agent !== parentAgent) throw new Error("Review coordinator agent changed before delivery; resume the review explicitly");
+          // Synthetic admission preserves the origin's currently selected agent.
+          // Returning a review never switches the user's primary mode.
+          await this.client.session.synthetic({ sessionID: parentSessionID, text, resume: !noReply });
 
           return;
         } catch (error) {
@@ -1606,39 +1311,6 @@ class DelegationManager {
       const count = (this.parentPrompts.get(parentSessionID) ?? 1) - 1;
       if (count) this.parentPrompts.set(parentSessionID, count);
       else this.parentPrompts.delete(parentSessionID);
-    }
-  }
-
-  private async notifyParent(delegationID: string): Promise<void> {
-    const delegation = this.delegations.get(delegationID);
-
-    if (
-      !delegation ||
-      !isTerminalStatus(delegation.status) ||
-      delegation.notification.terminalNotifiedAt
-    ) {
-      return;
-    }
-
-    const remainingCount = this.getPendingCount(delegation.parentSessionID);
-    if (delegation.artifact.reviewID) { try { await (await this.reviews()).load(delegation.artifact.reviewID); } catch { return; } }
-
-    try {
-      await this.promptParentWithRetry(
-        delegation.parentSessionID,
-        delegation.parentAgent,
-        this.buildTerminalNotification(delegation, remainingCount),
-        true,
-      );
-
-      this.markNotified(delegation.id);
-      this.scheduleAllCompleteForParent(delegation.parentSessionID, delegation.parentAgent);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-
-      this.markNotificationError(delegation.id, message);
-
-      await this.debugLog(`notifyParent(${delegation.id}): ${message}`);
     }
   }
 
@@ -1677,8 +1349,8 @@ class DelegationManager {
       delegation.description = fallbackMetadata.description;
 
       /*
-       * Persist before terminal waiters are resolved or the parent is
-       * notified. The persisted header initially uses deterministic
+       * Persist before terminal readers are resolved. Native delivery may
+       * already have resumed the parent. The header initially uses deterministic
        * metadata, which remains authoritative unless optional enrichment succeeds.
        */
       delegation.status = targetStatus;
@@ -1692,7 +1364,8 @@ class DelegationManager {
         return;
       }
 
-      await this.notifyParent(finalized.id);
+      // Native background jobs exclusively own completion delivery and wakeups.
+      // Readers reconcile this artifact if the native notice arrives first.
 
       /*
        * Metadata enrichment is deliberately outside the completion
@@ -1721,9 +1394,7 @@ class DelegationManager {
 
         const finalized = this.completeFinalization(delegation.id, "error", message);
 
-        if (finalized) {
-          await this.notifyParent(finalized.id);
-        }
+        if (!finalized) return;
       }
     } finally {
       this.finalizationLocks.delete(delegationID);
@@ -1731,14 +1402,9 @@ class DelegationManager {
   }
 
   private async validateDelegationAgent(agentName: string): Promise<void> {
-    const agentsResult = await this.client.app.agents({});
-    const agents = (agentsResult.data ?? []) as Array<{
-      name: string;
-      description?: string;
-      mode?: string;
-    }>;
+    const { data: agents } = await this.client.agent.list();
 
-    const agent = agents.find((candidate) => candidate.name === agentName);
+    const agent = agents.find((candidate) => candidate.id === agentName);
 
     if (!agent) {
       const available = agents
@@ -1749,7 +1415,7 @@ class DelegationManager {
         .map((candidate) => {
           const description = candidate.description ? ` - ${candidate.description}` : "";
 
-          return `• ${candidate.name}${description}`;
+          return `• ${candidate.id}${description}`;
         })
         .join("\n");
 
@@ -1771,7 +1437,7 @@ class DelegationManager {
 
     if (!ASYNC_AGENTS.has(agentName)) {
       const taskGuidance = TASK_AGENTS.has(agentName)
-        ? `Agent "${agentName}" is task-routed because it may write files, run commands, or perform external mutations. Use native \`task\`.`
+        ? `Agent "${agentName}" is task-routed because it may write files, run commands, or perform external mutations. Use native \`subagent\`.`
         : `Agent "${agentName}" is not present in KDCO_ASYNC_AGENTS. Add it explicitly only after confirming that asynchronous execution is safe.`;
 
       throw new Error(taskGuidance);
@@ -1779,6 +1445,7 @@ class DelegationManager {
   }
 
   async delegate(input: DelegateInput): Promise<DelegationRecord> {
+    if (!input.context.agent || input.parentSessionID !== input.context.sessionID || input.parentMessageID !== input.context.messageID || input.parentAgent !== input.context.agent) throw new Error("Delegation caller identity does not match its native tool context");
     await this.validateDelegationAgent(input.agent);
 
     const artifactDirectory = await this.ensureDelegationsDir(input.parentSessionID);
@@ -1788,24 +1455,28 @@ class DelegationManager {
     const artifactPath = resolveDelegationArtifactPath(artifactDirectory, stableID);
 
     const launch = async (owner?: ReviewOwner): Promise<DelegationRecord> => {
-      const sessionResult = await this.client.session.create({
-        body: {
-          title: `Delegation: ${stableID}`,
-          parentID: input.parentSessionID,
-        },
-      });
-      if (!sessionResult.data?.id) {
-        throw new Error("Failed to create the delegation session");
-      }
+      if (!this.nativeSubagent) throw new Error("Native subagent executor unavailable");
+      const schema = this.nativeSubagent.input;
+      if ((typeof schema !== "object" && typeof schema !== "function") || schema === null || !("make" in schema) || typeof schema.make !== "function") throw new Error("Unsupported native subagent input schema");
+      const mapped = schema.make({ agent: input.agent, description: `Delegation: ${stableID}`, prompt: input.prompt, background: true });
+      const result = await this.nativeSubagent.execute(mapped, input.context);
+      const output = z.object({ sessionID: z.string(), status: z.literal("running") }).parse(result.output);
+      const child = await this.client.session.get({ sessionID: output.sessionID });
+      if (child.parentID !== input.parentSessionID) throw new Error("Native child ownership mismatch");
       if (owner) {
-        owner.workers.push(sessionResult.data.id);
-        await (await this.reviews()).save(owner);
+        owner.workers.push(child.id);
+        try { await (await this.reviews()).save(owner); }
+        catch (error) {
+          await this.client.session.interrupt({ sessionID: child.id });
+          await this.client.session.remove({ sessionID: child.id });
+          throw error;
+        }
       }
 
       const delegation = this.registerDelegation({
         id: stableID,
         rootSessionID,
-        sessionID: sessionResult.data.id,
+        sessionID: child.id,
         parentSessionID: input.parentSessionID,
         parentMessageID: input.parentMessageID,
         parentAgent: input.parentAgent,
@@ -1816,52 +1487,27 @@ class DelegationManager {
       delegation.artifact.reviewID = reviewID;
       this.scheduleTimeout(delegation.id);
       this.markStarted(delegation.id);
-      void this.executeDelegationPrompt(delegation);
+      await this.persistOutput(delegation, "Delegation is running; use delegation_read to await its terminal result.", owner !== undefined);
+      void this.observeNativeExecution(delegation);
       return delegation;
     };
     return reviewID ? (await this.reviews()).use(reviewID, launch) : launch();
   }
 
-  private async executeDelegationPrompt(delegation: DelegationRecord): Promise<void> {
+  private async observeNativeExecution(delegation: DelegationRecord): Promise<void> {
     try {
-      const response = await this.client.session.prompt({
-        path: {
-          id: delegation.sessionID,
-        },
-        body: {
-          agent: delegation.agent,
-          parts: [
-            {
-              type: "text",
-              text: delegation.prompt,
-            },
-          ],
-          tools: {
-            task: false,
-            delegate: false,
-            // Preserve the reviewer's configured read permissions, never grant them.
-            ...(delegation.agent === "reviewer"
-              ? {}
-              : { delegation_read: false, delegation_list: false }),
-            todowrite: false,
-            plan_save: false,
-          },
-        },
-      });
-
-      if (response.error) throw new Error("Delegation prompt failed; inspect the host session");
+      await this.client.session.wait({ sessionID: delegation.sessionID }, { signal: this.observerAbort.signal });
+      const session = await this.client.session.get({ sessionID: delegation.sessionID });
 
       this.markPromptSettled(delegation.id);
 
-      const directResult = extractTextFromParts(response.data?.parts);
-
       await this.finalizeDelegation(
         delegation.id,
-        "complete",
-        undefined,
-        directResult || undefined,
+        this.timeoutRequested.has(delegation.id) ? "timeout" : session.outcome === "interrupted" ? "cancelled" : session.outcome === "succeeded" ? "complete" : "error",
+        this.timeoutRequested.has(delegation.id) ? "Delegation deadline exceeded" : session.outcome === "failed" ? "Native child execution failed" : undefined,
       );
     } catch (error) {
+      if (this.observerAbort.signal.aborted) return;
       this.markPromptSettled(delegation.id);
 
       const existing = this.delegations.get(delegation.id);
@@ -1886,6 +1532,12 @@ class DelegationManager {
     }
 
     await this.debugLog(`handleTimeout(${delegation.id})`);
+    this.timeoutRequested.add(delegation.id);
+
+    // Freeze native execution before reading partial output. Native owns the
+    // cancellation notice; no second custom notification is emitted here.
+    await this.client.session.interrupt({ sessionID: delegation.sessionID });
+    await this.client.session.wait({ sessionID: delegation.sessionID });
 
     /*
      * Retrieve and persist partial output before deleting the child
@@ -1897,32 +1549,15 @@ class DelegationManager {
       `Delegation timed out after ${this.maxRunTimeMs / 1_000} seconds`,
     );
 
+    if (await this.waitForTerminal(delegation.id, this.terminalWaitGraceMs) !== "terminal") {
+      throw new Error("Timed-out child stopped, but artifact finalization is pending; session retained");
+    }
+
     try {
-      await this.client.session.delete({
-        path: {
-          id: delegation.sessionID,
-        },
-      });
+      await this.client.session.remove({ sessionID: delegation.sessionID });
     } catch {
       // The session may already be absent.
     }
-  }
-
-  async handleSessionIdle(sessionID: string): Promise<void> {
-    const delegation = this.getDelegationBySession(sessionID);
-
-    if (!delegation || isTerminalStatus(delegation.status) || delegation.status === "finalizing") {
-      return;
-    }
-
-    /*
-     * session.prompt() is the preferred completion signal because its
-     * returned assistant parts are the most reliable result source.
-     *
-     * The idle event is retained as a delayed fallback for provider or SDK
-     * cases where the prompt promise does not settle cleanly.
-     */
-    this.scheduleIdleFinalization(delegation.id);
   }
 
   handleMessageEvent(sessionID: string, messageText?: string): void {
@@ -1935,7 +1570,8 @@ class DelegationManager {
     this.markProgress(delegation.id, messageText);
   }
 
-  private async waitForTerminal(id: string, timeoutMs: number): Promise<"terminal" | "timeout"> {
+  private async waitForTerminal(id: string, timeoutMs: number, signal?: AbortSignal): Promise<"terminal" | "timeout"> {
+    signal?.throwIfAborted();
     const delegation = this.delegations.get(id);
 
     if (!delegation) {
@@ -1953,6 +1589,7 @@ class DelegationManager {
     }
 
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
 
     try {
       return await Promise.race([
@@ -1962,11 +1599,16 @@ class DelegationManager {
             resolve("timeout");
           }, timeoutMs);
         }),
+        new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(signal?.reason ?? new Error("Delegation read interrupted"));
+          signal?.addEventListener("abort", onAbort, { once: true });
+        }),
       ]);
     } finally {
       if (timer) {
         clearTimeout(timer);
       }
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
   }
 
@@ -1981,13 +1623,15 @@ class DelegationManager {
   private async waitForPersistedArtifact(
     filePath: string,
     maxWaitMs: number,
+    signal?: AbortSignal,
   ): Promise<string | null> {
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < maxWaitMs) {
+      signal?.throwIfAborted();
       const content = await this.readPersistedArtifact(filePath);
 
-      if (content !== null) {
+      if (content !== null && !isActiveStatus(parsePersistedStatus(content.match(/^\*\*Status:\*\* (.+)$/m)?.[1]))) {
         return content;
       }
 
@@ -2030,7 +1674,37 @@ class DelegationManager {
     return lines.join("\n");
   }
 
-  async readOutput(sessionID: string, id: string): Promise<string> {
+  private async recoverDelegation(root: string, id: string, artifactPath: string, content: string): Promise<DelegationRecord | undefined> {
+    if (!isActiveStatus(parsePersistedStatus(content.match(/^\*\*Status:\*\* (.+)$/m)?.[1]))) return undefined;
+    const existing = this.delegations.get(id);
+    if (existing) {
+      if (existing.rootSessionID !== root) throw new Error("Delegation ID collision across root sessions; artifacts retained");
+      return existing;
+    }
+    const sessionID = content.match(/^\*\*Session:\*\* (.+)$/m)?.[1];
+    if (!sessionID) throw new Error("Running delegation artifact has no native session ID");
+    const child = await this.client.session.get({ sessionID });
+    if (!child.parentID || await this.getRootSessionID(child.id) !== root) throw new Error("Recovered delegation ancestry mismatch");
+    const parent = await this.client.session.get({ sessionID: child.parentID });
+    if (!parent.agent || !child.agent) throw new Error("Recovered delegation has unknown agent identity");
+    const recovered = this.delegations.get(id);
+    if (recovered) {
+      if (recovered.rootSessionID !== root) throw new Error("Delegation ID collision across root sessions; artifacts retained");
+      return recovered;
+    }
+    const record = this.registerDelegation({ id, rootSessionID: root, sessionID, parentSessionID: child.parentID, parentMessageID: "", parentAgent: parent.agent, agent: child.agent, prompt: "(recovered from native session)", artifactPath });
+    record.artifact.reviewID = await this.reviewID(root);
+    record.startedAt = new Date(child.time.created);
+    record.timeoutAt = new Date(child.time.created + this.maxRunTimeMs);
+    this.markStarted(id);
+    this.scheduleTimeout(id);
+    if (child.outcome) await this.observeNativeExecution(record);
+    else void this.observeNativeExecution(record);
+    return record;
+  }
+
+  async readOutput(sessionID: string, id: string, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const normalizedID = parseDelegationID(id);
 
     const rootSessionID = await this.getRootSessionID(sessionID);
@@ -2049,8 +1723,9 @@ class DelegationManager {
     const artifactPath = delegation?.artifact.filePath || fallbackFilePath;
 
     const immediate = await this.readPersistedArtifact(artifactPath);
+    if (!delegation && immediate !== null) delegation = await this.recoverDelegation(rootSessionID, normalizedID, artifactPath, immediate);
 
-    if (immediate !== null) {
+    if (immediate !== null && !isActiveStatus(parsePersistedStatus(immediate.match(/^\*\*Status:\*\* (.+)$/m)?.[1]))) {
       if (delegation) {
         this.markRetrieved(delegation.id, sessionID);
       }
@@ -2074,7 +1749,7 @@ class DelegationManager {
         this.readPollIntervalMs,
       );
 
-      const waitResult = await this.waitForTerminal(delegation.id, remainingMs);
+      const waitResult = await this.waitForTerminal(delegation.id, remainingMs, signal);
 
       if (waitResult === "timeout" && isActiveStatus(delegation.status)) {
         await this.handleTimeout(delegation.id);
@@ -2084,6 +1759,7 @@ class DelegationManager {
     const delayed = await this.waitForPersistedArtifact(
       delegation.artifact.filePath,
       Math.max(this.readPollIntervalMs * 8, 500),
+      signal,
     );
 
     if (delayed !== null) {
@@ -2156,6 +1832,10 @@ class DelegationManager {
           }
 
           status = parsePersistedStatus(statusMatch?.[1]?.trim());
+          if (isActiveStatus(status)) {
+            const recovered = await this.recoverDelegation(rootSessionID, id, path.join(directory, file), content);
+            if (recovered) status = recovered.status;
+          }
 
           const lines = content.split("\n");
 
@@ -2244,8 +1924,8 @@ interface DelegateArgs {
   agent: string;
 }
 
-function createDelegate(manager: DelegationManager): ReturnType<typeof tool> {
-  return tool({
+function createDelegate(getManager: () => Promise<DelegationManager>) {
+  return { name: "delegate", options: { codemode: false },
     description: [
       "Launch a permitted read-only agent asynchronously.",
       "The call returns immediately with a stable delegation ID.",
@@ -2256,30 +1936,32 @@ function createDelegate(manager: DelegationManager): ReturnType<typeof tool> {
       "",
       "Do not use this tool for agents that write files, execute unrestricted shell commands, or perform external mutations.",
     ].join("\n"),
-    args: {
-      prompt: tool.schema
+    input: z.object({
+      prompt: z
         .string()
         .describe("Complete, self-contained English prompt for the child agent."),
-      agent: tool.schema
+      agent: z
         .string()
         .describe(
           `Permitted async agent. Configured agents: ${Array.from(ASYNC_AGENTS).join(", ")}`,
         ),
-    },
-    async execute(args: DelegateArgs, toolContext: ToolContext): Promise<string> {
+    }),
+    async execute(args: DelegateArgs, toolContext: ToolContext) {
       if (!toolContext?.sessionID) {
-        return "❌ delegate requires sessionID. This is a system error.";
+        return { content: "❌ delegate requires sessionID. This is a system error." };
       }
 
       if (!toolContext?.messageID) {
-        return "❌ delegate requires messageID. This is a system error.";
+        return { content: "❌ delegate requires messageID. This is a system error." };
       }
 
       try {
+        const manager = await getManager();
         const delegation = await manager.delegate({
+          context: toolContext,
           parentSessionID: toolContext.sessionID,
           parentMessageID: toolContext.messageID,
-          parentAgent: toolContext.agent || "build",
+          parentAgent: toolContext.agent,
           prompt: args.prompt,
           agent: args.agent,
         });
@@ -2292,64 +1974,59 @@ function createDelegate(manager: DelegationManager): ReturnType<typeof tool> {
           lines.push("", `${activeCount} delegations are active.`);
         }
 
-        lines.push(
-          `You will be notified when ${
-            activeCount > 1 ? "the active delegation cycle completes" : "it completes"
-          }. Do not poll.`,
-        );
+        lines.push("Native completion notifications arrive per child. Other children may still be running. Use delegation_read for durable output; it waits for finalization. Do not poll.");
 
-        return lines.join("\n");
+        return { content: lines.join("\n") };
       } catch (error) {
-        return [
+        if (toolContext.signal.aborted) throw error;
+        return { content: [
           "❌ Delegation failed:",
           "",
           error instanceof Error ? error.message : String(error),
-        ].join("\n");
+        ].join("\n") };
       }
     },
-  });
+  };
 }
 
-function createDelegationRead(manager: DelegationManager): ReturnType<typeof tool> {
-  return tool({
+function createDelegationRead(getManager: () => Promise<DelegationManager>) {
+  return { name: "delegation_read", options: { codemode: false },
     description: [
       "Read the persisted output of a delegation by ID.",
       "If the delegation is still running, this call may wait for its terminal state.",
     ].join("\n"),
-    args: {
-      id: tool.schema.string().describe("Delegation ID, for example elegant-blue-tiger."),
-    },
+    input: z.object({ id: z.string().describe("Delegation ID, for example elegant-blue-tiger.") }),
     async execute(
       args: {
         id: string;
       },
       toolContext: ToolContext,
-    ): Promise<string> {
+    ) {
       if (!toolContext?.sessionID) {
-        return "❌ delegation_read requires sessionID. This is a system error.";
+        return { content: "❌ delegation_read requires sessionID. This is a system error." };
       }
 
-      return await manager.readOutput(toolContext.sessionID, args.id);
+      return { content: await (await getManager()).readOutput(toolContext.sessionID, args.id, toolContext.signal) };
     },
-  });
+  };
 }
 
-function createDelegationList(manager: DelegationManager): ReturnType<typeof tool> {
-  return tool({
+function createDelegationList(getManager: () => Promise<DelegationManager>) {
+  return { name: "delegation_list", options: { codemode: false },
     description: [
       "List delegations in the current root-session scope.",
       "Use for recovery and inspection, not completion polling.",
     ].join("\n"),
-    args: {},
-    async execute(_args: Record<string, never>, toolContext: ToolContext): Promise<string> {
+    input: z.object({}),
+    async execute(_args: Record<string, never>, toolContext: ToolContext) {
       if (!toolContext?.sessionID) {
-        return "❌ delegation_list requires sessionID. This is a system error.";
+        return { content: "❌ delegation_list requires sessionID. This is a system error." };
       }
 
-      const delegations = await manager.listDelegations(toolContext.sessionID);
+      const delegations = await (await getManager()).listDelegations(toolContext.sessionID);
 
       if (delegations.length === 0) {
-        return "No delegations found for this session.";
+        return { content: "No delegations found for this session." };
       }
 
       const lines = delegations.map((delegation) => {
@@ -2360,9 +2037,9 @@ function createDelegationList(manager: DelegationManager): ReturnType<typeof too
         return `- **${delegation.id}**${title} [${delegation.status}]${unread}${description}`;
       });
 
-      return ["## Delegations", "", ...lines].join("\n");
+      return { content: ["## Delegations", "", ...lines].join("\n") };
     },
-  });
+  };
 }
 
 // ==========================================
@@ -2383,7 +2060,7 @@ Available tools:
 -  \`delegate(prompt, agent)\`: launch a permitted asynchronous agent
 -  \`delegation_read(id)\`: retrieve persisted delegation output
 -  \`delegation_list()\`: recover or inspect delegation state
--  \`task\`: run task-routed agents through OpenCode's native child-session path
+-  \`subagent\`: run task-routed agents through OpenCode's native child-session path
 
 ## Routing
 
@@ -2394,7 +2071,7 @@ Native-task agents:
 ${taskAgents}
 
 Use \`delegate\` for asynchronous agents.
-Use \`task\` for native-task agents.
+Use \`subagent\` for native-task agents.
 
 Do not route an agent through a different mechanism merely because both tools
 are visible. Incorrect routing is rejected at the tool boundary.
@@ -2408,6 +2085,7 @@ are visible. Incorrect routing is rejected at the tool boundary.
 5. Treat write-capable, shell-executing, or externally mutating work as
    native-task work unless the routing policy explicitly says otherwise.
 6. Do not assume a child result is verified merely because it reports success.
+7. Native notifications arrive per child, including cancellation; other children may still be running. For \`delegate\` work, artifact persistence may still be finishing: use \`delegation_read\` with its readable ID to await/reconcile output. No custom all-complete wakeup is sent.
 
 </delegation-system>
 </task-notification>`;
@@ -2500,23 +2178,24 @@ function formatDelegationContext(
 // PLUGIN EXPORT
 // ==========================================
 
-interface SystemTransformInput {
-  agent?: string;
-  sessionID?: string;
+// Workcell custom tool permissions are flat. Refuse resource-specific policy
+// rather than interpreting it as a blanket grant at an imperative tool boundary.
+function customEffect(rules: readonly { action: string; resource: string; effect: "allow" | "deny" | "ask" }[], action: string) {
+  const relevant = rules.filter(rule => new Bun.Glob(rule.action).match(action));
+  if (relevant.some(rule => rule.resource !== "*")) return "deny";
+  return relevant.at(-1)?.effect ?? "deny";
 }
 
-const BackgroundAgentsPlugin: Plugin = async (context) => {
-  const { client, directory } = context;
-
-  const typedClient = client as OpencodeClient;
-  const log = createLogger(typedClient);
+const BackgroundAgentsPlugin = Plugin.define({ id: "workcell-background-agents", async setup(context) {
+  const { directory } = context.location;
+  const log = createLogger();
   const projectID = await getProjectId(directory);
   const baseDirectory = path.join(
     os.homedir(),
     ".local",
     "share",
     "opencode",
-    "delegations",
+    "delegations-v2",
     projectID,
   );
 
@@ -2524,33 +2203,44 @@ const BackgroundAgentsPlugin: Plugin = async (context) => {
     recursive: true,
   });
 
-  const manager = new DelegationManager(typedClient, baseDirectory, log, { reviewProject: directory });
-
-  await manager.debugLog(
-    [
-      "BackgroundAgentsPlugin initialized",
-      `async=${Array.from(ASYNC_AGENTS).join(",")}`,
-      `task=${Array.from(TASK_AGENTS).join(",")}`,
-      `orchestrators=${Array.from(ORCHESTRATOR_AGENTS).join(",")}`,
-    ].join(" "),
-  );
-
-  return {
-    tool: {
-      review_start: tool({
+  let native: Tool.Info | undefined;
+  let manager: Promise<DelegationManager> | undefined;
+  const getManager = () => manager ??= currentHost(context).then(client => new DelegationManager(client, baseDirectory, log, { reviewProject: directory, storage: context.storage, nativeSubagent: native })).catch(error => { manager = undefined; throw error; });
+  const registrations: Array<{ dispose(): Promise<void> }> = [];
+  // Native permission assertion remains authoritative. The profile must grant
+  // exact async resources to delegate-capable agents under `subagent`, too.
+  // Never override a configured/session deny or impersonate a different caller.
+  // Direct subagent calls to those async resources are rejected below.
+  registrations.push(await context.tool.transform(editor => {
+      native = editor.get("subagent");
+      if (!native) throw new Error("Workcell requires the native V2 subagent executor");
+      editor.add({ name: "review_start", options: { codemode: false },
         description: "Start/resume a review with an agent-written scratch ledger. Other modes get a separate root review session; direct review mode reuses its root unless separate=true. Return sends an agent-written summary to the origin. Close removes owned scratch/worktree/artifacts, not host conversation history.",
-        args: { action: tool.schema.enum(["start", "resume", "status", "return", "close"]).default("start"), id: tool.schema.string().optional(), request: tool.schema.string().max(32000).default(""), separate: tool.schema.boolean().default(false), discard: tool.schema.boolean().default(false) },
-        execute: (args, ctx) => manager.review(args, ctx),
-      }),
-      worktree_review: tool({
+        input: z.object({ action: z.enum(["start", "resume", "status", "return", "close"]).default("start"), id: z.string().optional(), request: z.string().max(32000).default(""), separate: z.boolean().default(false), discard: z.boolean().default(false) }),
+        execute: async (args, ctx) => ({ content: await (await getManager()).review(args, ctx) }),
+      });
+      editor.add({ name: "worktree_review", options: { codemode: false },
         description: "Pin a full commit SHA in an owned detached review worktree. Optional pr fetches origin's PR head and checks the expected SHA. No development hooks/copies/terminal/snapshot commits. Resolve PR identity through native gh/Git first; wait for reviewers before changing the pin.",
-        args: { id: tool.schema.string(), head: tool.schema.string(), pr: tool.schema.number().int().positive().optional(), discard: tool.schema.boolean().default(false) },
-        execute: async (args) => manager.pinReview(args),
-      }),
-      delegate: createDelegate(manager),
-      delegation_read: createDelegationRead(manager),
-      delegation_list: createDelegationList(manager),
-    },
+        input: z.object({ id: z.string(), head: z.string(), pr: z.number().int().positive().optional(), discard: z.boolean().default(false) }),
+        execute: async (args) => ({ content: await (await getManager()).pinReview(args) }),
+      });
+      editor.add(createDelegate(getManager));
+      editor.add(createDelegationRead(getManager));
+      editor.add(createDelegationList(getManager));
+      for (const name of ["review_start", "worktree_review", "delegate", "delegation_read", "delegation_list"]) {
+        editor.update(name, tool => {
+          const execute = tool.execute;
+          tool.execute = async (args, ctx) => {
+            try { return await execute(args, ctx); }
+            catch (error) {
+              if (ctx.signal.aborted) throw error;
+              const message = typeof error === "object" && error !== null && "message" in error && typeof error.message === "string" ? error.message : String(error);
+              throw new Tool.Error({ message });
+            }
+          };
+        });
+      }
+  }));
 
     /**
      * Symmetric routing guard.
@@ -2558,51 +2248,22 @@ const BackgroundAgentsPlugin: Plugin = async (context) => {
      * Only explicitly task-routed agents may use native task. Async agents
      * receive delegate guidance; unknown agents are rejected.
      */
-    "tool.execute.before": async (
-      input: {
-        tool: string;
-      },
-      output: {
-        args?: {
-          subagent_type?: string;
-          agent?: string;
-        };
-      },
-    ) => {
-      if (input.tool !== "task") {
-        return;
-      }
-
-      const agentName = output.args?.subagent_type || output.args?.agent;
-
-      if (!agentName) {
-        return;
-      }
-
-      if (ASYNC_AGENTS.has(agentName)) {
-        throw new Error(
-          [
-            `❌ Agent "${agentName}" is configured for asynchronous delegation.`,
-            "",
-            `Use delegate(prompt, "${agentName}") instead of task.`,
-            "",
-            `Async agents: ${Array.from(ASYNC_AGENTS).join(", ")}`,
-            `Task-routed agents: ${Array.from(TASK_AGENTS).join(", ")}`,
-          ].join("\n"),
-        );
-      }
-
-      if (!TASK_AGENTS.has(agentName)) {
-        throw new Error(
-          [
-            `❌ Agent "${agentName}" is not configured for native task execution.`,
-            "",
-            `Task-routed agents: ${Array.from(TASK_AGENTS).join(", ")}`,
-            `Async agents: ${Array.from(ASYNC_AGENTS).join(", ")}`,
-          ].join("\n"),
-        );
-      }
-    },
+  registrations.push(await context.tool.hook("execute.before", async input => {
+    if (["delegate", "delegation_read", "delegation_list", "review_start", "worktree_review", "plan_read", "plan_save", "worktree_create", "worktree_delete"].includes(input.tool)) {
+      const { data: agent } = await context.agent.get({ agentID: input.agent });
+      const session = await context.session.get({ sessionID: input.sessionID });
+      const effect = customEffect([...agent.permissions, ...(session.permissions ?? [])], input.tool);
+      // Catalog visibility is not execution authorization. Custom actions have
+      // no public ask primitive; never turn an ask into an implicit grant.
+      if (effect !== "allow") throw new Error(`${input.tool} requires an explicit allow in this session's policy (effective: ${effect})`);
+    }
+    if (input.tool === "subagent") {
+      const args = z.object({ agent: z.string() }).parse(input.input);
+      if (!TASK_AGENTS.has(args.agent)) throw new Error(ASYNC_AGENTS.has(args.agent) ? `Use delegate for async agent ${args.agent}; direct subagent execution is forbidden` : `Agent ${args.agent} is not configured for native subagent execution`);
+    }
+    // No tool effects may outlive review ownership, including native tools.
+    if (input.tool !== "review_start") await (await getManager()).assertReviewOpen(input.sessionID);
+  }));
 
     /**
      * Only orchestration agents need delegation instructions.
@@ -2610,28 +2271,31 @@ const BackgroundAgentsPlugin: Plugin = async (context) => {
      * Child agents and metadata sessions do not receive irrelevant
      * orchestration policy.
      */
-    "experimental.chat.system.transform": async (input: SystemTransformInput, output) => {
-      if (!input.agent || !ORCHESTRATOR_AGENTS.has(input.agent)) {
-        return;
-      }
-
-      output.system.push(DELEGATION_RULES);
-    },
+  registrations.push(await context.session.hook("context", async input => {
+    const manager = await getManager();
+    await manager.assertReviewOpen(input.sessionID);
+    await manager.listDelegations(input.sessionID);
+    const { data: agent } = await context.agent.get({ agentID: input.agent });
+    const session = await context.session.get({ sessionID: input.sessionID });
+    const rules = [...agent.permissions, ...(session.permissions ?? [])].reverse();
+    // Async resource grants authorize the internal delegate executor, not a
+    // newly advertised native route for plan/debug/review. Native execution
+    // still owns authorization; this only filters the model's tool catalog.
+    if (![...TASK_AGENTS].some(target => rules.find(rule => new Bun.Glob(rule.action).match("subagent") && new Bun.Glob(rule.resource).match(target))?.effect !== "deny")) delete input.tools.subagent;
+    if (ORCHESTRATOR_AGENTS.has(input.agent)) input.system.push({ type: "text", text: DELEGATION_RULES });
+    if (ASYNC_AGENTS.has(input.agent)) {
+      for (const name of ["subagent", "delegate", "todowrite", "plan_save", ...(input.agent === "reviewer" ? [] : ["delegation_read", "delegation_list"])]) delete input.tools[name];
+    }
+  }));
 
     /**
      * Preserve active and unread delegation state across context
      * compaction.
      */
-    "experimental.session.compacting": async (
-      input: {
-        sessionID: string;
-      },
-      output: {
-        context: string[];
-        prompt?: string;
-      },
-    ) => {
+  registrations.push(await context.session.hook("compaction", async input => {
+      const manager = await getManager();
       const rootSessionID = await manager.getRootSessionID(input.sessionID);
+      await manager.listDelegations(rootSessionID);
 
       const running = manager.getRunningDelegations(rootSessionID).map((delegation) => ({
         id: delegation.id,
@@ -2659,62 +2323,21 @@ const BackgroundAgentsPlugin: Plugin = async (context) => {
         return;
       }
 
-      output.context.push(formatDelegationContext(running, unreadCompleted));
-    },
-
-    event: async ({ event }: { event: Event }): Promise<void> => {
-      if (event.type === "session.status") {
-        const eventProperties = event.properties as {
-          sessionID?: string;
-          status?: {
-            type?: string;
-          };
-        };
-
-        if (eventProperties.status?.type === "idle" && eventProperties.sessionID) {
-          await manager.handleSessionIdle(eventProperties.sessionID);
-        }
-
-        return;
-      }
-
-      if (event.type === "session.idle") {
-        const eventProperties = event.properties as {
-          sessionID?: string;
-        };
-
-        if (eventProperties.sessionID) {
-          await manager.handleSessionIdle(eventProperties.sessionID);
-        }
-
-        return;
-      }
-
-      if (event.type === "message.updated") {
-        const eventProperties = event.properties as {
-          info: {
-            sessionID?: string;
-            role?: string;
-          };
-          parts?: Part[];
-        };
-
-        const sessionID = eventProperties.info.sessionID;
-
-        if (!sessionID) {
-          return;
-        }
-
-        const messageText =
-          eventProperties.info.role === "assistant"
-            ? extractTextFromParts(eventProperties.parts) || undefined
-            : undefined;
-
-        manager.handleMessageEvent(sessionID, messageText);
-      }
-    },
+      input.system.push({ type: "text", text: formatDelegationContext(running, unreadCompleted) });
+  }));
+  const eventsAbort = new AbortController();
+  const events = (async () => {
+    for await (const event of context.event.subscribe({ signal: eventsAbort.signal })) {
+      if (manager && event.type === "session.text.delta") (await manager).handleMessageEvent(event.data.sessionID, event.data.delta);
+    }
+  })().catch(error => { if (!eventsAbort.signal.aborted) log.warn(`Delegation event stream failed: ${error}`); });
+  return async () => {
+    eventsAbort.abort();
+    await events;
+    await Promise.all(registrations.map(registration => registration.dispose()));
+    if (manager) (await manager).dispose();
   };
-};
+} });
 
 const BackgroundAgentsPluginWithInternals = Object.assign(BackgroundAgentsPlugin, {
   testInternals: {

@@ -3,7 +3,7 @@
   "name": "matthewmorek",
   "author": "Matthew Morek",
   "version": "0.5.2",
-  "opencode": "1.18.25",
+  "opencode": "2.0.12",
   "ocx": "2.0.14",
   "components": [
     {
@@ -14,6 +14,10 @@
         {
           "path": "plugins/kdco-primitives/index.ts",
           "target": "plugins/kdco-primitives/index.ts",
+        },
+        {
+          "path": "plugins/kdco-primitives/current-host.ts",
+          "target": "plugins/kdco-primitives/current-host.ts",
         },
         {
           "path": "plugins/kdco-primitives/get-project-id.ts",
@@ -48,6 +52,7 @@
           "target": "plugins/kdco-primitives/with-timeout.ts",
         },
       ],
+      "npmDependencies": ["@opencode/client@2.0.12", "@opencode/plugin@2.0.12"],
     },
     {
       "name": "workcell-review-plugin",
@@ -72,8 +77,9 @@
       ],
       "dependencies": ["workcell-primitives", "workcell-review-plugin"],
       "npmDependencies": [
-        "@opencode-ai/plugin@1.18.25",
+        "@opencode/plugin@2.0.12",
         "unique-names-generator@4.7.1",
+        "zod@4.3.5",
       ],
     },
     {
@@ -87,7 +93,7 @@
         },
       ],
       "dependencies": ["workcell-background-agents", "workcell-primitives"],
-      "npmDependencies": ["@opencode-ai/plugin@1.18.25", "zod@4.3.5"],
+      "npmDependencies": ["@opencode/plugin@2.0.12", "zod@4.3.5"],
     },
     {
       "name": "workcell-agent-coder",
@@ -272,12 +278,15 @@
     {
       "name": "workcell-notify",
       "type": "plugin",
-      "description": "Local terminal and desktop notification plugin.",
+      "description": "Client-local cmux status; native OpenCode owns terminal titles and desktop alerts.",
       "files": [
-        { "path": "plugins/notify.ts", "target": "plugins/notify.ts" },
         {
-          "path": "plugins/notify/backend.ts",
-          "target": "plugins/notify/backend.ts",
+          "path": "plugins/notify/server.ts",
+          "target": "plugins/notify/server.ts",
+        },
+        {
+          "path": "plugins/notify/tui.ts",
+          "target": "plugins/notify/tui.ts",
         },
         {
           "path": "plugins/notify/cmux.ts",
@@ -287,13 +296,9 @@
           "path": "plugins/notify/status.ts",
           "target": "plugins/notify/status.ts",
         },
-        {
-          "path": "plugins/notify/title.ts",
-          "target": "plugins/notify/title.ts",
-        },
       ],
-      "dependencies": ["workcell-primitives", "workcell-worktree"],
-      "npmDependencies": ["node-notifier@10.0.1", "detect-terminal@2.0.0"],
+      "dependencies": ["workcell-primitives"],
+      "npmDependencies": ["@opencode/plugin@2.0.12"],
     },
     {
       "name": "workcell-worktree",
@@ -316,7 +321,7 @@
       ],
       "dependencies": ["workcell-primitives"],
       "npmDependencies": [
-        "@opencode-ai/plugin@1.18.25",
+        "@opencode/plugin@2.0.12",
         "zod@4.3.5",
         "jsonc-parser@3.3.1",
       ],

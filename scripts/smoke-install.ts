@@ -23,10 +23,9 @@ const expectedReceiptComponentCount = 26;
 
 export const npmPolicyContent = "min-release-age=7\nengine-strict=false\n";
 export const expectedDirectNpmDependencies = Object.freeze({
-  "@opencode-ai/plugin": "1.18.25",
-  "detect-terminal": "2.0.0",
+  "@opencode/client": "2.0.12",
+  "@opencode/plugin": "2.0.12",
   "jsonc-parser": "3.3.1",
-  "node-notifier": "10.0.1",
   "unique-names-generator": "4.7.1",
   zod: "4.3.5",
 } as const);

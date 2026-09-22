@@ -105,7 +105,7 @@ export function buildSessionLaunchArgv(
 	}
 
 	if (launchMetadata.mode === "plain") {
-		return ["opencode", "--session", normalizedSessionID]
+		return ["opencode2", "--session", normalizedSessionID]
 	}
 
 	return [

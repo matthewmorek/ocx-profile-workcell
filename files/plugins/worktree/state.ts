@@ -4,7 +4,7 @@
  * Provides atomic, crash-safe persistence for worktree sessions and pending operations.
  * Uses bun:sqlite for zero external dependencies.
  *
- * Database location: ~/.local/share/opencode/plugins/worktree/{project-id}.sqlite
+ * Database location: ~/.local/share/opencode/plugins/worktree-v2/{project-id}.sqlite
  * Project ID is the first git root commit SHA (40-char hex), with SHA-256 path hash fallback (16-char).
  */
 
@@ -112,11 +112,12 @@ export async function getWorktreePath(
 
 /**
  * Get the database directory path.
- * Location: ~/.local/share/opencode/plugins/worktree/
+ * Location: ~/.local/share/opencode/plugins/worktree-v2/
  */
 function getDbDirectory(): string {
 	const home = os.homedir()
-	return path.join(home, ".local", "share", "opencode", "plugins", "worktree")
+	// V1 session IDs and pending cleanup rows must never be adopted by V2.
+	return path.join(home, ".local", "share", "opencode", "plugins", "worktree-v2")
 }
 
 /**
